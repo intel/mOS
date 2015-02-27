@@ -16,3 +16,7 @@
 
 obj-$(CONFIG_MOS_FOR_HPC) += mos.o
 obj-$(CONFIG_MOS_FOR_HPC) += lwkcpu.o lwkctrl.o
+
+obj-$(CONFIG_MOS_LWKMEM) += mem_mgmt.o
+obj-$(CONFIG_MOS_LWKMEM) += mmap.o
+obj-$(CONFIG_MOS_LWKMEM) += binfmt_elf.o

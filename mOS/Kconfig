@@ -52,4 +52,12 @@ comment "!RCU_FAST_NO_HZ recommended for mOS"
 comment "RCU_NOCB_CPU_ALL recommended for mOS"
 	depends on !RCU_NOCB_CPU_ALL
 
+config MOS_LWKMEM
+        bool "Enable the optional lwkmem component"
+        depends on MOS_FOR_HPC
+        ---help---
+          Enable the alternative Light-Weight Kernel memory component.
+
+          Unless you operate a top-500 supercomputer, say N.
+
 endif	# if MOS_FOR_HPC

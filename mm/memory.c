@@ -64,6 +64,7 @@
 #include <linux/debugfs.h>
 #include <linux/userfaultfd_k.h>
 #include <linux/dax.h>
+#include <linux/mos.h>
 
 #include <asm/io.h>
 #include <asm/mmu_context.h>
@@ -552,6 +553,14 @@ void free_pgtables(struct mmu_gather *tlb, struct vm_area_struct *vma,
 		unlink_anon_vmas(vma);
 		unlink_file_vma(vma);
 
+#ifdef CONFIG_MOS_LWKMEM
+		if (is_lwkmem(vma)) {
+			free_pgd_range(tlb, addr, vma->vm_end, floor, next? next->vm_start: ceiling);
+			vma = next;
+			continue;
+		}
+#endif /* CONFIG_MOS_LWKMEM */
+
 		if (is_vm_hugetlb_page(vma)) {
 			hugetlb_free_pgd_range(tlb, addr, vma->vm_end,
 				floor, next? next->vm_start: ceiling);
@@ -897,8 +906,66 @@ copy_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	 * in the parent and the child
 	 */
 	if (is_cow_mapping(vm_flags)) {
+#ifdef CONFIG_MOS_LWKMEM
+		if (is_lwkmem(vma)) {
+			/*
+			 * COW disabled for LWK memory because the CoW fault
+			 * could leak LWK pages in the child (when the child
+			 * dies) and/or pollute LWK memory with ordinary
+			 * pages in the parent (when new pages are allocated
+			 * to the partent if the parent memory is written to
+			 * before the child memory).
+			 * Instead of using COW we copy all the data from the
+			 * parent to ordinary pages in the child's VM.
+			 */
+			struct page *dst_page;
+			struct mem_cgroup *memcg;
+			unsigned long mmun_end = 0;
+			unsigned long mmun_start = 0;
+			struct page *src_page = virt_to_page(addr);
+			struct vm_area_struct *dst_vma = find_vma(dst_mm, addr);
+
+			BUG_ON(!src_page);
+			BUG_ON(!dst_vma);
+			if (unlikely(anon_vma_prepare(dst_vma)))
+				return -ENOMEM;
+			dst_page = alloc_page_vma(GFP_HIGHUSER_MOVABLE,
+				dst_vma, addr);
+			if (!dst_page)
+				return -ENOMEM;
+			copy_user_highpage(dst_page, src_page, addr, dst_vma);
+			__SetPageUptodate(dst_page);
+			if (mem_cgroup_try_charge(dst_page, dst_mm, GFP_KERNEL,
+				  &memcg, false)) {
+				put_page(dst_page);
+				return -ENOMEM;
+			}
+			mmun_start = addr & PAGE_MASK;
+			mmun_end = mmun_start + PAGE_SIZE;
+			mmu_notifier_invalidate_range_start(dst_mm, mmun_start,
+				mmun_end);
+			flush_cache_page(dst_vma, addr, pte_pfn(dst_pte));
+			pte = mk_pte(dst_page, dst_vma->vm_page_prot);
+			pte = maybe_mkwrite(pte_mkdirty(pte), dst_vma);
+			ptep_clear_flush_notify(dst_vma, addr, dst_pte);
+			page_add_new_anon_rmap(dst_page, dst_vma, addr, false);
+			mem_cgroup_commit_charge(dst_page, memcg, false, false);
+			lru_cache_add_active_or_unevictable(dst_page, dst_vma);
+			set_pte_at_notify(dst_mm, addr, dst_pte, pte);
+			update_mmu_cache(dst_vma, addr, dst_pte);
+			put_page(dst_page);
+			atomic_dec(&dst_page->_mapcount);
+			if (mmun_end > mmun_start)
+				mmu_notifier_invalidate_range_end(dst_mm,
+					mmun_start, mmun_end);
+		} else {
+			ptep_set_wrprotect(src_mm, addr, src_pte);
+			pte = pte_wrprotect(pte);
+		}
+#else
 		ptep_set_wrprotect(src_mm, addr, src_pte);
 		pte = pte_wrprotect(pte);
+#endif
 	}
 
 	/*
@@ -974,6 +1041,10 @@ again:
 	pte_unmap_unlock(orig_dst_pte, dst_ptl);
 	cond_resched();
 
+#ifdef CONFIG_MOS_LWKMEM
+	if (entry.val == -ENOMEM)
+		return -ENOMEM;
+#endif
 	if (entry.val) {
 		if (add_swap_count_continuation(entry, GFP_KERNEL) < 0)
 			return -ENOMEM;
@@ -1167,7 +1238,7 @@ again:
 				    likely(!(vma->vm_flags & VM_SEQ_READ)))
 					mark_page_accessed(page);
 			}
-			rss[mm_counter(page)]--;
+			rss[mm_counter(page)] -= is_lwkpg(page) ? 0 : 1;
 			page_remove_rmap(page, false);
 			if (unlikely(page_mapcount(page) < 0))
 				print_bad_pte(vma, addr, ptent, page);
@@ -1190,7 +1261,7 @@ again:
 			struct page *page;
 
 			page = migration_entry_to_page(entry);
-			rss[mm_counter(page)]--;
+			rss[mm_counter(page)] -= is_lwkpg(page) ? 0 : 1;
 		}
 		if (unlikely(!free_swap_and_cache(entry)))
 			print_bad_pte(vma, addr, ptent, NULL);
@@ -1237,6 +1308,18 @@ static inline unsigned long zap_pmd_range(struct mmu_gather *tlb,
 	pmd = pmd_offset(pud, addr);
 	do {
 		next = pmd_addr_end(addr, end);
+
+#ifdef CONFIG_MOS_LWKMEM
+		if (is_lwkmem(vma)) {
+			if (LWK_PAGE_SHIFT(vma) >= PMD_SHIFT) {
+				/* FIXME: Not sure I need this */
+				tlb_remove_pmd_tlb_entry(tlb, pmd, addr);
+				/* Don't drop into the trans_huge code below */
+				goto next;
+			}
+		}
+#endif /* CONFIG_MOS_LWKMEM */
+
 		if (pmd_trans_huge(*pmd) || pmd_devmap(*pmd)) {
 			if (next - addr != HPAGE_PMD_SIZE) {
 				VM_BUG_ON_VMA(vma_is_anonymous(vma) &&
@@ -2151,6 +2234,8 @@ static int wp_page_copy(struct fault_env *fe, pte_t orig_pte,
 	const unsigned long mmun_start = fe->address & PAGE_MASK;
 	const unsigned long mmun_end = mmun_start + PAGE_SIZE;
 	struct mem_cgroup *memcg;
+
+	WARN_ON(is_lwkmem(vma));
 
 	if (unlikely(anon_vma_prepare(vma)))
 		goto oom;
@@ -3477,6 +3562,9 @@ static int handle_pte_fault(struct fault_env *fe)
 		 * ptl lock held. So here a barrier will do.
 		 */
 		barrier();
+#ifdef CONFIG_MOS_LWKMEM
+		WARN_ON(is_lwkmem(fe->vma)); /* This shouldn't happen. */
+#endif
 		if (pte_none(entry)) {
 			pte_unmap(fe->pte);
 			fe->pte = NULL;
