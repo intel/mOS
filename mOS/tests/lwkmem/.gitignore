@@ -1,0 +1,12 @@
+heaptest
+lwkprocess
+maptest
+alignmenttest
+options
+get_addr_test
+munmap
+mapfixed
+xpmem
+xpmem_invalid_usage
+xpmem_mem_types
+protnone

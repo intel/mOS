@@ -19,6 +19,7 @@
 #include <linux/shmem_fs.h>
 #include <linux/uaccess.h>
 #include <linux/pkeys.h>
+#include <linux/mos.h>
 
 #include <asm/elf.h>
 #include <asm/tlb.h>
