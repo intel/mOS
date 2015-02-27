@@ -2225,6 +2225,16 @@ bytes respectively. Such letter suffixes can also be entirely omitted.
 			light weight kernel. These CPUs are implicitly set
 			as "isolcpus" within the Linux kernel.
 
+	lwkmem=		[KNL]
+                        Designate memory for use by the mOS LWK. The amount
+			of memory requested is specified in parse_mem
+			format (K,M,G).  Or designate memory via NUMA domain.
+			Example: lwkmem=126G
+			Example: lwkmem=0:58G,1:58G
+
+	lwkmem_debug=	[KNL]
+                        Set debug level for the lwkmem subsystem.
+
 	machvec=	[IA-64] Force the use of a particular machine-vector
 			(machvec) in a generic kernel.
 			Example: machvec=hpzx1_swiotlb
@@ -4238,7 +4248,7 @@ bytes respectively. Such letter suffixes can also be entirely omitted.
 			See also Documentation/input/joystick-parport.txt
 
 	udbg-immortal	[PPC] When debugging early kernel crashes that
-			happen after console_init() and before a proper 
+			happen after console_init() and before a proper
 			console driver takes over, this boot options might
 			help "seeing" what's going on.
 

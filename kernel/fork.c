@@ -609,6 +609,12 @@ static __latent_entropy int dup_mmap(struct mm_struct *mm,
 		if (!tmp)
 			goto fail_nomem;
 		*tmp = *mpnt;
+#ifdef CONFIG_MOS_LWKMEM
+		/* Copied LWK memory areas are not LWK memory. */
+		if (is_lwkmem(tmp))
+			tmp->vm_private_data = (void *) ((unsigned long)
+				tmp->vm_private_data & _LWKMEM_MASK);
+#endif
 		INIT_LIST_HEAD(&tmp->anon_vma_chain);
 		retval = vma_dup_policy(mpnt, tmp);
 		if (retval)
@@ -1723,10 +1729,17 @@ static __latent_entropy struct task_struct *copy_process(
 	}
 
 #ifdef CONFIG_MOS_FOR_HPC
-	p->mos_flags = current->mos_flags;
-	p->mos_process = current->mos_process;
-	if (current->mos_process)
-		atomic_inc(&current->mos_process->alive);
+	if (clone_flags & CLONE_THREAD) {
+		/* A copy of an LWK thread is also an LWK thread. */
+		p->mos_flags = current->mos_flags;
+		p->mos_process = current->mos_process;
+		if (current->mos_process)
+			atomic_inc(&current->mos_process->alive);
+	} else {
+		/* A copy of an LWK process is not an LWK process. */
+		p->mos_flags = current->mos_flags & ~MOS_IS_LWK_PROCESS;
+		p->mos_process = NULL;
+	}
 #endif
 
 	p->nr_dirtied = 0;
