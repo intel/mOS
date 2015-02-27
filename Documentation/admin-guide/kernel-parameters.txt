@@ -2204,6 +2204,16 @@
 			part of	Linux kernel command line. If nothing is specif-
 			-ied as part of Linux command line then the 'normal' pr-
 			-ofile will be set by the kernel during the kernel boot.
+ 
+	lwkmem=		[KNL]
+                        Designate memory for use by the mOS LWK. The amount
+			of memory requested is specified in parse_mem
+			format (K,M,G).  Or designate memory via NUMA domain.
+			Example: lwkmem=126G
+			Example: lwkmem=0:58G,1:58G
+
+	lwkmem_debug=	[KNL]
+                        Set debug level for the lwkmem subsystem.
 
 	machvec=	[IA-64] Force the use of a particular machine-vector
 			(machvec) in a generic kernel.
