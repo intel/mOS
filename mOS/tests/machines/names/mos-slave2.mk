@@ -1,0 +1,1 @@
+mos-slave1.mk

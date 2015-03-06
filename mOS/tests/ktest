@@ -1,0 +1,110 @@
+#!/bin/bash
+
+fatal () {
+	echo "$@" 1>&2
+	exit 1
+}
+
+getopt -T
+[ $? -eq 4 ] || fatal "$0: `which getopt` is too ancient, abort"
+
+sopts="j:m:k:o:"
+lopts="help,jobs:,machine:,coverage,kernel:,output:,scripts:,logfile:"
+ARGS=`getopt -n "$0" -s bash -o "$sopts" -l "$lopts" -- "$@"`
+[ $? -eq 0 ] || exit 2
+
+eval set -- "$ARGS"
+while :; do
+	case "$1" in
+	--help)
+		cat <<EOF
+Usage: $0 [options] [test-suite]
+Options:
+  --help	            Display this information
+  -j, --jobs N              Pass -jN when invoking make
+  -m, --machine MACHINE     Default test machine
+  --coverage                Enable kernel code coverage
+  -k, --kernel PATH         Path to pristine kernel source
+  -o, --output PATH         Path for build output
+  --scripts PATH            Path to auto/scripts checkout
+  --logfile PATH            Path for ktest log
+
+The <test-suite> argument must correspond to an existing .conf file in
+the ktests directory next to this script.
+
+The following MACHINEs are supported:
+$(cd $(dirname "$0")/machines/names
+ls -T0 -C *.mk | sed -e 's/\.mk/   /g' -e 's/^/  /')
+EOF
+		exit 0;;
+	-j|--jobs)
+		export CI_NUMJOBS="$2"
+		shift 2;;
+	-m|--machine)
+		export KTEST_MACHINE="$2"
+		shift 2;;
+	--coverage)
+		export KTEST_CONFIG_OPTIONS="$KTEST_CONFIG_OPTIONS gcov"
+		shift 1;;
+	-k|--kernel)
+		export KTEST_KERNEL="$2"
+		shift 2;;
+	-o|--output)
+		export KTEST_OUTPUT="$2"
+		shift 2;;
+	--scripts)
+		export KTEST_SCRIPTS="$2"
+		shift 2;;
+	--logfile)
+		logfile="$2"
+		shift 2;;
+	--)
+		shift
+		break;;
+	*)
+		fatal "$0: error parsing command line, abort";;
+	esac
+done
+
+[ $# -le 1 ] || fatal "$0: specify at most one test-suite, abort"
+
+export KTEST_TESTS="$(dirname "$(realpath "$0")")"
+worktree="$(dirname "$(dirname "$KTEST_TESTS")")"
+
+[ -n "$KTEST_MACHINE" ] || export KTEST_MACHINE="ktest-vm-centos"
+[ -n "$KTEST_KERNEL" ] || export KTEST_KERNEL="$worktree"
+[ -n "$KTEST_OUTPUT" ] || export KTEST_OUTPUT="`pwd`/KTEST"
+export PATH="$KTEST_OUTPUT/bin:$KTEST_TESTS/bin:$PATH"
+
+[ -z "$KTEST_SCRIPTS" ] && for p in ../auto ../kernels.scripts; do
+	if [ -x "$worktree/$p/config" ]; then
+		export KTEST_SCRIPTS="$worktree/$p"
+		break
+	fi
+done
+[ -z "$KTEST_SCRIPTS" ] && fatal "$0: could not find auto/scripts checkout"
+
+set -e
+cd "$KTEST_TESTS"
+
+mkdir -p "$KTEST_OUTPUT/bin"
+make --quiet -f "$KTEST_TESTS/bin/Makefile" \
+	-C "$KTEST_OUTPUT/bin" VPATH="$KTEST_TESTS/bin"
+
+cat > "$KTEST_OUTPUT/ktest.conf" <<EOF
+THIS_DIR := `pwd`
+
+KTEST_MACHINE := $KTEST_MACHINE
+KTEST_KERNEL := $KTEST_KERNEL
+KTEST_TESTS := $KTEST_TESTS
+KTEST_OUTPUT := $KTEST_OUTPUT
+KTEST_BUILD_OPTIONS := ${CI_NUMJOBS:+-j}${CI_NUMJOBS}
+
+LOG_FILE = ${logfile:-$KTEST_OUTPUT/ktest.log}
+
+INCLUDE ktests/${1:-smoke-test}.conf
+EOF
+
+# 4.x version doesn't seem to work without a TTY
+exec with-pty -l -- "$worktree"/tools/testing/ktest/ktest.pl \
+	"$KTEST_OUTPUT/ktest.conf"

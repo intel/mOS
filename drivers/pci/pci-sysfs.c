@@ -28,6 +28,7 @@
 #include <linux/pm_runtime.h>
 #include <linux/of.h>
 #include "pci.h"
+#include <linux/mos.h>
 
 static int sysfs_initialized;	/* = 0 */
 
@@ -86,6 +87,10 @@ static ssize_t pci_dev_show_local_cpu(struct device *dev, bool list,
 #else
 	mask = cpumask_of_pcibus(to_pci_dev(dev)->bus);
 #endif
+
+	if (IS_ENABLED(CONFIG_MOS_FOR_HPC))
+		return cpumap_print_mos_view_cpumask(list, buf, mask);
+
 	return cpumap_print_to_pagebuf(list, buf, mask);
 }
 

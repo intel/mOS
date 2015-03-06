@@ -358,6 +358,12 @@
 434	common	pidfd_open		__x64_sys_pidfd_open
 435	common	clone3			__x64_sys_clone3/ptregs
 
+# mOS system calls
+509	64	mos_mwait               __x64_sys_mos_mwait
+510	64	mos_get_addr_info	__x64_sys_mos_get_addr_info
+511	64	mos_set_clone_attr	__x64_sys_mos_set_clone_attr
+# end of mOS system calls
+
 #
 # x32-specific system call numbers start at 512 to avoid cache impact
 # for native 64-bit operation. The __x32_compat_sys stubs are created

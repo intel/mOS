@@ -11,6 +11,7 @@
 #include <linux/nospec.h>
 
 #include <linux/kcov.h>
+#include <linux/mos.h>
 
 #include <asm/switch_to.h>
 #include <asm/tlb.h>
