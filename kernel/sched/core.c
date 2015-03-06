@@ -75,6 +75,7 @@
 #include <linux/compiler.h>
 #include <linux/frame.h>
 #include <linux/prefetch.h>
+#include <linux/mos.h>
 
 #include <asm/switch_to.h>
 #include <asm/tlb.h>

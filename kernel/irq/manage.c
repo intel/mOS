@@ -18,6 +18,7 @@
 #include <linux/sched.h>
 #include <linux/sched/rt.h>
 #include <linux/task_work.h>
+#include <linux/mos.h>
 
 #include "internals.h"
 
@@ -250,6 +251,18 @@ int __irq_set_affinity(unsigned int irq, const struct cpumask *mask, bool force)
 		return -EINVAL;
 
 	raw_spin_lock_irqsave(&desc->lock, flags);
+#ifdef CONFIG_MOS_FOR_HPC
+	if (!cpumask_full(this_cpu_ptr(&lwkcpus_mask))) {
+		static int cpu = -1;
+
+		cpu = cpumask_next_zero(cpu, this_cpu_ptr(&lwkcpus_mask));
+		if (cpu >= nr_cpu_ids ||
+		    !cpumask_intersects(get_cpu_mask(cpu), cpu_present_mask)) {
+			cpu = cpumask_next_zero(-1, this_cpu_ptr(&lwkcpus_mask));
+		}
+		mask = get_cpu_mask(cpu);
+	}
+#endif
 	ret = irq_set_affinity_locked(irq_desc_get_irq_data(desc), mask, force);
 	raw_spin_unlock_irqrestore(&desc->lock, flags);
 	return ret;

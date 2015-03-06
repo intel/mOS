@@ -76,6 +76,7 @@
 #include <linux/compiler.h>
 #include <linux/sysctl.h>
 #include <linux/kcov.h>
+#include <linux/mos.h>
 
 #include <asm/pgtable.h>
 #include <asm/pgalloc.h>
@@ -1720,6 +1721,13 @@ static __latent_entropy struct task_struct *copy_process(
 		p->group_leader = p;
 		p->tgid = p->pid;
 	}
+
+#ifdef CONFIG_MOS_FOR_HPC
+	p->mos_flags = current->mos_flags;
+	p->mos_process = current->mos_process;
+	if (current->mos_process)
+		atomic_inc(&current->mos_process->alive);
+#endif
 
 	p->nr_dirtied = 0;
 	p->nr_dirtied_pause = 128 >> (PAGE_SHIFT - 10);

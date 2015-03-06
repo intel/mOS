@@ -79,6 +79,10 @@ union bpf_attr;
 #include <linux/quota.h>
 #include <linux/key.h>
 #include <trace/syscall.h>
+#include <linux/mos.h>
+
+static inline void __mos_linux_enter(void *sys_wrap);
+static inline void __mos_linux_leave(void *sys_wrap);
 
 /*
  * __MAP - apply a macro to syscall arguments
@@ -175,9 +179,24 @@ extern struct trace_event_functions exit_syscall_print_funcs;
 #define SYSCALL_METADATA(sname, nb, ...)
 #endif
 
-#define SYSCALL_DEFINE0(sname)					\
-	SYSCALL_METADATA(_##sname, 0);				\
-	asmlinkage long sys_##sname(void)
+#define SYSCALL_DEFINE0(sname)						\
+	SYSCALL_METADATA(_##sname, 0);					\
+	static inline long SYSC0##sname(void);				\
+	asmlinkage long lwk_sys_##sname(void) __attribute__((weak));;	\
+	asmlinkage long sys_##sname(void)				\
+	{								\
+		long ret;						\
+		if (lwk_sys_##sname && is_mostask()) {			\
+			ret = lwk_sys_##sname();			\
+			if (ret != -ENOSYS) goto out0;			\
+		}							\
+		__mos_linux_enter(sys_##sname);				\
+		ret = SYSC0##sname();					\
+		__mos_linux_leave(sys_##sname);				\
+out0:									\
+		return ret;						\
+	}								\
+	static inline long SYSC0##sname(void)
 
 #define SYSCALL_DEFINE1(name, ...) SYSCALL_DEFINEx(1, _##name, __VA_ARGS__)
 #define SYSCALL_DEFINE2(name, ...) SYSCALL_DEFINEx(2, _##name, __VA_ARGS__)
@@ -191,18 +210,27 @@ extern struct trace_event_functions exit_syscall_print_funcs;
 	__SYSCALL_DEFINEx(x, sname, __VA_ARGS__)
 
 #define __PROTECT(...) asmlinkage_protect(__VA_ARGS__)
-#define __SYSCALL_DEFINEx(x, name, ...)					\
-	asmlinkage long sys##name(__MAP(x,__SC_DECL,__VA_ARGS__))	\
-		__attribute__((alias(__stringify(SyS##name))));		\
-	static inline long SYSC##name(__MAP(x,__SC_DECL,__VA_ARGS__));	\
-	asmlinkage long SyS##name(__MAP(x,__SC_LONG,__VA_ARGS__));	\
-	asmlinkage long SyS##name(__MAP(x,__SC_LONG,__VA_ARGS__))	\
-	{								\
-		long ret = SYSC##name(__MAP(x,__SC_CAST,__VA_ARGS__));	\
-		__MAP(x,__SC_TEST,__VA_ARGS__);				\
-		__PROTECT(x, ret,__MAP(x,__SC_ARGS,__VA_ARGS__));	\
-		return ret;						\
-	}								\
+#define __SYSCALL_DEFINEx(x, name, ...)						\
+	asmlinkage long sys##name(__MAP(x,__SC_DECL,__VA_ARGS__))		\
+		__attribute__((alias(__stringify(SyS##name))));			\
+	static inline long SYSC##name(__MAP(x,__SC_DECL,__VA_ARGS__));		\
+	asmlinkage long lwk_sys##name(__MAP(x,__SC_DECL,__VA_ARGS__)) __attribute__((weak));;	\
+	asmlinkage long SyS##name(__MAP(x,__SC_LONG,__VA_ARGS__));		\
+	asmlinkage long SyS##name(__MAP(x,__SC_LONG,__VA_ARGS__))		\
+	{									\
+		long ret;							\
+		if (lwk_sys##name && is_mostask()) {				\
+			ret = lwk_sys##name(__MAP(x,__SC_CAST,__VA_ARGS__));	\
+			if (ret != -ENOSYS) goto out;				\
+		}								\
+		__mos_linux_enter(sys##name);					\
+		ret = SYSC##name(__MAP(x,__SC_CAST,__VA_ARGS__));		\
+		__mos_linux_leave(sys##name);					\
+out:										\
+		__MAP(x,__SC_TEST,__VA_ARGS__);					\
+		__PROTECT(x, ret,__MAP(x,__SC_ARGS,__VA_ARGS__));		\
+		return ret;							\
+	}									\
 	static inline long SYSC##name(__MAP(x,__SC_DECL,__VA_ARGS__))
 
 asmlinkage long sys32_quotactl(unsigned int cmd, const char __user *special,
@@ -902,5 +930,13 @@ asmlinkage long sys_pkey_mprotect(unsigned long start, size_t len,
 				  unsigned long prot, int pkey);
 asmlinkage long sys_pkey_alloc(unsigned long flags, unsigned long init_val);
 asmlinkage long sys_pkey_free(int pkey);
+
+static inline void __mos_linux_enter(void *sys_wrap)
+{
+}
+
+static inline void __mos_linux_leave(void *sys_wrap)
+{
+}
 
 #endif

@@ -6,6 +6,8 @@ config 64BIT
 	  Say yes to build a 64-bit kernel - formerly known as x86_64
 	  Say no to build a 32-bit kernel - formerly known as i386
 
+source "mOS/Kconfig"
+
 config X86_32
 	def_bool y
 	depends on !64BIT
