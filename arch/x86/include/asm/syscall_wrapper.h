@@ -157,6 +157,8 @@ struct pt_regs;
 
 #endif /* CONFIG_COMPAT */
 
+static inline void __mos_linux_enter(void *sys_wrap);
+static inline void __mos_linux_leave(void *sys_wrap);
 
 /*
  * Instead of the generic __SYSCALL_DEFINEx() definition, this macro takes
@@ -196,6 +198,7 @@ struct pt_regs;
 	ALLOW_ERROR_INJECTION(__x64_sys##name, ERRNO);			\
 	static long __se_sys##name(__MAP(x,__SC_LONG,__VA_ARGS__));	\
 	static inline long __do_sys##name(__MAP(x,__SC_DECL,__VA_ARGS__));\
+	asmlinkage long lwk_sys##name(__MAP(x,__SC_DECL,__VA_ARGS__)) __attribute__((weak));;	\
 	asmlinkage long __x64_sys##name(const struct pt_regs *regs)	\
 	{								\
 		return __se_sys##name(SC_X86_64_REGS_TO_ARGS(x,__VA_ARGS__));\
@@ -203,7 +206,15 @@ struct pt_regs;
 	__IA32_SYS_STUBx(x, name, __VA_ARGS__)				\
 	static long __se_sys##name(__MAP(x,__SC_LONG,__VA_ARGS__))	\
 	{								\
-		long ret = __do_sys##name(__MAP(x,__SC_CAST,__VA_ARGS__));\
+		long ret;						\
+		if (lwk_sys##name && is_mostask()) {			\
+			ret = lwk_sys##name(__MAP(x,__SC_CAST,__VA_ARGS__));	\
+			if (ret != -ENOSYS) goto out;			\
+		}							\
+		__mos_linux_enter(__x64_sys##name);				\
+		ret = __do_sys##name(__MAP(x,__SC_CAST,__VA_ARGS__));\
+		__mos_linux_leave(__x64_sys##name);				\
+out:									\
 		__MAP(x,__SC_TEST,__VA_ARGS__);				\
 		__PROTECT(x, ret,__MAP(x,__SC_ARGS,__VA_ARGS__));	\
 		return ret;						\
@@ -218,12 +229,34 @@ struct pt_regs;
  * macros to work correctly.
  */
 #ifndef SYSCALL_DEFINE0
-#define SYSCALL_DEFINE0(sname)						\
-	SYSCALL_METADATA(_##sname, 0);					\
-	asmlinkage long __x64_sys_##sname(const struct pt_regs *__unused);\
-	ALLOW_ERROR_INJECTION(__x64_sys_##sname, ERRNO);		\
-	asmlinkage long __x64_sys_##sname(const struct pt_regs *__unused)
+#define SYSCALL_DEFINE0(sname)					\
+	SYSCALL_METADATA(_##sname, 0);				\
+	ALLOW_ERROR_INJECTION(__x64_sys_##sname, ERRNO);	\
+	static inline long __do_sys##name(void); 		\
+	asmlinkage long lwk_sys##name(void) __attribute__((weak));;	\
+	asmlinkage long __x64_sys_##sname(const struct pt_regs *__unused) \
+	{							\
+		long ret;					\
+		if (lwk_sys_##sname && is_mostask()) {		\
+			ret = lwk_sys_##sname();		\
+			if (ret != -ENOSYS) goto out0;		\
+		}						\
+		__mos_linux_enter(__x64_sys_##sname);		\
+		ret = __do_sys##sname();			\
+		__mos_linux_leave(__x64_sys_##sname);		\
+out0:								\
+		return ret;					\
+	}							\
+	static inline long __do_sys##sname(void)
 #endif
+
+static inline void __mos_linux_enter(void *sys_wrap)
+{
+}
+
+static inline void __mos_linux_leave(void *sys_wrap)
+{
+}
 
 #ifndef COND_SYSCALL
 #define COND_SYSCALL(name) 							\
@@ -245,5 +278,6 @@ struct pt_regs;
 asmlinkage long __x64_sys_getcpu(const struct pt_regs *regs);
 asmlinkage long __x64_sys_gettimeofday(const struct pt_regs *regs);
 asmlinkage long __x64_sys_time(const struct pt_regs *regs);
+
 
 #endif /* _ASM_X86_SYSCALL_WRAPPER_H */

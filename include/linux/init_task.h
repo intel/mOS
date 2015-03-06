@@ -21,6 +21,7 @@
 #include <linux/mm_types.h>
 
 #include <asm/thread_info.h>
+#include <linux/mos.h>
 
 extern struct files_struct init_files;
 extern struct fs_struct init_fs;
