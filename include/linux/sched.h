@@ -1533,6 +1533,12 @@ struct task_struct {
 	unsigned int policy;
 	int nr_cpus_allowed;
 	cpumask_t cpus_allowed;
+#ifdef CONFIG_MOS_MOVE_SYSCALLS
+	cpumask_t mos_savedmask;
+#endif
+#ifdef CONFIG_MOS_FOR_HPC
+	int mos_nesting;
+#endif
 
 #ifdef CONFIG_PREEMPT_RCU
 	int rcu_read_lock_nesting;
@@ -1606,6 +1612,11 @@ struct task_struct {
 
 	pid_t pid;
 	pid_t tgid;
+
+#ifdef CONFIG_MOS_FOR_HPC
+	unsigned int mos_flags; /* see MOS_* below */
+	struct mos_process_t *mos_process;
+#endif
 
 #ifdef CONFIG_CC_STACKPROTECTOR
 	/* Canary value for the -fstack-protector gcc feature */
@@ -2388,6 +2399,14 @@ TASK_PFA_CLEAR(SPEC_SSB_DISABLE, spec_ssb_disable)
 
 TASK_PFA_TEST(SPEC_SSB_FORCE_DISABLE, spec_ssb_force_disable)
 TASK_PFA_SET(SPEC_SSB_FORCE_DISABLE, spec_ssb_force_disable)
+
+/*
+ * task->mos_flags
+ */
+
+#ifdef CONFIG_MOS_FOR_HPC
+#define MOS_IS_LWK_PROCESS 1
+#endif
 
 /*
  * task->jobctl flags

@@ -1,0 +1,52 @@
+# Multi Operating System (mOS)
+# Copyright (c) 2016, Intel Corporation.
+#
+# This program is free software; you can redistribute it and/or modify it
+# under the terms and conditions of the GNU General Public License,
+# version 2, as published by the Free Software Foundation.
+#
+# This program is distributed in the hope it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+# more details.
+
+#
+# mOS Configuration
+#
+
+comment "X86_64 required for mOS"
+	depends on !X86_64
+
+comment "SMP required for mOS"
+	depends on !SMP
+
+comment "NUMA required for mOS"
+	depends on !NUMA
+
+menuconfig MOS_FOR_HPC
+	bool "mOS hybrid FWK/LWK for HPC"
+	depends on X86_64 && SMP && NUMA
+	---help---
+	  Build as mOS (short for "multi-O/S"), an experimental kernel
+	  for supercomputers which attempts to create a hybrid between a
+	  FWK (full-weight kernel--namely, Linux) and a custom LWK
+	  (light-weight kernel) in order to acheive better performance
+	  and scaling behavior than FWKs alone.
+
+	  Unless you operate a top-500 supercomputer, say N.
+
+if MOS_FOR_HPC
+
+comment "NO_HZ_FULL recommended for mOS"
+	depends on !NO_HZ_FULL
+
+comment "NO_HZ_FULL_ALL recommended for mOS"
+	depends on !NO_HZ_FULL_ALL
+
+comment "!RCU_FAST_NO_HZ recommended for mOS"
+	depends on RCU_FAST_NO_HZ
+
+comment "RCU_NOCB_CPU_ALL recommended for mOS"
+	depends on !RCU_NOCB_CPU_ALL
+
+endif	# if MOS_FOR_HPC

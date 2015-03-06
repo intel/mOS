@@ -34,6 +34,7 @@
 #include <asm/vm86.h>
 #include <asm/switch_to.h>
 #include <asm/spec-ctrl.h>
+#include <linux/mos.h>
 
 /*
  * per-CPU TSS segments. Threads are completely 'soft' on Linux,
@@ -119,6 +120,11 @@ void exit_thread(struct task_struct *tsk)
 		put_cpu();
 		kfree(bp);
 	}
+
+#ifdef CONFIG_MOS_FOR_HPC
+	if (is_mostask())
+		mos_exit_thread(current->pid, current->tgid);
+#endif
 
 	free_vm86(t);
 
