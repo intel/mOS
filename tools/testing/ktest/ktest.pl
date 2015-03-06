@@ -1422,6 +1422,10 @@ sub dodie {
 	`$power_off`;
     }
 
+    if (defined($console) && $monitor_cnt) {
+	close_console($monitor_fp, $monitor_pid);
+    }
+
     if (defined($opt{"LOG_FILE"})) {
 	print " See $opt{LOG_FILE} for more info.\n";
     }

@@ -1,0 +1,197 @@
+		Multi Operating System
+		======================
+
+
+Copyright (c) 2016, Intel Corporation.
+
+This program is free software; you can redistribute it and/or modify it
+under the terms and conditions of the GNU General Public License,
+version 2, as published by the Free Software Foundation.
+
+This program is distributed in the hope it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+more details.
+
+
+0. Introduction
+---------------
+The multi operating system (mOS) project is aimed at extreme-scale HPC
+systems. It runs Linux on one or so CPUs and runs a lightweight kernel
+(LWK) on the other logical CPUs in a multi-CPU system in order to achieve
+better performance and scaling behavior than traditional Linux can achieve
+alone.
+
+
+1. Building mOS
+---------------
+
+1.0 Configuring
+---------------
+
+A SLE12-derived kernel configuration is available in the 'config/base'
+branch. It represents reasonable defaults for testing purposes, and has
+been somewhat tuned for HPC. A canned command sequence you could use to
+derive your .config from 'config/base' is:
+
+	echo -`id -un` > localversion-0
+	echo -stock > localversion-1
+	git cat-file -p origin/config/base:defconfig > .config
+	make olddefconfig
+
+If you are booted into a Linux kernel of exactly the same version,
+you might want to add the following to reduce compilation time:
+
+	make localmodconfig
+
+Note that 'config/base' does not enable any mOS features. Add the
+following for that:
+
+	echo -mos > localversion-1
+	make menuconfig  # and enable mOS options from their menu
+
+If you are creating your own .config from scratch, the following choices
+are advised:
+
+	CONFIG_NO_HZ_FULL=y
+	CONFIG_RCU_NOCB_CPU=y
+	CONFIG_RCU_FAST_NO_HZ=n
+
+Unless you intend to specify only a subset of CPUs via the command line,
+also include:
+
+	CONFIG_NO_HZ_FULL_ALL=y
+	CONFIG_RCU_NOCB_CPU_ALL=y
+
+To enable mOS features, also include:
+
+	CONFIG_MOS_FOR_HPC=y
+	CONFIG_MOS_MOVE_SYSCALLS=y
+
+
+1.1 Build & Install
+-------------------
+
+Ensure you have not booted into a kernel with isolcpus or lwkcpus
+on its command line before building, otherwise this will take too long.
+
+	make -j 50
+	sudo make modules_install
+	sudo make install
+
+There is also a job-launch utility (yod) that you should build and install:
+
+        cd tools/mOS/yod
+        make
+        sudo make install
+
+
+2. Booting mOS
+--------------
+
+Consider an Aztec City system:
+
+	$ lscpu | fgrep node
+	NUMA node(s):          2
+	NUMA node0 CPU(s):     0-13,28-41
+	NUMA node1 CPU(s):     14-27,42-55
+
+For such a system, the following kernel command line options are
+advised when performing experiments on Linux or the prototype, since
+they represent basic tuning for the HPC use case:
+
+	intel_idle.max_cstate=1
+		CPU may enter C0 (operating) and C1 (halt), but no
+		others. Since the CPU never enters deeper sleep states,
+		latency to exit the current state and return to C0 is
+		very predictable!
+
+	intel_pstate=disable
+		CPU must remain at max power and frequency. Bad for
+		efficiency, good for predictability. Without disabling
+		this, FWQ runs tend not to bring all the CPUs all the
+		way to their max frequency if CONFIG_NO_HZ_FULL=y,
+		making it look like CONFIG_NO_HZ_FULL=y causes a loss
+		in performance. Presumptively there's some bug in the
+		interaction with the intel_pstate driver.
+
+	nmi_watchdog=0
+		Disable the watchdog interrupt. Should reduce noise,
+		needs confirmation.
+
+	acpi_irq_nobalance
+		Hoped to facilitate steering IRQs away from LWK CPUs. The
+		noirqbalance option recommended previously is not at all
+		what everyone assumed it was; this one is more likely
+		to be, but still needs confirmation.
+
+	isolcpus=<list>
+		Remove CPUs from the general SMP balancing and scheduling
+		algorithms, which should improve core isolation.
+
+For example:
+
+	isolcpus=28,42
+	lwkcpus=28.1-13,29-41:42.15-27,43-55
+
+In this configuration, there are two Linux CPUs, 28 and 42,  designated to
+handle syscalls for the LWK CPUs. Note that, internally, mOS also marks CPUs
+1-13,15-27,29-41,43-55 as isolated. They are designated for LWK use.
+
+
+3. Testing
+----------
+
+3.1 Testing the System Call Mechanism (evanescence)
+---------------------------------------------------
+
+A basic "smoke test" for CONFIG_MOS_MOVE_SYSCALLS is available:
+
+	cd mOS/tests/evanescence
+	make run_tests
+
+You must have gcc, stap, and python2 installed.
+
+3.2 Testing yod
+---------------
+
+A unit test is available:
+
+        cd tools/mOS/yod
+        make test
+
+
+4. Job Launch (yod)
+-------------------
+
+The job launch utility (yod) starts a single mOS process on a specified set
+of LWK CPUs using a specified amount of LWK memory.  Consult the man page for
+more details.
+
+
+5. Release Notes
+----------------
+
+5.1 Version 0.1
+---------------
+
+5.1.1 yod Version 0.1 Limitations
+---------------------------------
+
+As of this writing [4/22/2015], the memory subsystem is still not integrated
+mos-core and hence the /sys/kernel/mOS/lwkmem attribute is 0 after boot.  To
+simulate how yod will eventually behave, one can use the lwkmem bypass.  This
+bypass is controlled via an environment variable and tells yod how much memory
+is available.  Yod will perform its computations accordingly.  When reserving
+LWK memory with the bypass enabled, yod will inhibit the request to
+/sys/kernel/mOS/lwkmem_request and instead will assume that such a request
+would normally complete.
+
+Once proper integration is in place with the memory subsystem, the bypass will
+be removed from yod.
+
+To use the bypass:
+
+        export YOD_LWKMEM=0x100000000
+        yod [options] [command]
+
