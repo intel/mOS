@@ -21,6 +21,7 @@
 #include <linux/sched/isolation.h>
 #include <uapi/linux/sched/types.h>
 #include <linux/task_work.h>
+#include <linux/mos.h>
 
 #include "internals.h"
 
@@ -381,7 +382,44 @@ int __irq_set_affinity(unsigned int irq, const struct cpumask *mask, bool force)
 		return -EINVAL;
 
 	raw_spin_lock_irqsave(&desc->lock, flags);
+
+	if (IS_ENABLED(CONFIG_MOS_FOR_HPC)) {
+		if (cpumask_intersects(mask, cpu_lwkcpus_mask)) {
+			cpumask_var_t linux_cpus;
+			struct irq_data *data = irq_desc_get_irq_data(desc);
+
+			if (!zalloc_cpumask_var(&linux_cpus, GFP_KERNEL)) {
+				ret = -ENOMEM;
+				goto out;
+			}
+			cpumask_andnot(linux_cpus, cpu_online_mask,
+				cpu_lwkcpus_mask);
+
+			if (unlikely(cpumask_empty(linux_cpus))) {
+				ret = -EINVAL;
+				mos_ras(MOS_KERNEL_ERROR,
+					"%s(irq %d, mask %*pbl) no Linux CPUs ret %d",
+					__func__, irq, cpumask_pr_args(mask),
+					ret);
+			} else if (cpumask_intersects(linux_cpus, mask)) {
+				cpumask_and(linux_cpus, linux_cpus, mask);
+				ret = irq_set_affinity_locked(data,
+						linux_cpus, force);
+			} else {
+				ret = -EINVAL;
+				mos_ras(MOS_KERNEL_WARNING,
+					"%s(irq %d, mask %*pbl) can not affinitize only to LWKCPUs ret %d\n",
+					__func__, irq, cpumask_pr_args(mask),
+					ret);
+			}
+			free_cpumask_var(linux_cpus);
+			goto out;
+		}
+	}
+
 	ret = irq_set_affinity_locked(irq_desc_get_irq_data(desc), mask, force);
+
+out:
 	raw_spin_unlock_irqrestore(&desc->lock, flags);
 	return ret;
 }

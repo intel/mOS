@@ -1,0 +1,55 @@
+# Multi Operating System (mOS)
+# Copyright (c) 2016, Intel Corporation.
+#
+# This program is free software; you can redistribute it and/or modify it
+# under the terms and conditions of the GNU General Public License,
+# version 2, as published by the Free Software Foundation.
+#
+# This program is distributed in the hope it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+# more details.
+
+#
+# mOS Configuration
+#
+
+comment "X86_64 required for mOS"
+	depends on !X86_64
+
+comment "SMP required for mOS"
+	depends on !SMP
+
+comment "NUMA required for mOS"
+	depends on !NUMA
+
+comment "HOTPLUG_CPU required for mOS"
+	depends on !HOTPLUG_CPU
+
+comment "ARCH_USES_HIGH_VMA_FLAGS required for mOS"
+	depends on !ARCH_USES_HIGH_VMA_FLAGS
+
+menuconfig MOS_FOR_HPC
+	bool "mOS hybrid FWK/LWK for HPC"
+	depends on X86_64 && SMP && NUMA && HOTPLUG_CPU && ARCH_USES_HIGH_VMA_FLAGS
+	help
+	  Build as mOS (short for "multi-O/S"), an experimental kernel
+	  for supercomputers which attempts to create a hybrid between a
+	  FWK (full-weight kernel--namely, Linux) and a custom LWK
+	  (light-weight kernel) in order to acheive better performance
+	  and scaling behavior than FWKs alone.
+
+	  Unless you operate a top-500 supercomputer, say N.
+
+if MOS_FOR_HPC
+
+comment "NO_HZ_FULL recommended for mOS"
+	depends on !NO_HZ_FULL
+
+comment "RCU_NOCB_CPU recommended for mOS"
+	depends on !RCU_NOCB_CPU
+
+comment "!RCU_FAST_NO_HZ recommended for mOS"
+	depends on RCU_FAST_NO_HZ
+
+endif	# if MOS_FOR_HPC

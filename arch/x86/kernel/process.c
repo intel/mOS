@@ -43,6 +43,7 @@
 #include <asm/io_bitmap.h>
 #include <asm/proto.h>
 #include <asm/frame.h>
+#include <linux/mos.h>
 
 #include "process.h"
 
@@ -107,6 +108,10 @@ void exit_thread(struct task_struct *tsk)
 	if (test_thread_flag(TIF_IO_BITMAP))
 		io_bitmap_exit(tsk);
 
+#ifdef CONFIG_MOS_FOR_HPC
+	if (is_mostask())
+		mos_exit_thread();
+#endif
 	free_vm86(t);
 
 	fpu__drop(fpu);

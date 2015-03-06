@@ -24,7 +24,6 @@
 #include <linux/sched/clock.h>
 #include <linux/nmi.h>
 #include <linux/sched/debug.h>
-
 #include "smpboot.h"
 #include "sched/smp.h"
 

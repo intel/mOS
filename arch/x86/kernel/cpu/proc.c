@@ -4,6 +4,7 @@
 #include <linux/string.h>
 #include <linux/seq_file.h>
 #include <linux/cpufreq.h>
+#include <linux/mos.h>
 
 #include "cpu.h"
 
@@ -155,7 +156,35 @@ static int show_cpuinfo(struct seq_file *m, void *v)
 
 	return 0;
 }
+#ifdef CONFIG_MOS_FOR_HPC
+static void *c_start(struct seq_file *m, loff_t *pos)
+{
+	bool is_mos_view_linux = IS_MOS_VIEW(current, MOS_VIEW_LINUX);
+	const struct cpumask *mask;
 
+	if (IS_MOS_VIEW(current, MOS_VIEW_LWK_LOCAL))
+		mask = current->mos_process->lwkcpus;
+	else {
+		if (IS_MOS_VIEW(current, MOS_VIEW_LWK))
+			mask = cpu_lwkcpus_mask;
+		else
+			mask = cpu_online_mask;
+	}
+
+next_pos:
+	*pos = cpumask_next(*pos - 1, mask);
+
+	if ((*pos) < nr_cpu_ids) {
+		/* Skip showing LWK cpus when mOS view is set to linux */
+		if (is_mos_view_linux && cpu_islwkcpu(*pos)) {
+			(*pos)++;
+			goto next_pos;
+		}
+		return &cpu_data(*pos);
+	}
+	return NULL;
+}
+#else
 static void *c_start(struct seq_file *m, loff_t *pos)
 {
 	*pos = cpumask_next(*pos - 1, cpu_online_mask);
@@ -163,6 +192,7 @@ static void *c_start(struct seq_file *m, loff_t *pos)
 		return &cpu_data(*pos);
 	return NULL;
 }
+#endif
 
 static void *c_next(struct seq_file *m, void *v, loff_t *pos)
 {
