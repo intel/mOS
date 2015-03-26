@@ -1,5 +1,5 @@
 # Multi Operating System (mOS)
-# Copyright (c) 2016, Intel Corporation.
+# Copyright (c) 2017, Intel Corporation.
 #
 # This program is free software; you can redistribute it and/or modify it
 # under the terms and conditions of the GNU General Public License,
@@ -10,11 +10,15 @@
 # FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
 # more details.
 
-#
-# mOS: hybrid FWK/LWK for HPC
-#
+hostprogs-y := lwkctl
+scriptprogs-y := lwkctl.sh lwkctl.1.man
+mos-lib-objs := ../lib/mos_cpuset.o
+lwkctl-objs := lwkctl_sysfs.o lwkctl.o
+lwkctl-objs += $(mos-lib-objs)
 
-subdir-$(CONFIG_MOS_FOR_HPC) += tools
+lwkctl.sh_installname := lwkctl
+lwkctl.sh_installpath := /usr/bin
+lwkctl.1.man_installname := lwkctl.1
+lwkctl.1.man_installpath := /usr/share/man/man1
 
-obj-$(CONFIG_MOS_FOR_HPC) += mos.o
-obj-$(CONFIG_MOS_FOR_HPC) += lwkcpu.o lwkctrl.o mosras.o
+include $(src)/../Makefile.tool
