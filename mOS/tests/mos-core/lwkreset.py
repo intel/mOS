@@ -1,5 +1,5 @@
 # Multi Operating System (mOS)
-# Copyright (c) 2016, Intel Corporation.
+# Copyright (c) 2019, Intel Corporation.
 #
 # This program is free software; you can redistribute it and/or modify it
 # under the terms and conditions of the GNU General Public License,
@@ -10,11 +10,11 @@
 # FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
 # more details.
 
-#
-# mOS: hybrid FWK/LWK for HPC
-#
+from mostests import *
+from mosunit import run
 
-subdir-$(CONFIG_MOS_FOR_HPC) += tools
+class Basic(TestCase):
 
-obj-$(CONFIG_MOS_FOR_HPC) += mos.o
-obj-$(CONFIG_MOS_FOR_HPC) += lwkcpu.o lwkctrl.o mosras.o
+    def test_lwkreset_existence(self):
+        out, rc = run(['lwkreset', '-h'])
+        self.assertTrue(rc == 0, 'Could not locate lwkreset.')
