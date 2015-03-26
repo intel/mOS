@@ -1,0 +1,237 @@
+.\"                                      Hey, EMACS: -*- nroff -*-
+.\" First parameter, NAME, should be all caps
+.\" Second parameter, SECTION, should be 1-8, maybe w/ subsection
+.\" other parameters are allowed: see man(7), man(1)
+.TH YOD 1 "April 1, 2015"
+.\" Please adjust this date whenever revising the manpage.
+.\"
+.\" Some roff macros, for reference:
+.\" .nh        disable hyphenation
+.\" .hy        enable hyphenation
+.\" .ad l      left justify
+.\" .ad b      justify to both left and right margins
+.\" .nf        disable filling
+.\" .fi        enable filling
+.\" .br        insert line break
+.\" .sp <n>    insert n+1 empty lines
+.\" for manpage-specific macros, see man(7)
+.SH NAME
+yod \- Reserve mOS LWK resources and launch a single process
+.SH SYNOPSIS
+.B yod [options] command {arguments}
+.SH DESCRIPTION
+
+\fByod\fP is the fundamental job launch mechanism for Multi-OS (mOS).  It
+reserves mOS Light Weight Kernel (LWK) resources and then launches the
+specified \fBcommand\fP.  Yod reserves LWK CPUs and memory. Resources reserved
+by yod are owned by the launched process for its duration.
+
+.SH OPTIONS
+
+.TP
+.B --resources, -R <\fIfraction\fP, all>
+Reserves a portion of the LWK resources.  If specified as a fraction, then
+the corresponding number of LWK cores are reserved, as well as an equal
+portion of the designated LWK memory. A \fIfraction\fP may be specified in
+floating point format or as a rational number M/N, where M and N are integers.
+Fractions must be in the interval (0, 1].  This option may not be combined with
+any of the --cpu, --cores or --mem options.
+
+.PP
+The following options control the overall reservation of LWK CPUs.  At
+most one of these options should be specified.  If none is specified and
+--resources/-R is not specified, yod will reserve all available LWK CPUs.
+If one of these options is specified, then memory must also be specified
+(see --mem/-M below).  The assignment of reserved LWK CPUs to
+actual CPUs is controlled by the \fB--resource_algorithm\fP option; see
+\FIRESOURCE ALGORITHMS\fP for details.
+
+.TP
+.B --cpus, -c <\fIlist\fP, \fImask\fP, all>
+Reserves the specified CPUs for the \fIcommand\fP being launched.  If
+\fBall\fP is specified, all available LWK CPUs are reserved.  Otherwise,
+the argument describes a list of LWK CPU to be reserved and is in either
+list or mask format.
+
+.TP
+.B --cores, -C <\fInumber\fP, \fIfraction\fP, all>
+Reserves the specified LWK cores for the \fIcommand\fP being launched.
+If \fBall\fP is specified, all available LWK cores are reserved.  Otherwise,
+the argument specifies either a \fInumber\fP of cores to be reserved, or a
+\fIfraction\fP of the overall LWK cores designated for mOS use.  A
+\fIfraction\fP may be specified in floating point format or as a rational
+number M/N, where M and N are integers.  Fractions must be in the interval
+(0, 1].
+
+.PP
+The following options control reservation of LWK memory.  If specified,
+then LWK CPUs must also be specified via either the --cpus or the --cores
+option.
+.TP
+.B --mem, -M <\fIsize\fP, \fIfraction\fP, all>
+Reserve the specified amount of memory for the \fIcommand\fP being launched.
+\fISize\fP is an integer or decimal number, optionally augmented with K, M or
+G to indicate units of kilobytes, megabytes or gigabytes, respectively.
+A \fIfraction\fP reserves memory as a portion of the overall amount of
+memory designated for LWK use.  Fractions must be in the interval (0.0, 1.0)
+and may be specified either in floating point format or as a rational number
+M/N, where M and N are integers (M <= N). If \fBall\fP is specified, then all
+available LWK memory is reserved.
+
+.PP
+Other options:
+
+.TP
+.B --util_threads, -u <\fInumber\fP>
+Specify \fInumber\fP of threads to be identified as utility threads within
+the process being launched. If a value is specified, the kernel will
+heurestically identify that number of threads as utility threads and
+provide special placement and behaviors to those threads. If no value
+is specified, the kernel will make no heuristic identification of utility
+threads.
+
+.TP
+.B --resource_algorithm <numa, simple, random>
+Controls the selection and layout of CPUs relative to the overall set of
+designated LWK CPUs.  See \fIRESOURCE ALGORITHMS\fP for additional information.
+The default is \fBnuma\fP.
+
+.TP
+.B --mem_algorithm <\fIalgorithm\fP>
+\fIThis option is not yet implemented.\fP
+
+.TP
+.B --layout <\fIdescription\fP>
+Provides CPU (hardware thread) ordering suggestions to the mOS scheduler.  See
+\fITHREAD LAYOUT\fP for additional information.
+.TP
+.B --dry-run
+Do not actually reserved resources and launch.
+
+.TP
+.B --verbose, -v <\fInumber\fP>
+Controls the verbosity of \fByod\fP.  \fINumber\fP is an integer between 0
+and 9.  Note that the argument is required.
+
+.TP
+.B --option, -o \fIname[=value]\fP
+Passes the option to the mOS kernel.  The supported options are not documented
+here and in general, should be considered experimental.
+.TP
+.B --help, -h
+Prints a terse version of this documentation.
+
+.SH CPU MASKS AND LISTS
+.PP
+CPUs in yod are numbered in C fashion.  That is, the first logical CPU is
+CPU 0.  The second is CPU 1.  And so on.
+.PP
+CPU masks in yod are hexadecimal literals specified in little endian order.
+That is, the least significant bit corresponds to CPU 0, and so on.  Masks
+must begin with either "0x" or "0X".
+.PP
+CPU lists are CPU numbers or ranges of numbers separated by commas.
+.PP
+So, for example, the list '0-2,8' is equivalent to mask 0x107.
+
+.SH RESOURCE ALGORITHMS
+
+The \fB--cpus\fP form of LWK CPU reservation is explicit
+in that it specifically identifies the CPUs to be reserved.
+
+.PP
+Other forms are less explicit and in these cases, \fByod\fP uses the
+\fB--resource_algorithm\fP specification to reserve and select CPUs
+and memory.
+
+.PP
+The \fBnuma\fP resource algorithm attempts to reserve LWK cores and
+memory that are near each other in the NUMA sense.
+
+.PP
+The \fBsimple\fP resource algorithm reserves LWK cores from the available
+pool in ascending order. Memory is reserved from NUMA domains in ascending
+order.
+
+.PP
+The \fBrandom\fP CPU algorithm reserves LWK cores randomly from the
+available pool.
+
+.SH THREAD LAYOUT
+
+The \fB--layout <description>\fP option may be used to suggest how software
+threads are assigned to CPUs (hardware threads) once specific CPUs have been
+reserved for the process being launched.  The \fBdescription\fP argument may be
+specified as \fBscatter\fP, \fBcompact\fP, or a permutation of the
+dimensions \fBnode\fP, \fBtile\fP, \fBcore\fP and \fBcpu\fP.
+
+.PP
+The \fBscatter\fP option spreads threads out as much as possible within the
+selected LWK CPUs.  It is equivalent to \fBnode,tile,core,cpu\fP and thus
+will attempt to spread out across nodes before repeating tiles, spread out
+across tiles before repeating cores, and so on.  This is the default.
+
+.PP
+The \fBcompact\fP option is the opposite of scatter and is equivalent
+to \fBcpu,core,tile,node\fP.  It will select CPUs (hardware threads) on a core
+before moving to another core.  Likewise, it will use all cores on a tile
+before expanding to another tile.  And so on.
+
+.PP
+Other permutations of \fBnode, tile, core and cpu\fP may be passed to
+specify the sort order of the CPUs.
+
+.SH EXAMPLES
+
+.TP
+.B yod foo bar
+Launches \fBfoo\fP as an mOS process.  All available LWK CPUs and memory will
+be reserved.
+
+.TP
+.B yod --cores 0.5 foo bar
+Reserves half of the overall cores and memory designated for LWK usage.
+
+.TP
+.B yod --cpus 48-71 --util_threads 1 --mem 1.1G foo bar
+Reserves LWK CPUs 48-71 and 1.1 gigabytes of LWK memory.  The first thread
+created in the process will be treated by the kernel as a utility thread.
+
+.TP
+.B yod -c 48-71 -u 0 -M 0.75 foo bar
+Reserves LWK CPUs 48-71 and 75% of the designated LWK memory.
+
+.SH ENVIRONMENT VARIABLES
+
+.PP
+.B YOD_VERBOSE may be used to control the verbosity.  Specifying
+\fB--verbose=\fP on the command line takes precedence over this environment
+variable.
+
+.SH ERRORS
+
+.PP
+It is an error to attempt to reserve a CPU or select an ad-hoc CPU that is
+not designated as an mOS CPU.  \fBYod\fP will exit with -EINVAL in this
+case.
+
+.PP
+It is an error to attempt to reserve a CPU or select an ad-hoc CPU that is
+already reserved by an existing mOS process. \fBYod\fP will exit with
+-EBUSY in this case.
+
+.SH BUGS
+.PP
+The \fB--cpu_algorithm random\fP option is not yet implemented.
+.PP
+The \fB--mem\fP option is not yet supported.
+
+.SH SEE ALSO
+.I taskset(1),
+.br
+
+.SH AUTHORS
+yod was written by Rolf Riesen and Tom Musta.
+
+.SH COPYRIGHT
+Copyright \(co 2015 Intel Corp.
