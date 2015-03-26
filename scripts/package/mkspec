@@ -20,6 +20,9 @@ fi
 if [ "`grep CONFIG_DRM=y .config | cut -f2 -d\=`" = "y" ]; then
 	PROVIDES=kernel-drm
 fi
+if [ "`grep CONFIG_MOS_FOR_HPC=y .config | cut -f2 -d\=`" = "y" ]; then
+	MOS_TOOLS=y
+fi
 
 PROVIDES="$PROVIDES kernel-$KERNELRELEASE"
 __KERNELRELEASE=`echo $KERNELRELEASE | sed -e "s/-/_/g"`
@@ -66,6 +69,16 @@ echo "AutoReqProv: no"
 echo "%description -n kernel-devel"
 echo "This package provides kernel headers and makefiles sufficient to build modules"
 echo "against the $__KERNELRELEASE kernel package."
+if [ "$MOS_TOOLS" ]; then
+echo ""
+echo "%package mOS"
+echo "Summary: Tools package for Linux/mOS $__KERNELRELEASE kernel"
+echo "Group: System Environment/Kernel"
+echo "AutoReqProv: no"
+echo "%description -n kernel-mOS"
+echo "This package provides tools necessary to use mOS features in"
+echo "the $__KERNELRELEASE kernel package."
+fi
 echo ""
 
 if ! $PREBUILT; then
@@ -160,6 +173,13 @@ echo "%files headers"
 echo '%defattr (-, root, root)'
 echo "/usr/include"
 echo ""
+if [ "$MOS_TOOLS" ]; then
+echo "%files mOS"
+echo '%defattr (-, root, root)'
+echo "/usr/bin/*"
+echo "/usr/share/man/man1/*"
+echo ""
+fi
 if ! $PREBUILT; then
 echo "%files devel"
 echo '%defattr (-, root, root)'
