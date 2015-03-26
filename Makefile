@@ -1242,6 +1242,13 @@ modules_sign:
 	$(Q)$(MAKE) -f $(srctree)/scripts/Makefile.modsign
 endif
 
+ifeq ($(CONFIG_MOS_FOR_HPC), y)
+PHONY += _toolinst_
+modules_install: _toolinst_
+_toolinst_:
+	$(Q)$(MAKE) $(build)=mOS/tools $@
+endif
+
 else # CONFIG_MODULES
 
 # Modules not configured

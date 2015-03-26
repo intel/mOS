@@ -10,10 +10,11 @@
 # FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
 # more details.
 
-#
-# mOS: hybrid FWK/LWK for HPC
-#
+subdir-y += lwkreset yod
 
-subdir-$(CONFIG_MOS_FOR_HPC) += tools
+_toolinst_: $(subdir-y:%=%_toolinst_)
 
-obj-$(CONFIG_MOS_FOR_HPC) += mos.o
+$(subdir-y:%=%_toolinst_): %_toolinst_:
+	$(Q)$(MAKE) $(build)=$(src)/$* _toolinst_
+
+PHONY += _toolinst_ $(subdir-y:%=%_toolinst_)

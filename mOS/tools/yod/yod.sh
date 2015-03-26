@@ -1,3 +1,5 @@
+#!/bin/sh
+
 # Multi Operating System (mOS)
 # Copyright (c) 2016, Intel Corporation.
 #
@@ -10,10 +12,14 @@
 # FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
 # more details.
 
-#
-# mOS: hybrid FWK/LWK for HPC
-#
+yod="/lib/modules/`uname -r`/yod"
+if ! [ -x "$yod" ]; then
+	cat 1>&2 <<EOF
+$0: `uname -r` is not a mOS kernel
 
-subdir-$(CONFIG_MOS_FOR_HPC) += tools
-
-obj-$(CONFIG_MOS_FOR_HPC) += mos.o
+If you want to run yod anyway, you must invoke one directly; look in
+/lib/modules/*/yod.
+EOF
+	exit 1
+fi
+exec "$yod" "$@"

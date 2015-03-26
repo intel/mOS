@@ -10,10 +10,17 @@
 # FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
 # more details.
 
-#
-# mOS: hybrid FWK/LWK for HPC
-#
+HOST_EXTRACFLAGS += -I$(src)/../../../include
 
-subdir-$(CONFIG_MOS_FOR_HPC) += tools
+hostprogs-y := yod
+scriptprogs-y := yod.sh yod.1.man
 
-obj-$(CONFIG_MOS_FOR_HPC) += mos.o
+yod-objs := yod.o mos_plugin.o test_plugin.o yod_cpuset.o layout.o
+HOSTLOADLIBES_yod := -lm
+
+yod.sh_installname := yod
+yod.sh_installpath := /usr/bin
+yod.1.man_installname := yod.1
+yod.1.man_installpath := /usr/share/man/man1
+
+include $(src)/../Makefile.tool
