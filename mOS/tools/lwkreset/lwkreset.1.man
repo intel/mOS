@@ -1,0 +1,68 @@
+.\"                                      Hey, EMACS: -*- nroff -*-
+.\" First parameter, NAME, should be all caps
+.\" Second parameter, SECTION, should be 1-8, maybe w/ subsection
+.\" other parameters are allowed: see man(7), man(1)
+.TH LWKRESET 1 "June 1, 2015"
+.\" Please adjust this date whenever revising the manpage.
+.\"
+.\" Some roff macros, for reference:
+.\" .nh        disable hyphenation
+.\" .hy        enable hyphenation
+.\" .ad l      left justify
+.\" .ad b      justify to both left and right margins
+.\" .nf        disable filling
+.\" .fi        enable filling
+.\" .br        insert line break
+.\" .sp <n>    insert n+1 empty lines
+.\" for manpage-specific macros, see man(7)
+.SH NAME
+lwkreset \- Terminate all Light Weight Kernel (LWK) processes and initialize the LWK environment. 
+.SH SYNOPSIS
+.B lwkreset [options]
+.SH DESCRIPTION
+
+\fBlwkreset\fP is a mechanism for terminating Light Weight Kernel (LWK)
+processes and initializing LWK environment within a node. If the caller is authorized
+to only a subset of the processes, then that subset of processes will be terminated and no
+error indication will be surfaced. This mechanism should be used for terminating 
+processes within a node when termination through the \fByod\fP launch path is not possible or practical. 
+
+.SH OPTIONS
+
+.PP
+
+
+.TP
+.B --verbose, -v <\fInumber\fP>
+Controls the verbosity of \fBlwkreset\fP.  \fINumber\fP is an integer between 0
+and 9.  Note that the argument is required.
+
+.TP
+.B --help, -h
+Prints a terse version of this documentation.
+
+
+.SH EXAMPLES
+
+.TP
+.B lwkreset
+The LWK processes will be terminated and the LWK environment will be initialized.
+
+
+.SH ENVIRONMENT VARIABLES
+
+.PP
+.B LWKRESET_VERBOSE 
+may be used to control the verbosity.  Specifying
+\fB--verbose=\fP on the command line takes precedence over this environment
+variable.
+
+.SH SEE ALSO
+.I yod(1),
+.br
+
+.SH AUTHORS
+lwkreset was written by John Attinella.
+
+.SH COPYRIGHT
+Copyright \(co 2015 Intel Corp.
