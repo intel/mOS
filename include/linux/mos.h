@@ -66,6 +66,24 @@ struct mos_process_t {
 
 #ifdef CONFIG_MOS_SCHEDULER
 	/* Scheduler attributes go here */
+
+	/* Count of threads created */
+	atomic_t threads_created;
+	/* Original cpus_allowed mask at launch */
+	cpumask_var_t original_cpus_allowed;
+	/* Control migration of system calls */
+	bool move_syscalls_disable;
+	/* Enabled round-robin threads. Value=timeslice in ms */
+	int enable_rr;
+	/* Disable sched_setaffinity. Value = errno+1 */
+	int disable_setaffinity;
+	/* Logging verbosity for scheduler statistics */
+	int sched_stats;
+	/* List of utility threads on LWK CPUs */
+	struct list_head util_list;
+	/* Mutex for controlling the util_list */
+	struct mutex util_list_lock;
+
 #endif
 };
 

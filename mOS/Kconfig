@@ -49,4 +49,30 @@ comment "!RCU_FAST_NO_HZ recommended for mOS"
 comment "RCU_NOCB_CPU_ALL recommended for mOS"
 	depends on !RCU_NOCB_CPU_ALL
 
+config MOS_SCHEDULER
+	bool "Enable mOS scheduler"
+	depends on MOS_FOR_HPC
+	---help---
+	  When threads are affinitized to a LWK CPU, the scheduling
+	  is under the control of the mOS scheduler.
+
+	  This feature remains disabled unless you specify which CPUs
+	  are designated as LWK CPUs with the mos_syscall_cpus kernel
+	  command line option.
+config MOS_MOVE_SYSCALLS
+	bool "Run system calls on subset of CPUs"
+	depends on MOS_FOR_HPC
+	---help---
+	  Affinitize threads onto a "syscall CPU" upon entry to most
+	  system calls, reverting the affinity mask once the system call
+	  is complete. In effect, system call processing is only
+	  performed on syscall CPUs, while userspace processing is
+	  unconstrained.
+
+	  This feature remains disabled unless you specify which CPUs
+	  should move syscalls onto which other CPUs with the
+	  mos_syscall_cpus kernel command line option.
+
+	  Unless you operate a top-500 supercomputer, say N.
+
 endif	# if MOS_FOR_HPC

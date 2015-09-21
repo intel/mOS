@@ -1452,9 +1452,13 @@ static int __init deferred_init_memmap(void *data)
 		return 0;
 	}
 
+#ifdef CONFIG_MOS_SCHEDULER
+	mos_set_cpus_allowed_kthread(current, cpumask);
+#else
 	/* Bind memory initialisation thread to a local node if possible */
 	if (!cpumask_empty(cpumask))
 		set_cpus_allowed_ptr(current, cpumask);
+#endif
 
 	/* Sanity check boundaries */
 	BUG_ON(pgdat->first_deferred_pfn < pgdat->node_start_pfn);

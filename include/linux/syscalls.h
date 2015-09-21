@@ -886,6 +886,9 @@ asmlinkage long sys_mmap_pgoff(unsigned long addr, unsigned long len,
 			unsigned long prot, unsigned long flags,
 			unsigned long fd, unsigned long pgoff);
 asmlinkage long sys_old_mmap(struct mmap_arg_struct __user *arg);
+asmlinkage long sys_mmap(unsigned long, unsigned long, unsigned long,
+			 unsigned long, unsigned long, unsigned long);
+
 asmlinkage long sys_name_to_handle_at(int dfd, const char __user *name,
 				      struct file_handle __user *handle,
 				      int __user *mnt_id, int flag);
@@ -930,13 +933,71 @@ asmlinkage long sys_pkey_mprotect(unsigned long start, size_t len,
 				  unsigned long prot, int pkey);
 asmlinkage long sys_pkey_alloc(unsigned long flags, unsigned long init_val);
 asmlinkage long sys_pkey_free(int pkey);
+#ifdef CONFIG_MOS_MOVE_SYSCALLS
+
+/*
+ * When 'm' is true, the optimizer can easily prove it statically--after
+ * all, the same symbol appears on both sides of an equal sign; this
+ * allows the compiler to elide the comparisons entirely.  When 'm' is
+ * false, a static proof by the optimizer isn't possible (except perhaps
+ * through type-based alias analysis, some of the time)--only the linker
+ * knows whether symbols with different names have different values.
+ *
+ * To ensure runtime tests are avoided in both cases, ask the optimizer
+ * whether a proof is possible and assume a non-match whenever it isn't.
+ *
+ * (Must be a macro to behave correctly, at least with GCC 4.8.3.)
+ */
+#define __mos_do_on_original_cpu(s)			\
+	({						\
+		bool m = (/* Keep these alphabetical */	\
+			s == sys_clock_adjtime ||	\
+			s == sys_clock_getres ||	\
+			s == sys_clock_gettime ||	\
+			s == sys_clock_nanosleep ||	\
+			s == sys_clock_settime ||	\
+			s == sys_futex ||	        \
+			s == sys_getitimer ||		\
+			s == sys_gettimeofday ||	\
+			s == sys_mmap ||		\
+			s == sys_mmap_pgoff ||		\
+			s == sys_mremap ||		\
+			s == sys_munmap ||		\
+			s == sys_nanosleep ||		\
+			s == sys_perf_event_open ||	\
+			s == sys_process_vm_readv ||    \
+			s == sys_process_vm_writev ||   \
+			s == sys_sched_getaffinity ||	\
+			s == sys_sched_setaffinity ||	\
+			s == sys_sched_yield ||		\
+			s == sys_setitimer ||		\
+			s == sys_time ||		\
+			s == sys_timer_create ||	\
+			s == sys_timer_delete ||	\
+			s == sys_timer_getoverrun ||	\
+			s == sys_timer_gettime ||	\
+			s == sys_timer_settime ||	\
+			s == sys_times ||		\
+			s == sys_writev ||		\
+			0);				\
+		__builtin_constant_p(m) ? m : false;	\
+	})
+#endif  /* CONFIG_MOS_MOVE_SYSCALLS */
 
 static inline void __mos_linux_enter(void *sys_wrap)
 {
+#ifdef CONFIG_MOS_MOVE_SYSCALLS
+	if (!__mos_do_on_original_cpu(sys_wrap))
+		mos_linux_enter();
+#endif
 }
 
 static inline void __mos_linux_leave(void *sys_wrap)
 {
+#ifdef CONFIG_MOS_MOVE_SYSCALLS
+	if (!__mos_do_on_original_cpu(sys_wrap))
+		mos_linux_leave();
+#endif
 }
 
 #endif

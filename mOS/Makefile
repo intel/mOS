@@ -15,3 +15,6 @@
 #
 
 obj-$(CONFIG_MOS_FOR_HPC) += mos.o
+
+obj-$(CONFIG_MOS_MOVE_SYSCALLS) += thr_move.o
+obj-$(CONFIG_MOS_MOVE_SYSCALLS) += sys.o
