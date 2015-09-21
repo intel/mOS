@@ -33,6 +33,9 @@
 #ifdef CONFIG_PARAVIRT
 #include <asm/paravirt.h>
 #endif
+#ifdef CONFIG_MOS_SCHEDULER
+#include <linux/mos.h>
+#endif
 
 #include "sched.h"
 #include "../workqueue_internal.h"
@@ -639,6 +642,15 @@ bool sched_can_stop_tick(struct rq *rq)
 	/* Deadline tasks, even if single, need the tick */
 	if (rq->dl.dl_nr_running)
 		return false;
+#ifdef CONFIG_MOS_SCHEDULER
+
+	if (rq->mos.mos_nr_running) {
+		if (!rq->mos.rr_nr_running)
+			return true;
+		else
+			return false;
+	}
+#endif
 
 	/*
 	 * If there are more than one RR tasks, we need the tick to effect the
@@ -760,6 +772,10 @@ static inline void enqueue_task(struct rq *rq, struct task_struct *p, int flags)
 	if (!(flags & ENQUEUE_RESTORE))
 		sched_info_queued(rq, p);
 
+#ifdef CONFIG_MOS_SCHEDULER
+	if (rq->lwkcpu)
+		assimilate_task_mos(rq, p);
+#endif
 	p->sched_class->enqueue_task(rq, p, flags);
 }
 
@@ -916,9 +932,13 @@ static inline bool is_cpu_allowed(struct task_struct *p, int cpu)
 	if (!cpumask_test_cpu(cpu, &p->cpus_allowed))
 		return false;
 
+#ifdef CONFIG_MOS_SCHEDULER
+	if (is_per_cpu_kthread(p) || p->mos_process)
+		return cpu_online(cpu);
+#else
 	if (is_per_cpu_kthread(p))
 		return cpu_online(cpu);
-
+#endif
 	return cpu_active(cpu);
 }
 
@@ -1109,6 +1129,19 @@ static int __set_cpus_allowed_ptr(struct task_struct *p,
 		goto out;
 	}
 
+#ifdef CONFIG_MOS_MOVE_SYSCALLS
+	if (new_mask == NULL) {  /* yuck... */
+		new_mask = this_cpu_ptr(&mos_syscall_mask);
+		if (cpumask_test_cpu(task_cpu(p), new_mask))
+			goto out;
+#ifdef CONFIG_MOS_SCHEDULER
+		this_rq()->mos.stats.sysc_migr++;
+#endif
+		cpumask_copy(&p->mos_savedmask, &p->cpus_allowed);
+	} else if (new_mask != &p->mos_savedmask)
+		cpumask_copy(&p->mos_savedmask, new_mask);
+#endif
+
 	if (cpumask_equal(&p->cpus_allowed, new_mask))
 		goto out;
 
@@ -1129,11 +1162,19 @@ static int __set_cpus_allowed_ptr(struct task_struct *p,
 			p->nr_cpus_allowed != 1);
 	}
 
+#ifdef CONFIG_MOS_SCHEDULER
+	if (p->mos_process)
+		dest_cpu = mos_select_next_cpu(p, new_mask);
+	else {
+#endif
 	/* Can the task run on the task's current CPU? If so, we're done */
 	if (cpumask_test_cpu(task_cpu(p), new_mask))
 		goto out;
 
 	dest_cpu = cpumask_any_and(cpu_valid_mask, new_mask);
+#ifdef CONFIG_MOS_SCHEDULER
+	}
+#endif
 	if (task_running(rq, p) || p->state == TASK_WAKING) {
 		struct migration_arg arg = { p, dest_cpu };
 		/* Need help from migration thread: drop lock and wait. */
@@ -1564,6 +1605,11 @@ int select_task_rq(struct task_struct *p, int cpu, int sd_flags, int wake_flags)
 	else
 		cpu = cpumask_any(&p->cpus_allowed);
 
+#ifdef CONFIG_MOS_SCHEDULER
+	if (p->mos_process && !p->mos.assimilated)
+		/* This is the wakeup of a newly created  mOS process */
+		cpu = mos_select_cpu_candidate(p, cpu);
+#endif
 	/*
 	 * In order not to call set_task_cpu() on a blocking task we need
 	 * to rely on ttwu() to place the task on a valid ->cpus_allowed
@@ -2203,6 +2249,10 @@ static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
 	p->rt.time_slice	= sched_rr_timeslice;
 	p->rt.on_rq		= 0;
 	p->rt.on_list		= 0;
+#ifdef CONFIG_MOS_SCHEDULER
+	INIT_LIST_HEAD(&p->mos.run_list);
+	INIT_LIST_HEAD(&p->mos.util_list);
+#endif
 
 #ifdef CONFIG_PREEMPT_NOTIFIERS
 	INIT_HLIST_HEAD(&p->preempt_notifiers);
@@ -2395,7 +2445,12 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
 	}
 
 	init_entity_runnable_average(&p->se);
-
+#ifdef CONFIG_MOS_SCHEDULER
+	if (current->mos_process) {
+		p->sched_class = &mos_sched_class;
+		p->mos.clone_flags = clone_flags;
+	}
+#endif
 	/*
 	 * The child is not yet in the pid-hash so no cgroup attach races,
 	 * and the cgroup is pinned to this child due to cgroup_fork()
@@ -3064,6 +3119,15 @@ u64 scheduler_tick_max_deferment(void)
 	struct rq *rq = this_rq();
 	unsigned long next, now = READ_ONCE(jiffies);
 
+#ifdef CONFIG_MOS_SCHEDULER
+	/*
+	 * If this is a CPU managed by the LWK, we do not
+	 * want to see any timer ticks
+	 */
+	if (rq->mos.mos_nr_running)
+		return KTIME_MAX;
+#endif
+
 	next = rq->last_sched_tick + HZ;
 
 	if (time_before_eq(next, now))
@@ -3219,6 +3283,10 @@ pick_next_task(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 	const struct sched_class *class;
 	struct task_struct *p;
 
+#ifdef CONFIG_MOS_SCHEDULDER
+	if (rq->lwkcpu)
+		goto again;
+#endif
 	/*
 	 * Optimization: we know that if all tasks are in the fair class we can
 	 * call that function directly, but only if the @prev task wasn't of a
@@ -3729,6 +3797,11 @@ void rt_mutex_setprio(struct task_struct *p, struct task_struct *pi_task)
 	 *      --> -dl task blocks on mutex A and could preempt the
 	 *          running task
 	 */
+#ifdef CONFIG_MOS_SCHEDULER
+	if (p->sched_class == &mos_sched_class)
+		/* Task is controlled by the mOS scheduler. */
+		goto mod_prio;
+#endif
 	if (dl_prio(prio)) {
 		if (!dl_prio(p->normal_prio) ||
 		    (pi_task && dl_entity_preempt(&pi_task->dl, &p->dl))) {
@@ -3751,6 +3824,9 @@ void rt_mutex_setprio(struct task_struct *p, struct task_struct *pi_task)
 		p->sched_class = &fair_sched_class;
 	}
 
+#ifdef CONFIG_MOS_SCHEDULER
+mod_prio:
+#endif
 	p->prio = prio;
 
 	if (queued)
@@ -3982,6 +4058,13 @@ static void __setscheduler(struct rq *rq, struct task_struct *p,
 	if (keep_boost)
 		p->prio = rt_effective_prio(p, p->prio);
 
+#ifdef CONFIG_MOS_SCHEDULER
+	/* If this task is under the control of the mos scheduling
+	 * class, do not alter the class based on task priority.
+	 */
+	if (p->sched_class == &mos_sched_class)
+		return;
+#endif
 	if (dl_prio(p->prio))
 		p->sched_class = &dl_sched_class;
 	else if (rt_prio(p->prio))
@@ -4664,6 +4747,33 @@ long sched_setaffinity(pid_t pid, const struct cpumask *in_mask)
 
 	cpuset_cpus_allowed(p, cpus_allowed);
 	cpumask_and(new_mask, in_mask, cpus_allowed);
+#ifdef CONFIG_MOS_SCHEDULER
+
+	if (p->mos_process) {
+		cpumask_var_t lwk_cpus_allowed;
+
+		/* Is sched_setaffinity disabled for this mOS process */
+		if (p->mos_process->disable_setaffinity &&
+		    p->mos.assimilated) {
+			retval = -(p->mos_process->disable_setaffinity - 1);
+			goto out_free_new_mask;
+		}
+		/* Restrict allowed cpu targets to the lwk cpus */
+		cpumask_and(new_mask, new_mask, this_cpu_ptr(&lwkcpus_mask));
+
+		if (!alloc_cpumask_var(&lwk_cpus_allowed, GFP_KERNEL)) {
+			retval = -EINVAL;
+			goto out_free_new_mask;
+		}
+		/* Restrict allowed cpus to reserved lwk and utility */
+		cpumask_or(lwk_cpus_allowed, p->mos_process->lwkcpus,
+			   p->mos_process->utilcpus);
+		cpumask_and(new_mask, new_mask, lwk_cpus_allowed);
+		free_cpumask_var(lwk_cpus_allowed);
+		/* Bump the count of mOS setaffinity */
+		this_rq()->mos.stats.setaffinity++;
+	}
+#endif
 
 	/*
 	 * Since bandwidth control happens on root_domain basis,
@@ -5960,6 +6070,11 @@ void __init sched_init(void)
 		zalloc_cpumask_var(&cpu_isolated_map, GFP_NOWAIT);
 	idle_thread_set_boot_cpu();
 	set_cpu_rq_start_time(smp_processor_id());
+#endif
+
+#ifdef CONFIG_MOS_SCHEDULER
+	mos_sched_init();
+
 #endif
 	init_sched_fair_class();
 

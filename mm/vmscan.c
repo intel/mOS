@@ -3561,8 +3561,13 @@ static int kswapd(void *p)
 	};
 	const struct cpumask *cpumask = cpumask_of_node(pgdat->node_id);
 
+
+#ifdef CONFIG_MOS_SCHEDULER
+	mos_set_cpus_allowed_kthread(tsk, cpumask);
+#else
 	if (!cpumask_empty(cpumask))
 		set_cpus_allowed_ptr(tsk, cpumask);
+#endif
 	current->reclaim_state = &reclaim_state;
 
 	/*
@@ -3718,9 +3723,14 @@ static int kswapd_cpu_online(unsigned int cpu)
 
 		mask = cpumask_of_node(pgdat->node_id);
 
+<#ifdef CONFIG_MOS_SCHEDULER
+		mos_set_cpus_allowed_kthread(pgdat->kswapd, mask);
+#else
 		if (cpumask_any_and(cpu_online_mask, mask) < nr_cpu_ids)
 			/* One of our CPUs online: restore mask */
 			set_cpus_allowed_ptr(pgdat->kswapd, mask);
+#endif
+		}
 	}
 	return 0;
 }
