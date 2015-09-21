@@ -10,11 +10,15 @@
 # FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
 # more details.
 
-#
-# mOS: hybrid FWK/LWK for HPC
-#
+.PHONY.:	all clean
 
-obj-$(CONFIG_MOS_FOR_HPC) += mos.o
-obj-$(CONFIG_MOS_FOR_HPC) += lwkcpu.o lwkctrl.o mosras.o
+all:	getppid getpriority
 
-obj-$(CONFIG_MOS_MOVE_SYSCALLS) += thr_move.o
+getppid:	getppid.c
+	$(CC) -Wall $< -o $@
+
+getpriority:	getpriority.c
+	$(CC) -Wall $< -o $@
+
+clean:
+	@rm -f getppid getpriority

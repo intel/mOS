@@ -108,6 +108,10 @@
 #define CREATE_TRACE_POINTS
 #include <trace/events/task.h>
 
+#ifdef CONFIG_MOS_MOVE_SYSCALLS
+void mos_linux_duped(struct task_struct *p);
+#endif
+
 /*
  * Minimum number of threads to boot the kernel
  */
@@ -893,6 +897,10 @@ static struct task_struct *dup_task_struct(struct task_struct *orig, int node)
 
 	if (err)
 		goto free_stack;
+
+#ifdef CONFIG_MOS_MOVE_SYSCALLS
+	mos_linux_duped(tsk);
+#endif
 
 #ifdef CONFIG_SECCOMP
 	/*
