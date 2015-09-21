@@ -54,4 +54,16 @@ comment "!RCU_FAST_NO_HZ recommended for mOS"
 
 source "mOS/lwkmem/Kconfig"
 
+config MOS_SCHEDULER
+	bool "Enable mOS scheduler"
+	depends on MOS_FOR_HPC
+	help
+	  When threads are affinitized to a LWK CPU, the scheduling
+	  is under the control of the mOS scheduler.
+
+	  This feature remains disabled unless you specify which CPUs
+	  are designated as LWK CPUs with the lwkcpus kernel
+	  command line option or with the creation of an lwk partition
+	  using the lwkctl command.
+
 endif	# if MOS_FOR_HPC

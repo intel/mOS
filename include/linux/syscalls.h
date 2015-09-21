@@ -82,7 +82,6 @@ struct open_how;
 #include <linux/key.h>
 #include <linux/personality.h>
 #include <trace/syscall.h>
-#include <linux/mos.h>
 
 #ifdef CONFIG_ARCH_HAS_SYSCALL_WRAPPER
 /*
