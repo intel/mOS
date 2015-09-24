@@ -81,6 +81,10 @@ def main(argv):
                    help='path of yod binary to use')
     p.add_argument('--test-ncpus', type=int,
                    help=argparse.SUPPRESS)
+    p.add_argument('--test-spin', type=int, default=24,
+                   help=argparse.SUPPRESS)
+    p.add_argument('--test-yod-scalar',
+                   help=argparse.SUPPRESS)
     p.add_argument('pattern', nargs='*',
                    help='name or glob pattern of tests to execute')
     global ARGS
