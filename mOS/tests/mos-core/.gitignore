@@ -1,0 +1,3 @@
+cpuset.c
+affinity_test
+fork_test
