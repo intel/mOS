@@ -79,7 +79,11 @@ def main(argv):
                    help='disable buffering test output for display only on failure')
     p.add_argument('--yod', metavar='PATH',
                    help='path of yod binary to use')
+    p.add_argument('--test-debug', action='store_true',
+                   help=argparse.SUPPRESS)
     p.add_argument('--test-ncpus', type=int,
+                   help=argparse.SUPPRESS)
+    p.add_argument('--test-spin', type=int, default=24,
                    help=argparse.SUPPRESS)
     p.add_argument('pattern', nargs='*',
                    help='name or glob pattern of tests to execute')
@@ -89,9 +93,13 @@ def main(argv):
     levels = {0: logging.ERROR,     # -q
               1: logging.WARNING,   # default
               2: logging.INFO,      # -v
-              3: logging.DEBUG}     # -vv
+              3: logging.DEBUG,     # -vv
+              4: logging.DEBUG}     # -vvv
     args.verbosity = min(max(sum(args.verbosity), 0), max(levels))
     logger.setLevel(levels[min(args.verbosity, max(levels))])
+
+    if args.verbosity == max(levels):
+        args.test_debug = True
 
     if args.yod and not os.access(args.yod, os.X_OK):
         logger.error('invalid path for yod: %s', args.yod)

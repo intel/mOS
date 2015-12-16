@@ -1,0 +1,32 @@
+# Multi Operating System (mOS)
+# Copyright (c) 2016, Intel Corporation.
+#
+# This program is free software; you can redistribute it and/or modify it
+# under the terms and conditions of the GNU General Public License,
+# version 2, as published by the Free Software Foundation.
+#
+# This program is distributed in the hope it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+# more details.
+
+hostprogs-$(CONFIG_MOS_SCHEDULER) := thread_placement fork_process aff_scan timer_preemption thread_priority
+
+HOST_EXTRACFLAGS += -pthread -Wextra -g
+
+thread_placement-objs := thread_placement.o lwksched.o
+HOSTLOADLIBES_thread_placement := -pthread
+
+fork_process-objs := fork_process.o lwksched.o
+HOSTLOADLIBES_fork_process := -pthread
+
+aff_scan-objs := aff_scan.o lwksched.o
+HOSTLOADLIBES_aff_scan := -pthread
+
+timer_preemption-objs := timer_preemption.o lwksched.o
+HOSTLOADLIBES_timer_preemption := -pthread
+
+thread_priority-objs := thread_priority.o lwksched.o
+HOSTLOADLIBES_thread_priority := -pthread
+
+always := $(hostprogs-y)
