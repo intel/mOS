@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+
+# Multi Operating System (mOS)
+# Copyright (c) 2016, Intel Corporation.
+#
+# This program is free software; you can redistribute it and/or modify it
+# under the terms and conditions of the GNU General Public License,
+# version 2, as published by the Free Software Foundation.
+#
+# This program is distributed in the hope it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+# more details.
+
+import sys, logging, unittest, os, argparse, fnmatch
+
+sys.dont_write_bytecode = True
+
+logging.basicConfig(format='[%(levelname)-8s] %(module)s.%(funcName)s: %(message)s',
+                    level=logging.INFO)
+logger = logging.getLogger()
+
+def test_dirs(top):
+    for d in os.listdir(top):
+        d = os.path.join(top, d)
+        if os.path.isdir(d) and any(f.endswith('.py') for f in os.listdir(d)):
+            yield d
+
+def load_tests(loader, prefix='test.', omit='__init__', suffix='.py'):
+    # avoid discover() due to bugs on Python 3.3
+    # allowing arbitrary file names is also nice
+    from importlib.machinery import SourceFileLoader
+    suite = unittest.TestSuite()
+    top = os.path.dirname(__file__)
+    for subtop in test_dirs(top):
+        for path, subdirs, files in os.walk(subtop):
+            for fp in [os.path.join(path, f)
+                       for f in files if f.endswith(suffix)]:
+                name = os.path.relpath(fp, top)[:-len(suffix)]
+                if name.endswith('/' + omit):
+                    name = name[:-1-len(omit)]
+                sys.path.insert(0, os.path.dirname(fp))
+                try:
+                    module = SourceFileLoader(name, fp).load_module(name)
+                    n0 = suite.countTestCases()
+                    suite.addTests(loader.loadTestsFromModule(module))
+                    n1 = suite.countTestCases()
+                    logger.debug('loaded %d tests from %s', n1 - n0, fp)
+                except BaseException:
+                    logger.debug('exception in %s:', fp, exc_info=True)
+                    logger.warn('exception while loading %s', fp)
+                finally:
+                    sys.path.pop(0)
+    return suite
+
+def for_each_test(suite, func):
+    for t in suite:
+        if isinstance(t, unittest.TestSuite):
+            for r in for_each_test(t, func):
+                yield r
+        else:
+            yield func(t)
+
+def main(argv):
+    p = argparse.ArgumentParser(description='mOS testing tool')
+    p.add_argument('-l', '--list', action='store_true',
+                   help='list all loaded tests and exit')
+    p.add_argument('-q', '--quiet', action='append_const',
+                   dest='verbosity', const=-1, default=[1],
+                   help='quiet output')
+    p.add_argument('-v', '--verbose', action='append_const',
+                   dest='verbosity', const=1,
+                   help='verbose output (twice for debug output)')
+    p.add_argument('-f', '--failfast', action='store_true',
+                   help='stop on the first failure or error')
+    p.add_argument('-c', '--catch', action='store_true',
+                   help='catch Ctrl-C and display results so far')
+    p.add_argument('--unbuffered', action='store_true',
+                   help='disable buffering test output for display only on failure')
+    p.add_argument('--yod', metavar='PATH',
+                   help='path of yod binary to use')
+    p.add_argument('--test-ncpus', type=int,
+                   help=argparse.SUPPRESS)
+    p.add_argument('pattern', nargs='*',
+                   help='name or glob pattern of tests to execute')
+    global ARGS
+    ARGS = args = p.parse_args(argv)
+
+    levels = {0: logging.ERROR,     # -q
+              1: logging.WARNING,   # default
+              2: logging.INFO,      # -v
+              3: logging.DEBUG}     # -vv
+    args.verbosity = min(max(sum(args.verbosity), 0), max(levels))
+    logger.setLevel(levels[min(args.verbosity, max(levels))])
+
+    if args.yod and not os.access(args.yod, os.X_OK):
+        logger.error('invalid path for yod: %s', args.yod)
+        return 10
+
+    # discover available tests, match against patterns
+
+    full = load_tests(unittest.defaultTestLoader)
+    if args.pattern:
+        def match(t):
+            for p in args.pattern:
+                if fnmatch.fnmatch(t.id(), p):
+                    return t
+        suite = unittest.TestSuite(filter(None, for_each_test(full, match)))
+    else:
+        suite = full
+
+    # list discovered and matched tests, if requested
+
+    if args.list:
+        term = 'matching' if args.pattern else 'available'
+        print('{} {} tests'.format(suite.countTestCases(), term))
+        for n in sorted(for_each_test(suite, lambda t: t.id())):
+            print('  {}'.format(n))
+        return 0
+
+    # otherwise, run them
+
+    def make_result(*args):
+        r = unittest.TextTestResult(*args)
+        unittest.registerResult(r)
+        return r
+    if args.catch:
+        unittest.installHandler()
+    runner = unittest.TextTestRunner(verbosity=args.verbosity,
+                                     failfast=args.failfast,
+                                     buffer=not args.unbuffered,
+                                     resultclass=make_result)
+    result = runner.run(suite)
+
+    return 1 if result.errors or result.failures else 0
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))
