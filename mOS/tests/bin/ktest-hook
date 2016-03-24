@@ -1,0 +1,62 @@
+#!/bin/bash
+
+# Multi Operating System (mOS)
+# Copyright (c) 2016, Intel Corporation.
+#
+# This program is free software; you can redistribute it and/or modify it
+# under the terms and conditions of the GNU General Public License,
+# version 2, as published by the Free Software Foundation.
+#
+# This program is distributed in the hope it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+# more details.
+
+fatal () {
+	echo "$@" 1>&2
+	exit 42
+}
+
+[ -n "$KTEST_TESTS" ] || fatal "KTEST_TESTS unset"
+
+MAKE="make --warn-undefined-variables --no-print-directory \
+	-C $KTEST_TESTS \
+	-I machines \
+	-f ktests/Makefile \
+	"
+
+while :; do
+	case "$1" in
+	*=*)
+		declare -x "$1";;
+	--)
+		break;;
+	*)
+		fatal "$0: non-assignment before -- separator";;
+	esac
+	shift
+done
+shift
+
+case "$1" in
+	make)
+		# we mustn't write to stdout in this case, otherwise
+		# "make kernelversion" will freak
+		exec "$@";;
+esac
+
+echo
+case "$1" in
+	ssh)
+		shift 1
+		$MAKE ssh SSH_COMMAND="`printf '%q ' "$@"`";;
+	scp|install)
+		[ $# -eq 3 ] || fatal "$0 $1: error $# != 3"
+		$MAKE $1 SRC_FILE="$2" DST_FILE="$3";;
+	*)
+		$MAKE "$@";;
+esac
+
+ret=$?
+
+exit $ret
