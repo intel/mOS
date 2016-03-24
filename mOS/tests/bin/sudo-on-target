@@ -1,0 +1,23 @@
+#!/bin/bash
+
+# Multi Operating System (mOS)
+# Copyright (c) 2016, Intel Corporation.
+#
+# This program is free software; you can redistribute it and/or modify it
+# under the terms and conditions of the GNU General Public License,
+# version 2, as published by the Free Software Foundation.
+#
+# This program is distributed in the hope it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+# more details.
+
+[ $# -ge 2 ] || { echo "Usage: $0 hostname command..." 1>&2; exit 1; }
+set -e
+host="$1"
+shift
+cmd="$(printf '%q ' "$@")"
+[ $# -gt 1 ] && cmd="$(printf '%q' "$cmd")"
+wrap="$(dirname "$0")/with-pty"  # prefer script dir
+[ -x "$wrap" ] || wrap="with-pty"  # otherwise, $PATH
+exec "$wrap" -- ssh -t "$host" sudo /bin/sh -c $cmd
