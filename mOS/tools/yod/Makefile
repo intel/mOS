@@ -13,7 +13,7 @@
 HOST_EXTRACFLAGS += -I$(src)/../../../include
 
 hostprogs-y := yod
-scriptprogs-y := yod.sh yod.1.man
+scriptprogs-y := yod.sh yod.1.man 02-mos.rules
 
 yod-objs := yod.o mos_plugin.o test_plugin.o yod_cpuset.o layout.o
 HOSTLOADLIBES_yod := -lm
@@ -22,5 +22,7 @@ yod.sh_installname := yod
 yod.sh_installpath := /usr/bin
 yod.1.man_installname := yod.1
 yod.1.man_installpath := /usr/share/man/man1
+02-mos.rules_installname := 02-mos.rules
+02-mos.rules_installpath := /etc/udev/rules.d
 
 include $(src)/../Makefile.tool
