@@ -178,6 +178,7 @@ echo "%files mOS"
 echo '%defattr (-, root, root)'
 echo "/usr/bin/*"
 echo "/usr/share/man/man1/*"
+echo "/etc/udev/rules.d/*"
 echo ""
 fi
 if ! $PREBUILT; then

@@ -1,0 +1,1 @@
+ENV{MOS_SYSFS_FIXED}=="", RUN+="/bin/chmod -R o=u /sys/kernel/mOS", ENV{MOS_SYSFS_FIXED}="yes"
