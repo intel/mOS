@@ -150,6 +150,9 @@ struct irq_common_data {
 #ifdef CONFIG_GENERIC_IRQ_IPI
 	unsigned int		ipi_offset;
 #endif
+#ifdef CONFIG_MOS_FOR_HPC
+	cpumask_var_t		affinity_linux;
+#endif
 };
 
 /**
@@ -726,6 +729,23 @@ static inline struct cpumask *irq_data_get_affinity_mask(struct irq_data *d)
 {
 	return d->common->affinity;
 }
+
+#ifdef CONFIG_MOS_FOR_HPC
+extern bool irq_save_affinity_linux(int irq, cpumask_var_t lwkcpus);
+extern bool irq_restore_affinity_linux(int irq);
+
+static inline struct cpumask *irq_get_affinity_linux_mask(int irq)
+{
+	struct irq_data *d = irq_get_irq_data(irq);
+
+	return d ? d->common->affinity_linux : NULL;
+}
+#else
+static inline struct cpumask *irq_get_affinity_linux_mask(int irq)
+{
+	return NULL;
+}
+#endif
 
 unsigned int arch_dynirq_lower_bound(unsigned int from);
 

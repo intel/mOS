@@ -18,6 +18,7 @@
 
 #include <linux/cpumask.h>
 #include <linux/sched.h>
+#include <linux/cpuhotplug.h>
 
 /* Is current and MOS task? */
 #if defined(CONFIG_MOS_FOR_HPC) && defined(MOS_IS_LWK_PROCESS)
@@ -27,13 +28,28 @@
 #endif
 
 #ifdef CONFIG_MOS_FOR_HPC
+#define cpu_lwkcpus_mask this_cpu_ptr(&lwkcpus_mask)
+#define cpu_islwkcpu(cpu) cpumask_test_cpu((cpu), cpu_lwkcpus_mask)
+#define mos_lwkcpus_arg (&__mos_lwkcpus_arg)
+#define mos_sccpus_arg (&__mos_sccpus_arg)
+#else
+#define cpu_lwkcpus_mask NULL
+#define cpu_islwkcpu(cpu) false
+#define mos_lwkcpus_arg NULL
+#define mos_sccpus_arg NULL
+#endif
+
+#ifdef CONFIG_MOS_FOR_HPC
 
 /* mOS definitions */
 extern cpumask_t lwkcpus_mask;
 extern cpumask_t mos_syscall_mask;
+extern cpumask_t __mos_lwkcpus_arg;
+extern cpumask_t __mos_sccpus_arg;
 
 extern void mos_linux_enter(void);
 extern void mos_linux_leave(void);
+extern void mos_sysfs_update(void);
 
 extern void mos_exit_thread(pid_t pid, pid_t tgid);
 
@@ -96,6 +112,14 @@ extern int lwkmem_set_domain_info(struct mos_process_t *mos_p,
 	       enum lwkmem_type_t typ, unsigned long *nids,
 	       size_t n) __attribute__((weak));
 
+/* Needed by LWKCTL module to trigger the creation of default LWK partition */
+extern int lwk_config_lwkcpus(char *parm_value, char *profile);
+/*
+ * Function exposed by LWK control to trigger the creation of default LWK part-
+ * -ition as specified in Linux command line. This function is called from
+ * init/main.c during kernel bootup.
+ */
+extern void lwkctl_def_partition(void);
 #ifdef CONFIG_MOS_LWKMEM
 /* Memory additions go here */
 #endif
@@ -114,6 +138,11 @@ extern int lwkmem_set_domain_info(struct mos_process_t *mos_p,
  *         access to it from within mOS
  * Make use to include mos.h in Linux files that needed changes in 4.)
  */
+extern int do_cpu_up(unsigned int cpu, enum cpuhp_state target);
+extern int do_cpu_down(unsigned int cpu, enum cpuhp_state target);
 
+#else
+static inline int lwk_config_lwkcpus(char *parm_value, char *p) { return -1; }
+static inline void lwkctl_def_partition(void) {}
 #endif /* CONFIG_MOS_FOR_HPC */
 #endif /* _LINUX_MOS_H */
