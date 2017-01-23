@@ -19,6 +19,7 @@
 #include <linux/sched.h>
 #include <linux/sched/idle.h>
 #include <linux/hypervisor.h>
+#include <linux/mos.h>
 
 #include "smpboot.h"
 
@@ -564,18 +565,31 @@ void __init smp_init(void)
 {
 	int num_nodes, num_cpus;
 	unsigned int cpu;
+	bool no_lwkcpus = true;
+	int booted = 1;
 
 	idle_threads_init();
 	cpuhp_threads_init();
 
 	pr_info("Bringing up secondary CPUs ...\n");
 
+	if (IS_ENABLED(CONFIG_MOS_FOR_HPC))
+		no_lwkcpus = cpumask_empty(mos_lwkcpus_arg);
+
 	/* FIXME: This should be done in userspace --RR */
 	for_each_present_cpu(cpu) {
-		if (num_online_cpus() >= setup_max_cpus)
-			break;
-		if (!cpu_online(cpu))
+		if (no_lwkcpus) {
+			if (num_online_cpus() >= setup_max_cpus)
+				break;
+		} else {
+			if (cpumask_test_cpu(cpu, mos_lwkcpus_arg))
+				continue;
+		}
+
+		if (!cpu_online(cpu)) {
 			cpu_up(cpu);
+			booted++;
+		}
 	}
 
 	num_nodes = num_online_nodes();
@@ -585,7 +599,10 @@ void __init smp_init(void)
 		num_cpus,  (num_cpus  > 1 ? "s" : ""));
 
 	/* Any cleanup work */
-	smp_cpus_done(setup_max_cpus);
+	if (no_lwkcpus)
+		smp_cpus_done(setup_max_cpus);
+	else
+		smp_cpus_done(cpumask_weight(mos_lwkcpus_arg) + booted);
 }
 
 /*

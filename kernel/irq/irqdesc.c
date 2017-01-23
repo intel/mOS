@@ -75,6 +75,19 @@ static int alloc_masks(struct irq_desc *desc, int node)
 		return -ENOMEM;
 	}
 #endif
+#ifdef CONFIG_MOS_FOR_HPC
+	if (!zalloc_cpumask_var_node(&desc->irq_common_data.affinity_linux,
+		GFP_KERNEL, node)) {
+#ifdef CONFIG_GENERIC_PENDING_IRQ
+		free_cpumask_var(desc->pending_mask);
+#endif
+#ifdef CONFIG_GENERIC_IRQ_EFFECTIVE_AFF_MASK
+		free_cpumask_var(desc->irq_common_data.effective_affinity);
+#endif
+		free_cpumask_var(desc->irq_common_data.affinity);
+		return -ENOMEM;
+	}
+#endif
 	return 0;
 }
 
@@ -85,6 +98,9 @@ static void desc_smp_init(struct irq_desc *desc, int node,
 		affinity = irq_default_affinity;
 	cpumask_copy(desc->irq_common_data.affinity, affinity);
 
+#ifdef CONFIG_MOS_FOR_HPC
+	cpumask_clear(desc->irq_common_data.affinity_linux);
+#endif
 #ifdef CONFIG_GENERIC_PENDING_IRQ
 	cpumask_clear(desc->pending_mask);
 #endif
@@ -330,6 +346,9 @@ static void delete_irq_desc(unsigned int irq)
 #ifdef CONFIG_SMP
 static void free_masks(struct irq_desc *desc)
 {
+#ifdef CONFIG_MOS_FOR_HPC
+	free_cpumask_var(desc->irq_common_data.affinity_linux);
+#endif
 #ifdef CONFIG_GENERIC_PENDING_IRQ
 	free_cpumask_var(desc->pending_mask);
 #endif
