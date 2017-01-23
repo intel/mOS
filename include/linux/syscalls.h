@@ -959,6 +959,7 @@ asmlinkage long sys_pkey_free(int pkey);
 			s == sys_futex ||	        \
 			s == sys_getitimer ||		\
 			s == sys_gettimeofday ||	\
+			s == sys_mbind ||		\
 			s == sys_mmap ||		\
 			s == sys_mmap_pgoff ||		\
 			s == sys_mremap ||		\

@@ -512,13 +512,12 @@ struct rt_rq {
 
 extern const struct sched_class mos_sched_class;
 
+extern int init_sched_mos(void);
 extern void assimilate_task_mos(struct rq *rq, struct task_struct *p);
 extern int mos_select_cpu_candidate(struct task_struct *p, int cpu);
 extern int mos_select_next_cpu(struct task_struct *p,
 			       const struct cpumask *new_mask);
 extern void mos_set_task_cpu(struct task_struct *p, int new_cpu);
-extern void __init mos_sched_init(void);
-extern cpumask_t lwkcpus_mask;
 
 #define MOS_RQ_MAX_INDEX (101)
 #define MOS_RQ_DL_INDEX (MOS_RQ_MAX_INDEX - 2)
@@ -542,6 +541,7 @@ struct mos_sched_stats {
 	unsigned int max_running;
 	unsigned int guest_dispatch;
 	unsigned int guests;
+	unsigned int givebacks;
 	unsigned int timer_pop;
 	unsigned int sysc_migr;
 	unsigned int setaffinity;
