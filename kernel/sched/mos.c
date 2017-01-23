@@ -63,6 +63,8 @@ enum MatchType {FirstAvail = 0,
 		OtherNuma,
 		};
 
+static cpumask_var_t saved_wq_mask;
+
 static inline struct task_struct *mos_task_of(struct sched_mos_entity *mos_se)
 {
 	return container_of(mos_se, struct task_struct, mos);
@@ -78,6 +80,19 @@ static void sched_stats_init(struct mos_sched_stats *stats)
 	memset(stats, 0, sizeof(struct mos_sched_stats));
 }
 
+static void sched_stats_prepare_launch(struct mos_sched_stats *stats)
+{
+	/* leave stats->guests unchanged */
+	/* leave stats->givebacks unchanged */
+	stats->pid = 0;
+	stats->max_commit_level = 0;
+	stats->max_running = 0;
+	stats->guest_dispatch = 0;
+	stats->timer_pop = 0;
+	stats->sysc_migr = 0;
+	stats->setaffinity = 0;
+}
+
 static void init_mos_topology(struct rq *rq)
 {
 	struct cpu_cacheinfo *cci;
@@ -85,6 +100,12 @@ static void init_mos_topology(struct rq *rq)
 	int i;
 	int cpu;
 	struct mos_rq *mos_rq = &rq->mos;
+
+	mos_rq->core_id = -1;
+	mos_rq->l1c_id = -1;
+	mos_rq->l2c_id = -1;
+	mos_rq->l3c_id = -1;
+	mos_rq->tindex = -1;
 
 	/* Get the numa node identifier associated with this CPU */
 	mos_rq->numa_id = cpu_to_node(rq->cpu);
@@ -126,10 +147,11 @@ static void init_mos_topology(struct rq *rq)
 	}
 }
 
-static void init_mos_rq(struct mos_rq *mos_rq)
+static void init_mos_rq(struct rq *rq)
 {
 	struct mos_prio_array *array;
 	int i;
+	struct mos_rq *mos_rq = &rq->mos;
 
 	array = &mos_rq->active;
 	for (i = 0; i <= MOS_RQ_MAX_INDEX; i++) {
@@ -145,19 +167,7 @@ static void init_mos_rq(struct mos_rq *mos_rq)
 	mos_rq->mos_runtime = 0;
 	sched_stats_init(&mos_rq->stats);
 	atomic_set(&mos_rq->commit_level, 0);
-	/*
-	 * Initialize topology fields to indicate not available.
-	 * These fields will be set later in the boot after the
-	 * topology information has been constructed.
-	 */
-	mos_rq->core_id = -1;
-	mos_rq->l1c_id = -1;
-	mos_rq->l2c_id = -1;
-	mos_rq->l3c_id = -1;
-	mos_rq->tindex = -1;
 }
-
-
 
 static inline int on_mos_rq(struct sched_mos_entity *mos_se)
 {
@@ -320,20 +330,43 @@ static inline int mos_rq_index(int priority)
  */
 void assimilate_task_mos(struct rq *rq, struct task_struct *p)
 {
-	struct mos_process_t *mosp = p->mos_process;
+	struct mos_process_t *mosp;
 
 	/*
-	 * If this task has already been assimilated, return. This should
-	 * be the most common path through this function after the app
-	 * has been launched. */
-	if (likely(p->mos.assimilated))
+	 * If this task has already been assimilated, and we are on an
+	 * lwkcpu, return. This should be the most common path through
+	 * this function after the app has been launched.
+	 */
+	if (likely(p->mos.assimilated)) {
+		if (likely(rq->lwkcpu))
+			return;
+		else if (unlikely((p->mos.thread_type ==
+						mos_thread_type_guest))) {
+			/* LWK CPUs are likely being returned to Linux.
+			 * Another possibility is a rogue kthread that was
+			 * affinitized to a LWK CPU and now is affinitized to
+			 * a Linux CPU. We need to give this assimilated Linux
+			 * kthread  back to the Linux scheduler. We already
+			 * hold the runqueue lock  and we know we are at the
+			 * point just prior to calling the enqueue_task method
+			 * on the scheduler class. It is safe to change the
+			 * scheduling class back to the task's original class.
+			 */
+			p->sched_class = p->mos.orig_class;
+			p->policy = p->mos.orig_policy;
+			p->mos.assimilated = 0;
+			rq->mos.stats.givebacks++;
+			trace_mos_giveback_thread(p);
+		}
+	}
+	if (!rq->lwkcpu)
 		return;
-
 	/*
 	 * If this is a new mOS process, convert it. This flow will be enterred
 	 * when an mos process is being launched on an LWK core for the first
 	 * time.
 	 */
+	mosp = p->mos_process;
 	if (mosp) {
 		p->policy = mosp->enable_rr ? SCHED_RR : SCHED_FIFO;
 		p->prio = MOS_DEFAULT_PRIO;
@@ -363,56 +396,34 @@ void assimilate_task_mos(struct rq *rq, struct task_struct *p)
 	 * LWK CPUs. If they run on our CPUs then they must play by
 	 * our rules.
 	 */
-	if ((strncmp(p->comm, "kworker", 7)) &&
-	    (strncmp(p->comm, "ksoftirqd", 9)) &&
+	if ((strncmp(p->comm, "ksoftirqd", 9)) &&
 	    (strncmp(p->comm, "cpuhp", 5)) &&
 	    (strncmp(p->comm, "mos_idle", 8))) {
-		/*
-		 * The systemd-udevd process shows up at boot time on each
-		 * of our CPUs and is eventually affinitized to Linux CPUs.
-		 * We do not want to assimilate this Linux process since it will
-		 * be spending the remainder of its life on Linux CPUs. We exit
-		 * before affinitizing this task into the mOS scheduler so that
-		 *  we do no disturb system behavior.
-		 */
-		if (!strncmp(p->comm, "systemd-udevd", 13))
-			return;
-		/*
-		 * Ignore the initial boot task, which is also
-		 * the CPU0 idle task. We will be inserting our own
-		 * mOS idle tasks on all LWK CPUs after Linux is initialized.
-		 */
-		if (!strncmp(p->comm, "swapper", 7))
-			return;
-		/*
-		 * Un-expected task. Cut a trace and continue. In the
-		 * future we may want to get more aggressive.
-		 */
-		trace_mos_assimilate_unexpected(p);
-		pr_warn("mOS: Unexpected assimilation of task %s. Cpus_allowed: %*pbl\n",
+		/* Un-expected task. Warn and continue with assimilation */
+		pr_warn("mOS-sched: Unexpected assimilation of task %s. Cpus_allowed: %*pbl\n",
 			p->comm, cpumask_pr_args(tsk_cpus_allowed(p)));
-
 	}
-	if (p->sched_class == &dl_sched_class) {
-		trace_mos_assimilate_deadline(p);
-		p->mos.assimilated = 1;
-	} else if (p->sched_class == &rt_sched_class) {
-		trace_mos_assimilate_rt(p);
-		p->mos.assimilated = 1;
-	} else if (p->sched_class == &fair_sched_class) {
-		trace_mos_assimilate_fair(p);
-		p->mos.assimilated = 1;
-	} else
-		trace_mos_assimilate_unrecognized(p);
+	p->mos.orig_class = p->sched_class;
+	p->mos.orig_policy = p->policy;
 
+	if ((p->sched_class == &dl_sched_class) ||
+	    (p->sched_class == &rt_sched_class) ||
+	    (p->sched_class == &fair_sched_class)) {
+		p->mos.assimilated = 1;
+	} else {
+		pr_warn("mOS-sched: Unrecognized scheduling class. Policy=%d\n",
+				p->policy);
+	}
 	if (p->mos.assimilated) {
 		p->sched_class = &mos_sched_class;
 		p->mos.time_slice = p->mos.orig_time_slice = MOS_TIMESLICE;
-		if (p == rq->mos.idle)
+		if (p == rq->mos.idle) {
 			p->mos.thread_type = mos_thread_type_idle;
-		else {
+			trace_mos_assimilate_idle(p);
+		} else {
 			p->mos.thread_type = mos_thread_type_guest;
 			rq->mos.stats.guests++;
+			trace_mos_assimilate_guest(p);
 		}
 	}
 }
@@ -1008,12 +1019,17 @@ static int mos_idle_main(void *data)
 	vtime_init_idle(current, cpu);
 	init_idle_preempt_count(current, cpu);
 	local_irq_enable();
+	/*
+	 * Barrier prior to reading lwkcpu in the while loop.
+	 * Pairs with barrier in mos_sched_deactivate
+	 */
+	smp_rmb();
 
-	while (1) {
+	while (rq->lwkcpu) {
 		__current_set_polling();
 		tick_nohz_idle_enter();
 
-		while (!need_resched()) {
+		while (!need_resched() && rq->lwkcpu) {
 			rmb(); /* sync need_resched and polling settings */
 			local_irq_disable();
 			arch_cpu_idle_enter();
@@ -1060,7 +1076,14 @@ static int mos_idle_main(void *data)
 		smp_mb__after_atomic();
 		sched_ttwu_pending();
 		schedule_preempt_disabled();
+		/*
+		 * Barrier prior to reading lwkcpu in the while loop.
+		 * Pairs with barrier in mos_sched_deactive.
+		 */
+		smp_rmb();
 	}
+	/* Exiting. Remove special idle thread treatment to allow normal exit */
+	current->mos.thread_type  = mos_thread_type_guest;
 	return 0;
 }
 
@@ -1142,7 +1165,7 @@ void mos_sched_prepare_launch(void)
 
 		/* initialize mos run queue */
 		atomic_set(&mos->commit_level, 0);
-		sched_stats_init(&mos->stats);
+		sched_stats_prepare_launch(&mos->stats);
 	}
 
 	/* Save the original cpus_allowed mask */
@@ -1165,7 +1188,7 @@ void mos_sched_exit_thread(void)
 */
 int mos_select_next_cpu(struct task_struct *p, const struct cpumask *new_mask)
 {
-	/* 
+	/*
 	 * If this is the initial thread of the process and if the CPU
 	 * it was originally launched on is currently uncommitted and it's
 	 * affinity mask now contains this CPU, use it. This covers the
@@ -1201,7 +1224,7 @@ int mos_select_next_cpu(struct task_struct *p, const struct cpumask *new_mask)
 	/*
 	 * All other conditions pick first cpu in the new mask
 	 */
-	return cpumask_any_and(cpu_active_mask, new_mask);
+	return cpumask_any_and(cpu_online_mask, new_mask);
 }
 
 /*
@@ -1231,64 +1254,6 @@ int mos_select_cpu_candidate(struct task_struct *p, int cpu)
 	}
 	return ncpu;
 }
-
-/*
- * Called from Linux when attempting to set the cpus allowed mask
- * for a kthread daemon that is not required to be bound to a specific
- * processor (e.g. kcompactd, kswapd). This function replaces the
- * Linux set_cpus_allowed_ptr method in order to remove LWK CPUs from
- * the supplied mask. If there are no CPUs remaining after removing the
- * LWK CPUs from the mask, the cpus allowed pointer in the task is used
- * as a starting point and the LWK CPUs are removed from that mask.
- * If this also results in no CPUs in the mask, the mask of the non-LWK
- * CPUs is used.
- */
-void mos_set_cpus_allowed_kthread(struct task_struct *p,
-				  const struct cpumask *cpumask)
-{
-	cpumask_var_t new_mask;
-	cpumask_t *lwkcpus = this_cpu_ptr(&lwkcpus_mask);
-
-	if (alloc_cpumask_var(&new_mask, GFP_KERNEL)) {
-		/* exclude the lwk cpus from requested cpu mask */
-		cpumask_andnot(new_mask, cpumask, lwkcpus);
-		if (!(cpumask_intersects(new_mask, cpu_online_mask))) {
-			/* exclude lwkcpus from current cpus_allowed */
-			cpumask_andnot(new_mask, tsk_cpus_allowed(p), lwkcpus);
-			if (!(cpumask_intersects(new_mask, cpu_online_mask)))
-				/* generate mask of all the Linux CPUs */
-				cpumask_andnot(new_mask, cpu_possible_mask,
-						lwkcpus);
-		}
-		set_cpus_allowed_ptr(p, new_mask);
-		free_cpumask_var(new_mask);
-	} else
-		pr_warn("CPU mask allocation failure in %s.\n", __func__);
-}
-
-/*
- * Called from the core scheduler's sched_init. Perform the very
- * early boot time initializations required for the mOS scheduler.
-*/
-void __init mos_sched_init(void)
-{
-	int i;
-	cpumask_t *mask = per_cpu_ptr(&lwkcpus_mask, 0);
-
-	for_each_possible_cpu(i) {
-		struct rq *rq;
-
-		rq = cpu_rq(i);
-		init_mos_rq(&rq->mos);
-		if (cpumask_test_cpu(i, mask))
-			rq->lwkcpu = 1;
-		else
-			rq->lwkcpu = 0;
-	}
-	/* Mark the LWK CPUs as isolated */
-	cpumask_or(cpu_isolated_map, cpu_isolated_map, mask);
-}
-
 
 /* mOS scheduler class function table */
 const struct sched_class mos_sched_class = {
@@ -1366,7 +1331,7 @@ static void stats_summarize(struct mos_sched_stats *pstats,
 		if (((detail_level == 1) &&
 		    (stats->max_commit_level > 1)) ||
 		    (detail_level > 2)) {
-			pr_info("mos_sched: PID=%d cpuid=%2d max_commit=%d max_running=%d guest_dispatch=%d timer_pop=%d setaffinity=%d sysc_migr= %d %s\n",
+			pr_info("mOS-sched: PID=%d cpuid=%2d max_commit=%d max_running=%d guest_dispatch=%d timer_pop=%d setaffinity=%d sysc_migr= %d %s\n",
 				tgid, cpu,
 				stats->max_commit_level,
 				stats->max_running - 1, /* remove mOS idle */
@@ -1401,7 +1366,7 @@ static void sched_stats_summarize(struct mos_process_t *mosp)
 		if (((detail_level ==  1) &&
 		    (pstats.max_commit_level > 1)) ||
 		    (detail_level > 1))
-			pr_info("mos_sched: PID=%d threads=%d cpus=%2d max_commit=%d max_running=%d guest_dispatch=%d timer_pop=%d setaffinity=%d sysc_migr=%d\n",
+			pr_info("mOS-sched: PID=%d threads=%d cpus=%2d max_commit=%d max_running=%d guest_dispatch=%d timer_pop=%d setaffinity=%d sysc_migr=%d\n",
 			tgid,
 			atomic_read(&mosp->threads_created)+1,
 			cpus, pstats.max_commit_level,
@@ -1521,26 +1486,9 @@ static int __init lwksched_topology_init(void)
 /* must be called after subsys init */
 late_initcall(lwksched_topology_init);
 
+
 static int __init lwksched_mod_init(void)
 {
-	cpumask_var_t wq_mask;
-	cpumask_t *lwkcpus = this_cpu_ptr(&lwkcpus_mask);
-
-	if (alloc_cpumask_var(&wq_mask, GFP_KERNEL)) {
-		int rc;
-
-		/* generate a mask excluding lwk cpus */
-		cpumask_andnot(wq_mask, cpu_possible_mask, lwkcpus);
-		rc = workqueue_set_unbound_cpumask(wq_mask);
-		if (!rc)
-			pr_info("mOS: set unbound workqueue to %*pbl  rc=%d\n",
-				cpumask_pr_args(wq_mask), rc);
-		else
-			pr_warn("mOS: failed setting unbound workqueue rc=%d\n",
-				rc);
-		free_cpumask_var(wq_mask);
-	} else
-		pr_warn("CPU mask allocation failure in %s.\n", __func__);
 
 	mos_register_process_callbacks(&lwksched_callbacks);
 
@@ -1607,5 +1555,155 @@ asmlinkage long lwk_sys_sched_yield(void)
 
 	schedule();
 
+	return 0;
+}
+
+/*
+ * Early initialization called from Linux sched_init
+ */
+int __init init_sched_mos(void)
+{
+	int i;
+
+	for_each_cpu_not(i, cpu_possible_mask) {
+		cpumask_clear(per_cpu_ptr(&lwkcpus_mask, i));
+		cpumask_clear(per_cpu_ptr(&mos_syscall_mask, i));
+	}
+
+	for_each_possible_cpu(i) {
+		cpumask_clear(per_cpu_ptr(&lwkcpus_mask, i));
+		cpumask_copy(per_cpu_ptr(&mos_syscall_mask, i),
+			     cpu_possible_mask);
+	}
+	if (!zalloc_cpumask_var(&saved_wq_mask, GFP_KERNEL))
+
+		pr_warn("CPU mask allocation failure in %s.\n", __func__);
+
+	return 0;
+}
+
+/*
+ * Initialize scheduler for the cpu mask provided. It is
+ * expected that these CPUs are not in use by Linux
+ */
+int mos_sched_init(void)
+{
+	int i;
+	cpumask_var_t wq_mask;
+	cpumask_t *unbound_cpumask;
+	cpumask_t *lwkcpus = this_cpu_ptr(&lwkcpus_mask);
+
+	/* Get unbound mask from the workqueue and lock the workqueue pool */
+	unbound_cpumask = workqueue_get_unbound_cpumask();
+	/* Save the unbound mask for future restoration */
+	cpumask_copy(saved_wq_mask, unbound_cpumask);
+	/* Release the lock on the workqueue pool */
+	workqueue_put_unbound_cpumask();
+
+	if (alloc_cpumask_var(&wq_mask, GFP_KERNEL)) {
+		int rc;
+
+		/* Generate a mask of all Linux CPUs excluding lwk CPUs */
+		cpumask_andnot(wq_mask, cpu_possible_mask, lwkcpus);
+		rc = workqueue_set_unbound_cpumask(wq_mask);
+		if (!rc)
+			pr_info("mOS-sched: set unbound workqueue cpumask to %*pbl\n",
+					cpumask_pr_args(wq_mask));
+		else
+			pr_warn("Failed setting unbound workqueue cpumask in %s. rc=%d\n",
+				__func__, rc);
+		free_cpumask_var(wq_mask);
+	} else
+		pr_warn("CPU mask allocation failure in %s.\n", __func__);
+
+	for_each_possible_cpu(i) {
+		struct rq *rq;
+
+		rq = cpu_rq(i);
+		init_mos_rq(rq);
+		/* Initialization seen before turning on an lwkcpu */
+		smp_mb();
+		if (cpumask_test_cpu(i, lwkcpus))
+			rq->lwkcpu = 1;
+		else
+			rq->lwkcpu = 0;
+	}
+	return 0;
+}
+
+/*
+ * Activate LWK CPUs after they have been prepared for LWK use
+ */
+int mos_sched_activate(cpumask_var_t new_lwkcpus)
+{
+	return 0;
+}
+
+/*
+ * Cleanup when LWK CPUs are being returned to Linux
+ */
+int mos_sched_deactivate(cpumask_var_t back_to_linux)
+{
+	int adios;
+	struct rq *rq;
+	struct mos_rq *mos_rq;
+	struct task_struct *idle_task;
+
+	preempt_disable();
+	for_each_cpu(adios, back_to_linux) {
+		rq = cpu_rq(adios);
+		mos_rq = &rq->mos;
+		/* Indicate that this is no longer an LWK CPU */
+		rq->lwkcpu = 0;
+		/*
+		 * Make sure lwkcpu=0 is seen before the kick and
+		 * before any kthreads are awoken during the offlining
+		 * actions. The pairing is with rmb barriers in the
+		 * mos_idle_main,  try_to_wake_up, and schedule.
+		 */
+		smp_mb();
+		/* Force each mos idle thread to exit */
+		idle_task = mos_rq->idle;
+		if (idle_task) {
+			/* Kick the idle thread out of halt state */
+			wake_up_if_idle(adios);
+			/* Do not continue until we are sure it exited */
+			kthread_stop(idle_task);
+			mos_rq->idle = NULL;
+			mos_rq->idle_pid = 0;
+		}
+	}
+	preempt_enable();
+
+	return 0;
+}
+
+/*
+ * Exit scheduler for returning CPUs back to Linux
+ */
+int mos_sched_exit(void)
+{
+	int cpu, rc;
+	int total_guests = 0;
+	int total_givebacks = 0;
+
+	for_each_possible_cpu(cpu) {
+		struct mos_rq *mos = &cpu_rq(cpu)->mos;
+
+		total_guests += mos->stats.guests;
+		total_givebacks += mos->stats.givebacks;
+	}
+	pr_info("mOS-sched: Giving back %d of %d assimilated tasks.\n",
+				total_givebacks, total_guests);
+
+	rc = workqueue_set_unbound_cpumask(saved_wq_mask);
+
+	if (!rc)
+		pr_info("mOS-sched: Restored unbound workqueue cpumask to %*pbl\n",
+					cpumask_pr_args(saved_wq_mask));
+
+	else
+		pr_warn("Failed setting unbound workqueue cpumask in %s. rc=%d\n",
+				__func__, rc);
 	return 0;
 }

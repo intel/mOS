@@ -32,17 +32,22 @@ DECLARE_EVENT_CLASS(mos_assimilate_template,
 	TP_STRUCT__entry(
 		__array(	char,	comm,	TASK_COMM_LEN	)
 		__field(	int,	cpu			)
+		__field(	int,	policy			)
+		__field(	int,	thread_type		)
 		__field(	int,	nr_cpus 		)
 	),
 
 	TP_fast_assign(
 		memcpy(__entry->comm, p->comm, TASK_COMM_LEN);
 		__entry->cpu		= task_cpu(p);
+		__entry->policy		= p->policy;
+		__entry->thread_type	= p->mos.thread_type;
 		__entry->nr_cpus	= p->nr_cpus_allowed;
 	),
 
-	TP_printk("comm=%s cpu=%d nr_cpus=%d",
-		  __entry->comm, __entry->cpu, __entry->nr_cpus)
+	TP_printk("comm=%s cpu=%d policy=%d type=%d nr_cpus=%d",
+		  __entry->comm, __entry->cpu, __entry->policy, 
+		  __entry->thread_type, __entry->nr_cpus)
 );
 
 /*
@@ -53,37 +58,23 @@ DEFINE_EVENT(mos_assimilate_template, mos_assimilate_launch,
 	     TP_ARGS(p));
 
 /*
- * Tracepoint for assimilating a deadline class task
+ * Tracepoint for assimilating a guest
  */
-DEFINE_EVENT(mos_assimilate_template, mos_assimilate_deadline,
-	     TP_PROTO(struct task_struct *p),
-	     TP_ARGS(p));
-
-/*
- * Tracepoint for assimilating a fair class task
- */
-DEFINE_EVENT(mos_assimilate_template, mos_assimilate_fair,
+DEFINE_EVENT(mos_assimilate_template, mos_assimilate_guest,
 	TP_PROTO(struct task_struct *p),
 	TP_ARGS(p));
 
 /*
- * Tracepoint for assimilating a rt class task
+ * Tracepoint for assimilating the mOS idle thread
  */
-DEFINE_EVENT(mos_assimilate_template, mos_assimilate_rt,
+DEFINE_EVENT(mos_assimilate_template, mos_assimilate_idle,
 	TP_PROTO(struct task_struct *p),
 	TP_ARGS(p));
 
 /*
- * Tracepoint for assimilate unrecognized class
+ * Tracepoint for give back thread to Linux scheduler
  */
-DEFINE_EVENT(mos_assimilate_template, mos_assimilate_unrecognized,
-	TP_PROTO(struct task_struct *p),
-	TP_ARGS(p));
-
-/*
- * Tracepoint for assimilate unexpected process
- */
-DEFINE_EVENT(mos_assimilate_template, mos_assimilate_unexpected,
+DEFINE_EVENT(mos_assimilate_template, mos_giveback_thread,
 	TP_PROTO(struct task_struct *p),
 	TP_ARGS(p));
 
