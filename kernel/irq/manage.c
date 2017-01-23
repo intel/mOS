@@ -186,6 +186,11 @@ irq_get_pending(struct cpumask *mask, struct irq_desc *desc)
 {
 	cpumask_copy(mask, desc->pending_mask);
 }
+static inline struct cpumask *
+irq_get_pending_ptr(struct irq_desc *desc)
+{
+	return desc->pending_mask;
+}
 #else
 static inline bool irq_can_move_pcntxt(struct irq_data *data) { return true; }
 static inline bool irq_move_pending(struct irq_data *data) { return false; }
@@ -193,6 +198,141 @@ static inline void
 irq_copy_pending(struct irq_desc *desc, const struct cpumask *mask) { }
 static inline void
 irq_get_pending(struct cpumask *mask, struct irq_desc *desc) { }
+static inline struct cpumask *irq_get_pending_ptr(struct irq_desc *desc)
+{
+	return NULL;
+}
+#endif
+
+#ifdef CONFIG_MOS_FOR_HPC
+/**
+ *	irq_save_affinity_linux,
+ *
+ *	records the CPU affinity mask of an IRQ as set by Linux and migrates
+ *	it to Linux CPU away from LWKCPUs specified in the mask @lwkcpus
+ *
+ *	@irq: IRQ number that needs to be migrated
+ *	@lwkcpus: CPU mask of LWK CPUs from which the IRQ's needs to be
+ *	          migrated away
+ *	@return:true, on success
+ *		false, on failure
+ */
+bool irq_save_affinity_linux(int irq, cpumask_var_t lwkcpus)
+{
+	struct cpumask *affinity_linux;
+	struct cpumask *affinity_curr;
+	cpumask_var_t linux_cpus;
+	unsigned long flags;
+	bool rstat = false;
+	struct irq_desc *desc = irq_to_desc(irq);
+
+	if (!desc) {
+		pr_err("%s:(!) Invalid argument irq %d\n", __func__, irq);
+		goto out;
+	}
+
+	if (!zalloc_cpumask_var(&linux_cpus, GFP_KERNEL)) {
+		pr_err("%s:(!) IRQ%d failed to allocate cpumask\n",
+			__func__, irq);
+		goto out;
+	}
+
+	cpumask_andnot(linux_cpus, cpu_online_mask, lwkcpus);
+
+	if (cpumask_empty(linux_cpus)) {
+		pr_warn("%s:WARN no online Linux CPUs\n", __func__);
+		goto out;
+	}
+
+	raw_spin_lock_irqsave(&desc->lock, flags);
+	affinity_linux = irq_get_affinity_linux_mask(irq);
+
+	if (irq_move_pending(&desc->irq_data))
+		affinity_curr = irq_get_pending_ptr(desc);
+	else
+		affinity_curr = irq_get_affinity_mask(irq);
+
+	if (affinity_linux && affinity_curr) {
+		if (cpumask_intersects(affinity_curr, lwkcpus)) {
+			cpumask_copy(affinity_linux, affinity_curr);
+			cpumask_and(linux_cpus, affinity_curr, linux_cpus);
+
+			if (cpumask_empty(linux_cpus)) {
+				cpumask_andnot(linux_cpus, cpu_online_mask,
+					lwkcpus);
+			}
+
+			if (irq_set_affinity_locked(irq_desc_get_irq_data(desc),
+					linux_cpus, false)) {
+				pr_warn("%s:WARN IRQ%d affinity %*pbl failed\n",
+					__func__, irq,
+					cpumask_pr_args(linux_cpus));
+			} else {
+				pr_info("%s: IRQ%d moved from %*pbl to %*pbl\n",
+					__func__, irq,
+					cpumask_pr_args(affinity_linux),
+					cpumask_pr_args(linux_cpus));
+				rstat = true;
+			}
+		} else
+			rstat = true;
+	} else {
+		pr_warn("%s: WARN can't save IRQ%d Linux CPU affinity mask\n",
+			__func__, irq);
+	}
+
+	raw_spin_unlock_irqrestore(&desc->lock, flags);
+out:
+	free_cpumask_var(linux_cpus);
+	return rstat;
+}
+
+/**
+ *	irq_restore_affinity_linux,
+ *
+ *	restores original IRQ affinity as set previously by Linux and migrates
+ *	the IRQ back to original CPUs. This function is called while giving
+ *	the CPUs back to Linux from LWK.
+ *
+ *	@irq: IRQ number for which the affinity setting needs to be restored
+ *	@return:true, on success
+ *		false, on failure
+ */
+bool irq_restore_affinity_linux(int irq)
+{
+	struct cpumask *affinity_linux;
+	struct cpumask *affinity_curr;
+	struct irq_desc *desc = irq_to_desc(irq);
+	unsigned long flags;
+
+	if (!desc)
+		return false;
+
+	raw_spin_lock_irqsave(&desc->lock, flags);
+	affinity_linux = irq_get_affinity_linux_mask(irq);
+
+	if (irq_move_pending(&desc->irq_data))
+		affinity_curr = irq_get_pending_ptr(desc);
+	else
+		affinity_curr = irq_get_affinity_mask(irq);
+
+	if (affinity_curr && affinity_linux && !cpumask_empty(affinity_linux)) {
+		if (!cpumask_equal(affinity_curr, affinity_linux)) {
+			pr_info("%s: IRQ%d moved from %*pbl to %*pbl\n",
+				__func__, irq,
+				cpumask_pr_args(affinity_curr),
+				cpumask_pr_args(affinity_linux));
+			if (irq_set_affinity_locked(irq_desc_get_irq_data(desc),
+						affinity_linux, false))
+				pr_warn("%s:IRQ%d failed to restore affinity\n",
+					__func__, irq);
+		}
+		cpumask_clear(affinity_linux);
+	}
+
+	raw_spin_unlock_irqrestore(&desc->lock, flags);
+	return true;
+}
 #endif
 
 int irq_do_set_affinity(struct irq_data *data, const struct cpumask *mask,
@@ -251,19 +391,37 @@ int __irq_set_affinity(unsigned int irq, const struct cpumask *mask, bool force)
 		return -EINVAL;
 
 	raw_spin_lock_irqsave(&desc->lock, flags);
-#ifdef CONFIG_MOS_FOR_HPC
-	if (!cpumask_full(this_cpu_ptr(&lwkcpus_mask))) {
-		static int cpu = -1;
 
-		cpu = cpumask_next_zero(cpu, this_cpu_ptr(&lwkcpus_mask));
-		if (cpu >= nr_cpu_ids ||
-		    !cpumask_intersects(get_cpu_mask(cpu), cpu_present_mask)) {
-			cpu = cpumask_next_zero(-1, this_cpu_ptr(&lwkcpus_mask));
+	if (IS_ENABLED(CONFIG_MOS_FOR_HPC)) {
+		if (cpumask_intersects(mask, cpu_lwkcpus_mask)) {
+			cpumask_var_t linux_cpus;
+			struct irq_data *data = irq_desc_get_irq_data(desc);
+
+			ret = 0;
+			if (!zalloc_cpumask_var(&linux_cpus, GFP_KERNEL)) {
+				ret = -ENOMEM;
+				goto out;
+			}
+			cpumask_andnot(linux_cpus, cpu_online_mask,
+				cpu_lwkcpus_mask);
+
+			if (unlikely(cpumask_empty(linux_cpus))) {
+				ret = -EINVAL;
+			} else {
+				if (cpumask_intersects(linux_cpus, mask))
+					cpumask_and(linux_cpus, linux_cpus,
+						    mask);
+				ret = irq_set_affinity_locked(data,
+						linux_cpus, force);
+			}
+			free_cpumask_var(linux_cpus);
+			goto out;
 		}
-		mask = get_cpu_mask(cpu);
 	}
-#endif
+
 	ret = irq_set_affinity_locked(irq_desc_get_irq_data(desc), mask, force);
+
+out:
 	raw_spin_unlock_irqrestore(&desc->lock, flags);
 	return ret;
 }

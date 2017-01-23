@@ -2239,6 +2239,23 @@ bytes respectively. Such letter suffixes can also be entirely omitted.
 			light weight kernel. These CPUs are implicitly set
 			as "isolcpus" within the Linux kernel.
 
+	lwkcpu_profile= [KNL,X86-64] LWK CPU filtering profile
+		normal
+			Very minimal set of CPU hotplug states + hotplug
+			states registered by performance monitoring
+			infrastructure of Linux.
+		debug
+			No filtering of states for a LWKCPU and all states
+			between LWKCPU_MIN_STATE and LWKCPU_MAX_STATE are
+			enabled.
+
+			A particular profile can be selected by using the above
+			format either in the LWK partition specification written
+			to /sys/kernel/mOS/lwk_config or can be specified as
+			part of	Linux kernel command line. If nothing is specif-
+			-ied as part of Linux command line then the 'normal' pr-
+			-ofile will be set by the kernel during the kernel boot.
+
 	machvec=	[IA-64] Force the use of a particular machine-vector
 			(machvec) in a generic kernel.
 			Example: machvec=hpzx1_swiotlb

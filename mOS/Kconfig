@@ -23,9 +23,12 @@ comment "SMP required for mOS"
 comment "NUMA required for mOS"
 	depends on !NUMA
 
+comment "HOTPLUG_CPU required for mOS"
+	depends on !HOTPLUG_CPU
+
 menuconfig MOS_FOR_HPC
 	bool "mOS hybrid FWK/LWK for HPC"
-	depends on X86_64 && SMP && NUMA
+	depends on X86_64 && SMP && NUMA && HOTPLUG_CPU
 	---help---
 	  Build as mOS (short for "multi-O/S"), an experimental kernel
 	  for supercomputers which attempts to create a hybrid between a
