@@ -482,6 +482,8 @@ struct sched_mos_entity {
 	unsigned int orig_time_slice;
 	unsigned int time_slice;
 	int assimilated;
+	unsigned int orig_policy;
+	const struct sched_class *orig_class;
 	enum mos_thread_type thread_type;
 	int cpu_home;
 	unsigned long clone_flags;
@@ -1504,10 +1506,6 @@ static inline int set_cpus_allowed_ptr(struct task_struct *p, const struct cpuma
 		return -EINVAL;
 	return 0;
 }
-#endif
-#ifdef CONFIG_MOS_SCHEDULER
-extern void mos_set_cpus_allowed_kthread(struct task_struct *,
-					 const struct cpumask *);
 #endif
 #ifndef cpu_relax_yield
 #define cpu_relax_yield() cpu_relax()

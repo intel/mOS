@@ -5024,6 +5024,19 @@ int workqueue_set_unbound_cpumask(cpumask_var_t cpumask)
 	return ret;
 }
 
+#ifdef CONFIG_MOS_SCHEDULER
+cpumask_t *workqueue_get_unbound_cpumask(void)
+{
+	mutex_lock(&wq_pool_mutex);
+	return wq_unbound_cpumask;
+}
+
+void workqueue_put_unbound_cpumask(void)
+{
+	mutex_unlock(&wq_pool_mutex);
+}
+#endif
+
 #ifdef CONFIG_SYSFS
 /*
  * Workqueues with WQ_SYSFS flag set is visible to userland via

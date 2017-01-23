@@ -997,6 +997,7 @@ asmlinkage long sys_statx(int dfd, const char __user *path, unsigned flags,
 			s == sys_futex ||	        \
 			s == sys_getitimer ||		\
 			s == sys_gettimeofday ||	\
+			s == sys_mbind ||		\
 			s == sys_mmap ||		\
 			s == sys_mmap_pgoff ||		\
 			s == sys_mremap ||		\
