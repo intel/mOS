@@ -29,7 +29,7 @@
 #undef pr_fmt
 #define pr_fmt(fmt)	"mOS: " fmt
 
-#define MOS_VERSION	"0.3"
+#define MOS_VERSION	"0.4"
 
 static char cpulist_buf[NR_CPUS + 1];
 static cpumask_var_t lwkcpus_map;
