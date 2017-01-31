@@ -33,6 +33,7 @@
 #include <linux/gfp.h>
 #include <linux/uio.h>
 #include <linux/hugetlb.h>
+#include <linux/mos.h>
 #include <linux/page_idle.h>
 
 #include "internal.h"
@@ -704,6 +705,23 @@ void lru_add_drain_all(void)
 		    pagevec_count(&per_cpu(lru_deactivate_file_pvecs, cpu)) ||
 		    pagevec_count(&per_cpu(lru_deactivate_pvecs, cpu)) ||
 		    need_activate_page_drain(cpu)) {
+#ifdef CONFIG_MOS_FOR_HPC
+			/* mOS LWK CPUs are treated specially because the
+			 * kworkers will not run on the LWK CPus while the
+			 * application is running there, causing the
+			 * flush_work below to hang.
+			 */
+			if (current->mos_process) {
+				if (cpu == smp_processor_id()) {
+					/* Clear the local LRU only. */
+					lru_add_drain();
+					continue;
+				} else if (cpumask_test_cpu(cpu,
+					   this_cpu_ptr(&lwkcpus_mask)))
+					/* Do nothing for remote LWK CPUs. */
+					continue;
+			}
+#endif
 			INIT_WORK(work, lru_add_drain_per_cpu);
 			queue_work_on(cpu, lru_add_drain_wq, work);
 			cpumask_set_cpu(cpu, &has_work);
