@@ -10,7 +10,8 @@
 # FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
 # more details.
 
-HOST_EXTRACFLAGS += -Wextra -g
+mos_tools_inc := $(src)/../include
+HOST_EXTRACFLAGS += -Wextra -g -I$(mos_tools_inc)
 
 always := $(hostprogs-y)
 

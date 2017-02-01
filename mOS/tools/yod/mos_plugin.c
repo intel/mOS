@@ -117,7 +117,7 @@ static int mos_sysfs_write(const char *file, char *buff, int len)
 	return rc < 0 ? rc : 0;
 }
 
-static int mos_sysfs_get_cpulist(const char *file, yod_cpuset_t *set)
+static int mos_sysfs_get_cpulist(const char *file, mos_cpuset_t *set)
 {
 	char buffer[4096];
 	int rc;
@@ -125,39 +125,43 @@ static int mos_sysfs_get_cpulist(const char *file, yod_cpuset_t *set)
 	rc = mos_sysfs_read(file, buffer, sizeof(buffer));
 
 	if ((rc == 0) || ((rc > 0) && (buffer[0] == '\n'))) {
-		yod_cpuset_xor(set, set, set);
+		mos_cpuset_xor(set, set, set);
 		rc = 0;
-	} else if (rc > 0)
-		rc = yod_parse_cpulist(buffer, set);
+	} else if (rc > 0) {
+		rc = mos_parse_cpulist(buffer, set);
+		if (rc)
+			yod_abort(-1, "Could not parse %s", buffer);
+	}
 
-	YOD_LOG(YOD_GORY, "%s(\"%s\") -> \"%s\" (rc=%d)", __func__, file, yod_cpuset_to_list(set), rc);
+	YOD_LOG(YOD_GORY, "%s(\"%s\") -> \"%s\" (rc=%d)", __func__,
+		file, mos_cpuset_to_list_validate(set), rc);
 	return rc;
 
 }
 
-static int mos_sysfs_put_cpulist(const char *file, yod_cpuset_t *set)
+static int mos_sysfs_put_cpulist(const char *file, mos_cpuset_t *set)
 {
 	int rc;
 	char* list;
 
-	list = yod_cpuset_to_list(set);
+	list = mos_cpuset_to_list_validate(set);
 
 	rc = mos_sysfs_write(file, list, strlen(list));
 
 	return (rc > 0) ? 0 : rc;
 }
 
-static int mos_get_designated_lwkcpus(yod_cpuset_t *set)
+static int mos_get_designated_lwkcpus(mos_cpuset_t *set)
 {
 	return mos_sysfs_get_cpulist(MOS_SYSFS_LWKCPUS, set);
 }
 
-static int mos_get_reserved_lwk_cpus(yod_cpuset_t *set)
+static int mos_get_reserved_lwk_cpus(mos_cpuset_t *set)
 {
 	return mos_sysfs_get_cpulist(MOS_SYSFS_LWKCPUS_RESERVED, set);
 }
 
-static int mos_request_lwk_cpus(yod_cpuset_t *set)
+static int mos_request_lwk_cpus(mos_cpuset_t *set)
 {
 	return mos_sysfs_put_cpulist(MOS_SYSFS_LWKCPUS_REQUEST, set);
 }
@@ -185,7 +189,7 @@ static void mos_read_and_populate(enum map_elem_t typ, const char *pathspec, int
 	int i, rc;
 	char path[4096];
 	char buffer[4096];
-	yod_cpuset_t *set;
+	mos_cpuset_t *set;
 
 	if (idx2 == -1)
 		rc = snprintf(path, sizeof(path), pathspec, idx1);
@@ -195,20 +199,20 @@ static void mos_read_and_populate(enum map_elem_t typ, const char *pathspec, int
 	if (rc >= (int)sizeof(path))
 		yod_abort(-1, "Buffer overflow in expanding %s", pathspec);
 
-	set = yod_cpuset_alloc();
+	set = mos_cpuset_alloc_validate();
 
 	if (!mos_sysfs_read(path, buffer, sizeof(buffer)))
 		yod_abort(-1, "Could not read %s", path);
 
-	if (yod_parse_cpulist(buffer, set))
+	if (mos_parse_cpulist(buffer, set))
 		yod_abort(-1, "Could not parse %s (%s)", path, buffer);
 
 	for (i = 0; i < cpu_map_size; i++) {
-		if (yod_cpuset_is_set(i, set))
+		if (mos_cpuset_is_set(i, set))
 			cpu_map[i].elems[typ] = val;
 	}
 
-	yod_cpuset_free(set);
+	mos_cpuset_free(set);
 }
 
 static void mos_init_distance_map(void);
@@ -219,7 +223,7 @@ static void mos_init_cpu_map(void)
 	FILE *f;
 	int family = -1, model = -1;
 	int cpu, core, tile, node, nr, nc, n_nodes;
-	yod_cpuset_t *set;
+	mos_cpuset_t *set;
 	int l2_index, rc;
 
 	/* Read /proc/cpuinfo to determine the CPU family and model */
@@ -242,12 +246,12 @@ static void mos_init_cpu_map(void)
 	if (!mos_sysfs_read(CPU_ONLINE, buffer, sizeof(buffer)))
 		yod_abort(-1, "Could not read %s", CPU_ONLINE);
 
-	set = yod_cpuset_alloc();
+	set = mos_cpuset_alloc_validate();
 
-	if (yod_parse_cpulist(buffer, set))
+	if (mos_parse_cpulist(buffer, set))
 		yod_abort(-1, "Could not parse %s (%s)", CPU_ONLINE, buffer);
 
-	cpu_map_size = yod_cpuset_biggest(set) + 1;
+	cpu_map_size = mos_cpuset_biggest(set) + 1;
 	cpu_map = malloc(cpu_map_size * sizeof(struct cpu_map_t));
 
 	if (!cpu_map)
@@ -302,15 +306,15 @@ static void mos_init_cpu_map(void)
 		if (mos_sysfs_read(path, buffer, sizeof(buffer)) < 0)
 			break;
 
-		if (yod_parse_cpulist(buffer, set))
+		if (mos_parse_cpulist(buffer, set))
 			yod_abort(-1, "Could not parse %s (%s)", path, buffer);
 
-		if (yod_cpuset_is_empty(set))
+		if (mos_cpuset_is_empty(set))
 			continue;
 
 		n_nodes++;
 		for (cpu = 0; cpu < cpu_map_size; cpu++)
-			if (yod_cpuset_is_set(cpu, set)) {
+			if (mos_cpuset_is_set(cpu, set)) {
 				if (cpu_map[cpu].elems[YOD_NODE] != -1)
 					yod_abort(-1, "Conflicting data in %s : CPU=%d prev=%d",
 						  path, cpu,
@@ -354,13 +358,13 @@ static void mos_init_cpu_map(void)
 				 * the Intel firmware's SLIT.
 				 *   10 - own node's DDR
 				 *   21 - other node's DDR
-				 *   31 - own node's MCDRAM
-				 *   41 - other node's MCDRAM
+				 *   31 - own node's MCDRAM (HBM)
+				 *   41 - other node's MCDRAM (HBM)
 				 */
 				switch (distance_map[nr][nc]) {
 				case 31:
 				case 41:
-					type = YOD_MCDRAM;
+					type = YOD_HBM;
 				default:
 					break;
 				}
@@ -370,7 +374,7 @@ static void mos_init_cpu_map(void)
 		}
 	}
 
-	yod_cpuset_free(set);
+	mos_cpuset_free(set);
 }
 
 static int mos_map_cpu(int cpu, enum map_elem_t typ)
@@ -552,9 +556,10 @@ static int mos_get_local_rank(int *local_rank, int *local_n_ranks)
 	return 0;
 }
 
-static int mos_sysfs_lock(unsigned long timeout_millis)
+static int mos_sysfs_lock(struct lock_options_t *opts)
 {
-	YOD_LOG(YOD_GORY, "(>) %s(timeout=%ld)", __func__, timeout_millis);
+	YOD_LOG(YOD_GORY, "(>) %s(timeout=%ld)",
+		__func__, opts->timeout_millis);
 
 	lock_fd = open(MOS_SYSFS_ROOT, O_RDONLY);
 
@@ -563,7 +568,7 @@ static int mos_sysfs_lock(unsigned long timeout_millis)
 		goto lock_out;
 	}
 
-	long retries = timeout_millis / 10;
+	long retries = opts->timeout_millis / 10;
 
 	/* Try at least twice. */
 	if (retries < 2)
@@ -579,12 +584,15 @@ static int mos_sysfs_lock(unsigned long timeout_millis)
 	}
 
 	if (close(lock_fd) != 0)
-		YOD_LOG(YOD_WARN, "Could not close \"%s\" (%s)", MOS_SYSFS_ROOT, strerror(errno));
+		YOD_LOG(YOD_WARN, "Could not close \"%s\" (%s)",
+			MOS_SYSFS_ROOT, strerror(errno));
 
 	lock_fd = -1;
 
  lock_out:
-	YOD_LOG(YOD_GORY, "(<) %s(timeout=%ld) fd=%d", __func__, timeout_millis, lock_fd);
+	YOD_LOG(YOD_GORY, "(<) %s(timeout=%ld) fd=%d",
+		__func__, opts->timeout_millis, lock_fd);
+
 	return (lock_fd == -1) ? -1 : 0;
 
 }
@@ -610,7 +618,52 @@ static char *local_rank_sequence_file_path(char *buff, int length)
 
 static int skip_combo_unlock;
 
-static int mos_combo_lock(unsigned long timeout_millis)
+static int mos_next_rank(int local_rank, int n_ranks,
+			 struct lock_options_t *opts)
+{
+	int result = -1;
+
+	switch (opts->layout) {
+
+	case YOD_RANK_COMPACT:
+		result = local_rank + 1;
+		if (result >= n_ranks)
+			result = -1;
+		break;
+
+	case YOD_RANK_SCATTER:
+
+		/* The stride size by default is the number of compute
+		 * node domains.
+		 */
+		if (opts->stride == -1) {
+			struct map_type_t *node_map;
+
+			node_map = yod_get_map(YOD_NODE);
+			opts->stride = node_map->size;
+		}
+
+		result = local_rank + opts->stride;
+
+		if (result >= n_ranks) {
+			result = local_rank % opts->stride + 1;
+			if (result == opts->stride)
+				result = -1;
+		}
+
+		break;
+
+	default:
+		yod_abort(-1, "Unsupported rank layout type %d", opts->layout);
+	}
+
+	YOD_LOG(YOD_INFO, "(<) %s self=%d / %d ==> %d",
+		__func__, local_rank, n_ranks, result);
+
+	return result;
+}
+
+static int mos_combo_lock(struct lock_options_t *opts)
 {
 	/* Some environments (e.g. MPICH) describe the number and id of
 	 * each local rank via the environment.  When such information is
@@ -620,23 +673,30 @@ static int mos_combo_lock(unsigned long timeout_millis)
 	 */
 
 	int local_rank = -1, local_n_ranks = -1, fd, next = -1;
-	long retries = timeout_millis / 10;
+	long retries = opts->timeout_millis / 10;
 	ssize_t rc;
 	char seq_file[256];
 
-	YOD_LOG(YOD_GORY, "(>) %s(timeout=%ld)", __func__, timeout_millis);
+	YOD_LOG(YOD_GORY, "(>) %s(timeout=%ld)",
+		__func__, opts->timeout_millis);
 
 	/* Try at least twice. */
 	if (retries < 2)
 		retries = 2;
 
-	if (mos_get_local_rank(&local_rank, &local_n_ranks) < 0)
-		return mos_sysfs_lock(timeout_millis);
+	/* If we cannot determine local rank and count, of if rank
+	 * sequencing is disabled, defer to the sysfs lock.
+	 */
+	if ((mos_get_local_rank(&local_rank, &local_n_ranks) < 0) ||
+	    opts->layout == YOD_RANK_DISABLE)
+		return mos_sysfs_lock(opts);
 
 	local_rank_sequence_file_path(seq_file, sizeof(seq_file));
 
-	/* Rank 0 proceeds.  Everyone else has to wait their turn. */
-	if (local_rank > 0) {
+	/* The first rank (rank 0) proceeds.  Everyone else has to wait their
+	 * turn.
+	 */
+	if (local_rank != 0) {
 		while (retries > 0) {
 			fd = open(seq_file, O_RDONLY);
 			if (fd > 0) {
@@ -671,13 +731,13 @@ static int mos_combo_lock(unsigned long timeout_millis)
 	}
 
 	YOD_LOG(YOD_GORY, "(<) %s(timeout=%ld) acquired slot (rank=%d/%d)\n",
-		__func__, timeout_millis, local_rank, local_n_ranks);
+		__func__, opts->timeout_millis, local_rank, local_n_ranks);
 
 	return 0;
 }
 
 
-static int mos_sysfs_unlock(void)
+static int mos_sysfs_unlock(__attribute__((unused)) struct lock_options_t *opts)
 {
 
 	YOD_LOG(YOD_GORY, "(>) %s() fd=%d", __func__, lock_fd);
@@ -695,17 +755,18 @@ static int mos_sysfs_unlock(void)
 	return 0;
 }
 
-static int mos_combo_unlock(void)
+static int mos_combo_unlock(struct lock_options_t *opts)
 {
-	int local_rank = -1, local_n_ranks = -1;
+	int local_rank = -1, local_n_ranks = -1, next_rank;
 	int flags = O_WRONLY, mode = 0, fd;
 	char seq_file[256];
 	char *extra_info = "";
 
 	YOD_LOG(YOD_GORY, "(>) %s()", __func__);
 
-	if (mos_get_local_rank(&local_rank, &local_n_ranks) < 0)
-		return mos_sysfs_unlock();
+	if ((mos_get_local_rank(&local_rank, &local_n_ranks) < 0) ||
+	    opts->layout == YOD_RANK_DISABLE)
+		return mos_sysfs_unlock(opts);
 
 	/* There is nothing to do if there is only a single rank. */
 
@@ -727,15 +788,17 @@ static int mos_combo_unlock(void)
 
 	local_rank_sequence_file_path(seq_file, sizeof(seq_file));
 
-	if (local_rank == (local_n_ranks - 1)) {
+	next_rank = mos_next_rank(local_rank, local_n_ranks, opts);
+
+	if (next_rank == -1) {
 		if (unlink(seq_file))
 			YOD_LOG(YOD_WARN,
 				"Could not remove local lock file (%s).",
 				seq_file);
 	} else {
 		if (local_rank == 0) {
-			/* Rank 0 will create the file.  We use the EXCL flag
-			 * to ensure that the file did not already exist.
+			/* The first rank will create the file.  We use the EXCL
+			 * flag to ensure that the file did not already exist.
 			 */
 
 			flags += O_CREAT | O_EXCL;
@@ -762,8 +825,7 @@ static int mos_combo_unlock(void)
 				  seq_file, extra_info);
 		}
 
-		local_rank++;
-		if (write(fd, &local_rank, sizeof(int)) != sizeof(int)) {
+		if (write(fd, &next_rank, sizeof(int)) != sizeof(int)) {
 			skip_combo_unlock = 1;
 			yod_abort(-EBUSY,
 				  "Could not update local lock file (%s).",
@@ -790,10 +852,9 @@ static int mos_set_lwkmem_domain_info(char *info)
 			       info, strlen(info));
 }
 
-static int mos_set_options(char *options)
+static int mos_set_options(char *options, size_t len)
 {
-	return mos_sysfs_write(MOS_SYSFS_LWK_OPTIONS, options,
-			       strlen(options) + 1);
+	return mos_sysfs_write(MOS_SYSFS_LWK_OPTIONS, options, len);
 }
 
 struct yod_plugin mos_plugin = {
@@ -835,10 +896,10 @@ void yod_abort(int rc, const char *format, ...)
 	exit(rc);
 }
 
-void show(const char *label, yod_cpuset_t *set, int rc)
+void show(const char *label, mos_cpuset_t *set, int rc)
 {
-	printf("%-16s rc=%2d mask: %24s", label, rc, yod_cpuset_to_mask(set));
-	printf(" list: %s\n", yod_cpuset_to_list(set));
+	printf("%-16s rc=%2d mask: %24s", label, rc, mos_cpuset_to_mask(set));
+	printf(" list: %s\n", mos_cpuset_to_list_validate(set));
 }
 
 const char *T_LABELS[] = { "Core", "Tile", "Node", "Groups" };
@@ -865,7 +926,7 @@ void dump_map(enum map_elem_t typ)
 
 int main(int argc, char **argv)
 {
-	yod_cpuset_t *lwkcpus, *lwkcpus_reserved, *request;
+	mos_cpuset_t *lwkcpus, *lwkcpus_reserved, *request;
 	int rc;
 	int cpu, node, core, tile, nothing;
 
@@ -874,18 +935,18 @@ int main(int argc, char **argv)
 	dump_map(YOD_NODE);
 	dump_map(YOD_MEM_GROUP);
 
-	lwkcpus = yod_cpuset_alloc();
+	lwkcpus = mos_cpuset_alloc_validate();
 
 	rc = mos_get_designated_lwkcpus(lwkcpus);
 	show("lwkcpus", lwkcpus, rc);
 
-	lwkcpus_reserved = yod_cpuset_alloc();
+	lwkcpus_reserved = mos_cpuset_alloc_validate();
 	rc = mos_get_reserved_lwk_cpus(lwkcpus_reserved);
 	show("lwkcpus_reserved", lwkcpus_reserved, rc);
 
-	request = yod_cpuset_alloc();
+	request = mos_cpuset_alloc_validate();
 
-	yod_cpuset_xor(request, lwkcpus, lwkcpus_reserved);
+	mos_cpuset_xor(request, lwkcpus, lwkcpus_reserved);
 	show("lwkcpus_request", request, 0);
 
 	rc = mos_request_lwk_cpus(request);

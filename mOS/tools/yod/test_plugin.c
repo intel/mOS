@@ -84,7 +84,7 @@ static void tst_write_raw(const char *filen, char *buffer, size_t length)
 	fclose(f);
 }
 
-static void tst_read(const char *filen, yod_cpuset_t *set)
+static void tst_read(const char *filen, mos_cpuset_t *set)
 {
 	char buffer[4096];
 	int n;
@@ -95,13 +95,13 @@ static void tst_read(const char *filen, yod_cpuset_t *set)
 		yod_abort(-1, "Could not read test file %s", filen);
 
 	if (buffer[0] == ' ')
-		yod_cpuset_xor(set, set, set);
-	else if (yod_parse_cpulist(buffer, set))
+		mos_cpuset_xor(set, set, set);
+	else if (mos_parse_cpulist(buffer, set))
 		yod_abort(-1, "Could not parse test file \"%s\" -> \"%s\" [%ld]", filen,
 		      buffer, n);
 }
 
-static void tst_write(const char *filen, yod_cpuset_t *set)
+static void tst_write(const char *filen, mos_cpuset_t *set)
 {
 	size_t n;
 	FILE *f;
@@ -110,7 +110,7 @@ static void tst_write(const char *filen, yod_cpuset_t *set)
 	if (!f)
 		yod_abort(-1, "Could not open test file %s", filen);
 
-	yod_cpuset_to_list(set);
+	mos_cpuset_to_list_validate(set);
 
 	n = fwrite(set->_buffer, 1, strlen(set->_buffer) + 1, f);
 	if (n == 0)
@@ -119,7 +119,7 @@ static void tst_write(const char *filen, yod_cpuset_t *set)
 	fclose(f);
 }
 
-static int tst_get_designated_lwkcpus(yod_cpuset_t *set)
+static int tst_get_designated_lwkcpus(mos_cpuset_t *set)
 {
 	char buffer[256];
 	tst_read(tst_get_file_name(LWKCPUS, buffer), set);
@@ -159,7 +159,7 @@ static void tst_get_reserved_lwkmem(size_t *mem, int *n)
 	_tst_get_memvec(mem, n, tst_get_file_name(LWKMEM_RESERVED, buffer));
 }
 
-static int tst_get_reserved_lwk_cpus(yod_cpuset_t *set)
+static int tst_get_reserved_lwk_cpus(mos_cpuset_t *set)
 {
 	char buffer[256];
 
@@ -169,15 +169,15 @@ static int tst_get_reserved_lwk_cpus(yod_cpuset_t *set)
 
 //#define USE_MASKS
 
-static int tst_request_cpus(yod_cpuset_t *set, const char *target)
+static int tst_request_cpus(mos_cpuset_t *set, const char *target)
 {
 	int rc = 0;
-	yod_cpuset_t *reserved, *lwkcpus, *and;
+	mos_cpuset_t *reserved, *lwkcpus, *and;
 	char buffer[256];
 
-	lwkcpus = yod_cpuset_alloc();
-	reserved = yod_cpuset_alloc();
-	and = yod_cpuset_alloc();
+	lwkcpus = mos_cpuset_alloc_validate();
+	reserved = mos_cpuset_alloc_validate();
+	and = mos_cpuset_alloc_validate();
 
 	tst_read(tst_get_file_name(LWKCPUS, buffer), lwkcpus);
 
@@ -185,36 +185,43 @@ static int tst_request_cpus(yod_cpuset_t *set, const char *target)
 	 * Requesting a non-LWK CPU is an error
 	 */
 
-	if (!yod_cpuset_is_subset(set, lwkcpus)) {
+	if (!mos_cpuset_is_subset(set, lwkcpus)) {
 		rc = -EINVAL;
-		YOD_LOG(YOD_WARN, "[%s:%d] non-LWK CPU(s) requested : 0x%20s", __func__, __LINE__, yod_cpuset_to_mask(set));
-		YOD_LOG(YOD_WARN, "[%s:%d] non-LWK CPU(s) requested : %s", __func__, __LINE__, yod_cpuset_to_list(set));
+		YOD_LOG(YOD_WARN, "[%s:%d] non-LWK CPU(s) requested : 0x%20s",
+			__func__, __LINE__,
+			mos_cpuset_to_mask(set));
+		YOD_LOG(YOD_WARN, "[%s:%d] non-LWK CPU(s) requested : %s",
+			__func__, __LINE__,
+			mos_cpuset_to_list_validate(set));
 		goto out;
 	}
 
 	tst_read(tst_get_file_name(LWKCPUS_RESERVED, buffer), reserved);
-	yod_cpuset_and(and, reserved, set);
+	mos_cpuset_and(and, reserved, set);
 
-	if (!yod_cpuset_is_empty(and)) {
+	if (!mos_cpuset_is_empty(and)) {
 		rc = -EBUSY;
-		YOD_LOG(YOD_WARN, "[%s:%d] busy compute CPU(s) requested : 0x%20s", __func__, __LINE__, yod_cpuset_to_mask(and));
+		YOD_LOG(YOD_WARN,
+			"[%s:%d] busy compute CPU(s) requested : 0x%20s",
+			__func__, __LINE__,
+			mos_cpuset_to_mask(and));
 		goto out;
 	}
 
 	tst_read(tst_get_file_name(target, buffer), reserved);
-	yod_cpuset_or(reserved, reserved, set);
+	mos_cpuset_or(reserved, reserved, set);
 	tst_write(tst_get_file_name(target, buffer), reserved);
 	rc = 0;
 
  out:
-	yod_cpuset_free(reserved);
-	yod_cpuset_free(and);
-	yod_cpuset_free(lwkcpus);
+	mos_cpuset_free(reserved);
+	mos_cpuset_free(and);
+	mos_cpuset_free(lwkcpus);
 
 	return rc;
 }
 
-static int tst_request_lwk_cpus(yod_cpuset_t *set)
+static int tst_request_lwk_cpus(mos_cpuset_t *set)
 {
 	return tst_request_cpus(set, LWKCPUS_RESERVED);
 }
@@ -259,7 +266,7 @@ static int tst_request_lwk_memory(size_t *mem, int n)
 
 static int lock_fd = -1;
 
-static int tst_lock(unsigned long timeout_millis)
+static int tst_lock(struct lock_options_t *opts)
 {
 	char buffer[256];
 
@@ -270,7 +277,7 @@ static int tst_lock(unsigned long timeout_millis)
 		goto lock_out;
 	}
 
-	long retries = timeout_millis / 10;
+	long retries = opts->timeout_millis / 10;
 
 	if (retries < 2)
 		retries = 2;
@@ -293,7 +300,7 @@ static int tst_lock(unsigned long timeout_millis)
 
 }
 
-static int tst_unlock(void)
+static int tst_unlock(__attribute__((unused)) struct lock_options_t *opts)
 {
 
 	if (lock_fd != -1) {
@@ -343,16 +350,26 @@ static int tst_lwkcpus_sequence_request(char *layout)
 		      layout, strlen(layout));
 	return 0;
 }
-static int tst_set_options(char *options)
+
+static int tst_set_options(char *options, size_t len)
 {
 	char path[256];
+	size_t i;
+
+	/* transform the null characters to new line characters
+	 * before writing to the plugin's options file.  Note
+	 * that there are two null chars at the end, so we stop
+	 * one byte early:
+	 */
+
+	for (i = 0; i < len - 1; i++)
+		if (options[i] == '\0')
+			options[i] = '\n';
 
 	tst_write_raw(tst_get_file_name(LWK_OPTIONS, path),
-		      options, strlen(options) + 1);
+		      options, len);
 	return 0;
-
 }
-
 
 static int tst_set_lwkmem_domain_info(char *info)
 {
@@ -383,11 +400,13 @@ static struct yod_plugin tst_plugin = {
 struct yod_plugin *init_tst_plugin(const char *file)
 {
 	static const char HEADER[] = "CPU,Core,Tile,Node\n";
+	static enum mem_group_t mem_groups_order[] = {
+		YOD_DRAM, YOD_HBM, YOD_NVRAM};
 
 	char line[4096], path[4096];
 	FILE *f;
 	char *tok, *buff, *save;
-	yod_cpuset_t *set;
+	mos_cpuset_t *set;
 	int i, g;
 
 	f = fopen(file, "r");
@@ -422,7 +441,7 @@ struct yod_plugin *init_tst_plugin(const char *file)
 	if (tst_read_raw(tst_get_file_name("lwkmem_groups", path), line, sizeof(line)) <= 0)
 		yod_abort(-1, "Could not read memory group descriptor (%s)", path);
 
-	set = yod_cpuset_alloc();
+	set = mos_cpuset_alloc_validate();
 	buff = line;
 	g = -1;
 
@@ -431,15 +450,19 @@ struct yod_plugin *init_tst_plugin(const char *file)
 		g++;
 		buff = NULL;
 
-		if (yod_parse_cpulist(tok, set))
+		if ((size_t)g >= ARRAY_SIZE(mem_groups_order))
+			yod_abort(-1, "Too many entries in %s\n",
+				  tst_get_file_name("lwkmem_groups", path));
+
+		if (mos_parse_cpulist(tok, set))
 			yod_abort(-1, "Could not parse entry (\"%s\") in lwkmem_groups.", tok);
 
-		for (i = yod_cpuset_biggest(set); i >= 0; i--)
-			if (yod_cpuset_is_set(i, set))
-				_CPU_INFO[i].elems[YOD_MEM_GROUP] = g;
+		for (i = mos_cpuset_biggest(set); i >= 0; i--)
+			if (mos_cpuset_is_set(i, set))
+				_CPU_INFO[i].elems[YOD_MEM_GROUP] = mem_groups_order[g];
 
 	}
 
-	yod_cpuset_free(set);
+	mos_cpuset_free(set);
 	return &tst_plugin;
 }
