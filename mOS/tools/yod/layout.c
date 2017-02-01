@@ -17,6 +17,8 @@
 #include <string.h>
 #include <assert.h>
 #include <errno.h>
+#include <limits.h>
+#include <stdbool.h>
 
 #include "yod.h"
 #include "yod_debug.h"
@@ -36,11 +38,25 @@
 #define IDX_CORE 2
 #define IDX_CPU  3
 
+static struct _layout_topology {
+	const char *name;
+	int max_count;
+	int max_possible;
+} layout_topology[NDIMS] = {
+	{ .name = "node", .max_count = -1, .max_possible = -1, },
+	{ .name = "tile", .max_count = -1, .max_possible = -1, },
+	{ .name = "core", .max_count = -1, .max_possible = -1, },
+	{ .name = "cpu",  .max_count = -1, .max_possible = -1, },
+};
+
 /**
  * A three dimensional indexing macro for a dyanmically sized,
  * flat underlying array.
  */
-#define COORD(n, t, c) (((n) * max_tiles_per_node * max_cores_per_tile) + ((t) * max_cores_per_tile) + (c))
+#define COORD(n, t, c) ( \
+	((n) * layout_topology[IDX_TILE].max_possible * layout_topology[IDX_CORE].max_possible) + \
+	((t) * layout_topology[IDX_CORE].max_possible) + \
+	(c))
 
 #define MAP_FOR(map, idx) for ((idx) = 0; idx < (map)->size; (idx)++)
 
@@ -48,37 +64,31 @@
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
 #endif
 
-typedef int (*dim_iterator_t)(int *);
-
-static int nodes_per_system;
-static int max_tiles_per_node;
-static int max_cores_per_tile;
-static int max_cpus_per_core;
-static yod_cpuset_t **_system_map;
+static mos_cpuset_t **_system_map;
 
 static void _map_system_layout(void);
-static void _get_iterator(dim_iterator_t *, lwk_request_t *);
-static void _next(int *, dim_iterator_t *);
+static void _get_iteration_order(int *, lwk_request_t *);
+static void _next(int *, int *);
 static int _get_cpu(int *coords);
 
 int yod_general_layout_algorithm(lwk_request_t *req)
 {
-	yod_cpuset_t *tmp, *lwkcpus;
+	mos_cpuset_t *tmp, *lwkcpus;
 	int i, cpu;
+	bool at_origin;
 	int coord[NDIMS] = { 0, 0, 0, 0};
-	dim_iterator_t iterator[NDIMS];
-
-	tmp = yod_cpuset_alloc();
-	lwkcpus = yod_cpuset_alloc();
+	int order[NDIMS];
+	tmp = mos_cpuset_alloc_validate();
+	lwkcpus = mos_cpuset_alloc_validate();
 
 	/* Make a copy of the requested LWK CPUs. */
-	yod_cpuset_or(lwkcpus, req->lwkcpus_request, req->lwkcpus_request);
+	mos_cpuset_or(lwkcpus, req->lwkcpus_request, req->lwkcpus_request);
 
 	/* Obtain a canonical mapping of the system. */
 	_map_system_layout();
 
 	/* Construct an iterator, according to the layout request. */
-	_get_iterator(iterator, req);
+	_get_iteration_order(order, req);
 
 
 	/* Walk the system, in "iterator" order, picking off CPUs
@@ -87,7 +97,7 @@ int yod_general_layout_algorithm(lwk_request_t *req)
 
 	req->layout_request[0] = '\0';
 
-	for (i = 0; !yod_cpuset_is_empty(lwkcpus); i++) {
+	while (!mos_cpuset_is_empty(lwkcpus)) {
 
 		YOD_LOG(YOD_GORY, "Evaluating (%d,%d,%d,%d)",
 			coord[IDX_NODE], coord[IDX_TILE],
@@ -102,14 +112,14 @@ int yod_general_layout_algorithm(lwk_request_t *req)
 				"(%d,%d,%d,%d) CPU=%d lwkcpus=%s",
 				coord[IDX_NODE], coord[IDX_TILE],
 				coord[IDX_CORE], coord[IDX_CPU],
-				cpu, yod_cpuset_to_list(lwkcpus));
+				cpu, mos_cpuset_to_list_validate(lwkcpus));
 
-			yod_cpuset_xor(tmp, tmp, tmp);
-			yod_cpuset_set(cpu, tmp);
-			yod_cpuset_and(tmp, lwkcpus, tmp);
+			mos_cpuset_xor(tmp, tmp, tmp);
+			mos_cpuset_set(cpu, tmp);
+			mos_cpuset_and(tmp, lwkcpus, tmp);
 
-			if (!yod_cpuset_is_empty(tmp)) {
-				yod_cpuset_xor(lwkcpus, lwkcpus, tmp);
+			if (!mos_cpuset_is_empty(tmp)) {
+				mos_cpuset_xor(lwkcpus, lwkcpus, tmp);
 				len = strlen(req->layout_request);
 				snprintf(req->layout_request + len,
 					 sizeof(req->layout_request) - len,
@@ -118,24 +128,37 @@ int yod_general_layout_algorithm(lwk_request_t *req)
 			}
 		}
 
-		_next(coord, iterator);
+		_next(coord, order);
+
+		/* If we have circled all the way back to (0,0,0,0), then
+		 * reset the max_counts of all dimensions to their largest
+		 * possible vaues.  This allows us to sweep up the remaining
+		 * LWK CPUs for the remainder of the sequence.
+		 */
+		for (i = 0, at_origin = true; i < NDIMS && at_origin; i++)
+			at_origin = coord[i] == 0;
+
+		if (at_origin)
+			for (i = 0; i < NDIMS; i++)
+				layout_topology[i].max_count =
+					layout_topology[i].max_possible;
+
 	}
 
-	yod_cpuset_free(tmp);
-	yod_cpuset_free(lwkcpus);
+	mos_cpuset_free(tmp);
+	mos_cpuset_free(lwkcpus);
 	free(_system_map);
 
 	return 0;
 }
 
-
 /**
  * Returns true if s1 and s2 overlap.
  */
-static bool _intersects(yod_cpuset_t *s1, yod_cpuset_t *s2, yod_cpuset_t *tmp)
+static bool _intersects(mos_cpuset_t *s1, mos_cpuset_t *s2, mos_cpuset_t *tmp)
 {
-	yod_cpuset_and(tmp, s1, s2);
-	return yod_cpuset_is_empty(tmp) == 0;
+	mos_cpuset_and(tmp, s1, s2);
+	return mos_cpuset_is_empty(tmp) == 0;
 }
 
 /**
@@ -154,45 +177,50 @@ static bool _intersects(yod_cpuset_t *s1, yod_cpuset_t *s2, yod_cpuset_t *tmp)
 void _map_system_layout(void)
 {
 	struct map_type_t *nodes, *tiles, *cores;
-	yod_cpuset_t *tmp;
+	mos_cpuset_t *tmp;
 	int i, N, t, T, c, C;
 
 	nodes = yod_get_map(YOD_NODE);
 	tiles = yod_get_map(YOD_TILE);
 	cores = yod_get_map(YOD_CORE);
 
-	nodes_per_system = nodes->size;
-	max_tiles_per_node = tiles->size / nodes->size;
-	max_cores_per_tile = cores->size / tiles->size;
-	max_cpus_per_core = yod_cpuset_cardinality(cores->map[0]);
+	layout_topology[IDX_NODE].max_possible = nodes->size;
+	layout_topology[IDX_TILE].max_possible = tiles->size / nodes->size;
+	layout_topology[IDX_CORE].max_possible = cores->size / tiles->size;
+	layout_topology[IDX_CPU].max_possible =
+		mos_cpuset_cardinality(cores->map[0]);
 
 	MAP_FOR(nodes, i) {
-	  int count = yod_count_by(nodes->map[i], YOD_TILE);
-
-	  max_tiles_per_node = MAX(max_tiles_per_node, count);
+		layout_topology[IDX_TILE].max_possible =
+			MAX(layout_topology[IDX_TILE].max_possible,
+			    yod_count_by(nodes->map[i], YOD_TILE));
 	}
 
 	MAP_FOR(tiles, i) {
-	  int count = yod_count_by(tiles->map[i], YOD_CORE);
-
-	  max_cores_per_tile = MAX(max_cores_per_tile, count);
+		layout_topology[IDX_CORE].max_possible =
+			MAX(layout_topology[IDX_CORE].max_possible,
+			    yod_count_by(tiles->map[i], YOD_CORE));
 	}
 
 	MAP_FOR(cores, i) {
-	  int count = yod_cpuset_cardinality(cores->map[i]);
-
-	  max_cpus_per_core = MAX(max_cpus_per_core, count);
+		layout_topology[IDX_CPU].max_possible =
+			MAX(layout_topology[IDX_CPU].max_possible,
+			    mos_cpuset_cardinality(cores->map[i]));
 	}
 
 	YOD_LOG(YOD_DEBUG,
 		"nodes/system=%d tiles/node=%d cores/tile=%d cpus/core=%d",
-		nodes_per_system, max_tiles_per_node,
-		max_cores_per_tile, max_cpus_per_core);
+		layout_topology[IDX_NODE].max_possible,
+		layout_topology[IDX_TILE].max_possible,
+		layout_topology[IDX_CORE].max_possible,
+		layout_topology[IDX_CPU].max_possible);
 
-	tmp = yod_cpuset_alloc();
+	tmp = mos_cpuset_alloc_validate();
 
-	_system_map = calloc(nodes_per_system * max_tiles_per_node * max_cores_per_tile,
-			     sizeof(yod_cpuset_t *));
+	_system_map = calloc(layout_topology[IDX_NODE].max_possible *
+			     layout_topology[IDX_TILE].max_possible *
+			     layout_topology[IDX_CORE].max_possible,
+			     sizeof(mos_cpuset_t *));
 
 	/* Walk every core mask in the core map, and determine its
 	 * node, the tile within that node, and the core within that
@@ -200,7 +228,7 @@ void _map_system_layout(void)
 	 */
 	MAP_FOR(cores, i) {
 
-		yod_cpuset_t *core = cores->map[i];
+		mos_cpuset_t *core = cores->map[i];
 
 		MAP_FOR(nodes, N) {
 			if (_intersects(nodes->map[N], core, tmp))
@@ -226,72 +254,20 @@ void _map_system_layout(void)
 		}
 
 		YOD_LOG(YOD_GORY, "SYSMAP: %s -> (%d,%d,%d)",
-			yod_cpuset_to_list(core), N, T, C);
+			mos_cpuset_to_list_validate(core), N, T, C);
 
 		assert(_system_map[COORD(N, T, C)] == NULL);
 
 		_system_map[COORD(N, T, C)] = core;
 	}
 
-	yod_cpuset_free(tmp);
+	mos_cpuset_free(tmp);
 }
 
-/**
- * We define iterator functions for each dimension (node, tile,
- * core, cpu) and a means of selecting these functions by name.
- * This enables us to dynamically construct an iterator for
- * any permutation of these dimensions.
- */
-
-#define ITERATOR(name, idx, max)			\
-	static int _increment_ ## name(int *coord)	\
-	{						\
-		int carry = 0;				\
-		coord[idx]++;				\
-		if (coord[idx] >= max) {		\
-			carry = 1;			\
-			coord[idx] = 0;			\
-		}					\
-		return carry;				\
-	}
-
-ITERATOR(node, IDX_NODE, nodes_per_system)
-ITERATOR(tile, IDX_TILE, max_tiles_per_node)
-ITERATOR(core, IDX_CORE, max_cores_per_tile)
-ITERATOR(cpu,  IDX_CPU, max_cpus_per_core)
-
-static struct _iterator_names {
-	const char *name;
-	dim_iterator_t iterator;
-	int selected;
-} ITERATORS[] = {
-	{ .name = NODE_STR, .iterator = _increment_node },
-	{ .name = TILE_STR, .iterator = _increment_tile },
-	{ .name = CORE_STR, .iterator = _increment_core },
-	{ .name = CPU_STR, .iterator = _increment_cpu },
-};
-
-static dim_iterator_t _select_iterator(const char *name)
+static void _get_iteration_order(int *order, lwk_request_t *req)
 {
-	unsigned int i;
-
-	for (i = 0; i < ARRAY_SIZE(ITERATORS); i++)
-		if (strcmp(name, ITERATORS[i].name) == 0) {
-			if (ITERATORS[i].selected)
-				yod_abort(-EINVAL,
-					  "Duplicate layout dimension detected: %s.",
-					  name);
-			ITERATORS[i].selected = 1;
-			return ITERATORS[i].iterator;
-		}
-
-	return NULL;
-}
-
-static void _get_iterator(dim_iterator_t *iterator, lwk_request_t *req)
-{
-	int n = 0;
-	char descr[256], *d;
+	int i, n;
+	char descr[256], *d, *nthreads;
 
 	if ((strlen(req->layout_descriptor) == 0) ||
 	    (strcmp(req->layout_descriptor, SCATTER_STR) == 0))
@@ -301,33 +277,84 @@ static void _get_iterator(dim_iterator_t *iterator, lwk_request_t *req)
 	else
 		strcpy(descr, req->layout_descriptor);
 
+	nthreads = getenv("OMP_NUM_THREADS");
+
 	for (n = 0, d = descr; n < NDIMS; n++) {
 
+		char *dim;
+		long int count = -1;
 		char *tok = strsep(&d, ",");
 
 		if (!tok)
 			yod_abort(-EINVAL,
 				  "All four layout dimensions must be specified.");
 
-		iterator[n] = _select_iterator(tok);
-		if (!iterator[n])
+		dim = strsep(&tok, ":");
+
+		order[n] = -1;
+		for (i = 0; i < NDIMS; i++)
+			if (!strcmp(layout_topology[i].name, dim)) {
+				order[n] = i;
+				break;
+			}
+
+		if (order[n] == -1)
 			yod_abort(-EINVAL,
 				  "Layout dimension \"%s\" is unrecognized.",
-				  tok);
+				  dim);
+		if (tok) {
+			if (yodopt_parse_integer(tok, &count, 1, layout_topology[order[n]].max_possible))
+				yod_abort(-EINVAL,
+					  "Illegal layout count detected in \"%s\".",
+					  req->layout_descriptor);
+		}
+
+
+		if (count == -1)
+			if (order[n] == IDX_CPU && nthreads) {
+
+				unsigned int ncores =
+					yod_count_by(req->lwkcpus_request,
+						     YOD_CORE);
+
+				if (yodopt_parse_integer(nthreads, &count, 1, LONG_MAX))
+					yod_abort(-EINVAL,
+						  "Illegal OMP_NUM_THREADS value: \"%s\"",
+						  nthreads);
+
+				layout_topology[order[n]].max_count =
+					ncores ?
+					MAX(count / ncores, 1) :
+					layout_topology[order[n]].max_possible;
+
+				YOD_LOG(YOD_DEBUG,
+					"Defaulting threads/core to %d = (%s / %d)",
+					layout_topology[order[n]].max_count,
+					nthreads,
+					ncores);
+
+			} else {
+				layout_topology[order[n]].max_count =
+					layout_topology[order[n]].max_possible;
+			}
+		else
+			layout_topology[order[n]].max_count = count;
 	}
 
 	if (d)
 		yod_abort(-EINVAL, "Extraneous layout dimensions: %s", d);
 }
 
-static void _next(int *coord, dim_iterator_t *iterator)
+static void _next(int *coord, int *order)
 {
-	int i, carry;
+	int i, carry = 1;
 
-	for (i = 0; i < NDIMS; i++) {
-		carry = iterator[i](coord);
-		if (!carry)
-			return;
+	for (i = 0; i < NDIMS && carry; i++) {
+		coord[order[i]]++;
+		if (coord[order[i]] < layout_topology[order[i]].max_count)
+			carry = 0;
+		else
+			coord[order[i]] = 0;
 	}
 }
 
@@ -336,7 +363,7 @@ static void _next(int *coord, dim_iterator_t *iterator)
  */
 static int _get_cpu(int *coord)
 {
-	yod_cpuset_t *core = _system_map[COORD(coord[IDX_NODE],
+	mos_cpuset_t *core = _system_map[COORD(coord[IDX_NODE],
 			       coord[IDX_TILE], coord[IDX_CORE])];
-	return core ? yod_cpuset_nth_cpu(coord[IDX_CPU] + 1, core) : -1;
+	return core ? mos_cpuset_nth_cpu(coord[IDX_CPU] + 1, core) : -1;
 }

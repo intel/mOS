@@ -101,9 +101,37 @@ The default is \fBnuma\fP.
 \fIThis option is not yet implemented.\fP
 
 .TP
+.B --memory-preference, -p <\fIpreference\fP>
+States preferences of types of memory to use for various kinds of allocations.
+See \fIMEMORY PREFERENCES\fP for additional information.
+.TP
 .B --layout <\fIdescription\fP>
 Provides CPU (hardware thread) ordering suggestions to the mOS scheduler.  See
 \fITHREAD LAYOUT\fP for additional information.
+.TP
+.B --rank-layout <compact, scatter[:stride], disabled>
+Provides a hint to lay out ranks in a prescribed order.  A compact layout will place
+adjacent ranks near each other, from a NUMA perspective.  A scatter layout will
+interleave ranks using a stride; if not specified, the stride will be the number of
+NUMA domains for CPUs.  Disabling the layout will not prescribe any specific layout
+of the ranks with respect to NUMA domains.  This option is a hint and requires addition
+support from the underlying MPI launch mechanism.
+.TP
+.B --aligned-mmap \fIthreshold[:alignment]\fP
+For \fIthreshold\fP values greater than zero, private, anonymous mmaps of size >=
+\fIthreshold\fP are aligned on the boundary defined by \fIalignment\fP.  For
+\fIthreshold\fP equal to zero, mmap alignment is disabled.  Negative values for
+\fIthreshold\fP are illegal.  The \fIalignment\fP value must be at least 8K and must
+be a multilpe of 4K.  If omitted, the default value of \fIalignment\fP is 1G.  Both
+\fIthreshold\fP and \fIalignment\fP values may be specified in integer or symbolic
+format (4K, 2M, 1G, etc.).
+.TP
+.B --brk-clear-length \fIsize\fP
+For non-negative \fIsize\fP values, \fIsize\fP defines the number of bytes to clear
+(zero) at the beginning of the expanded region when the brk system call expands
+the data segment.  For negative \fIsize\fP values, the entire expanded region will
+be cleared.  The default behavior is to clear 4K.  The \fIsize\fP argument may be
+specified in integer or symbolic format (4K, 2M, 1G, etc.).
 .TP
 .B --dry-run
 Do not actually reserved resources and launch.
@@ -175,11 +203,54 @@ across tiles before repeating cores, and so on.  This is the default.
 The \fBcompact\fP option is the opposite of scatter and is equivalent
 to \fBcpu,core,tile,node\fP.  It will select CPUs (hardware threads) on a core
 before moving to another core.  Likewise, it will use all cores on a tile
-before expanding to another tile.  And so on.
+before expanding to another tile.  And so on.  Note, however, that compact
+may not tightly pack cores if there is sufficient room; see below.
 
 .PP
 Other permutations of \fBnode, tile, core and cpu\fP may be passed to
 specify the sort order of the CPUs.
+
+.PP
+The \fBnode, tile, core and cpu\fP terms may also be augmented with a
+\fB:<count>\fP suffix which will prefer the number of the described
+entities.  For example, \fBcpu:1\fP will construct a layout that uses
+the first CPU in all reserved cores before using the 2nd and subsequent
+CPUs in any reserved core.  And so \fBcpu:1,core,tile,node\fP is compact
+from a node, tile and core perspective, but will initially consume one
+CPU per each reserved core before scheduling work on the remaining CPUs
+of the reserved cores.
+
+If the OMP_NUM_THREADS environment variable is set, the \fB:<count>\fP
+suffix for the \fBcpu\fP term defaults to the number of reserved cores
+divided by OMP_NUM_THREADS.
+
+.SH MEMORY PREFERENCES
+
+Preferences have the form \fBscope[:size]:order\fP.  The \fBscope\fP term
+identifes a general form of memory usage and is one of \fBmmap, brk, stack,
+static\fP or \fBall.\fP.
+
+.PP
+The \fBorder\fP term lists types of memory in order of preference.  This is
+a comma delimited list of \fBhbm, dram,\fP and \fBnvram\fP.  The default
+ordering is hbm,dram,nvram.  If not all types of memory are exlicitly
+stated, the list is implicitly completed with missing types from this
+default order.
+
+.PP
+The size term, if present, applies the preference to allocations larger than
+or equal to the specified size.  If not specified, size is implicitly 1.
+
+.PP
+Multiple preferences are separated with a '/' character.
+
+.PP
+If no preference is specified, the default behavior all:1:hbm,dram,nvram.
+Any preferences specified are relative to this default and are applied
+in order from left to right.
+
+.PP
+See \fIEXAMPLES\fP below.
 
 .SH EXAMPLES
 
@@ -200,6 +271,20 @@ created in the process will be treated by the kernel as a utility thread.
 .TP
 .B yod -c 48-71 -u 0 -M 0.75 foo bar
 Reserves LWK CPUs 48-71 and 75% of the designated LWK memory.
+
+.TP
+.B yod -p all:dram foo
+Gives precedence to DRAM for all memory allocations.
+
+.TP
+.B yod -p mmap:dram/mmap:65536:hbm
+Gives precedence to DRAM for private, anonymous mmaps of less than 64K and
+also gives precedence to HBM for private, anonymous mmaps of 64K or larger.
+
+.TP
+.B yod -p all:dram/mmap:65536:hbm
+Gives precedence to DRAM for all memory allocations, except private, anonymous
+mmaps of 64K or larger.
 
 .SH ENVIRONMENT VARIABLES
 
