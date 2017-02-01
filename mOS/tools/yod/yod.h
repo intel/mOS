@@ -15,8 +15,8 @@
 #ifndef __YOD_H
 #define __YOD_H
 
-#include <sched.h>
 #include <stdbool.h>
+#include "mos_cpuset.h"
 
 #ifndef ARRAY_SIZE
 #define ARRAY_SIZE(x) (sizeof(x)/sizeof(x[0]))
@@ -36,95 +36,8 @@
 #define YOD_MAX_GROUPS YOD_MAX_NIDS
 
 
-/**
- * yod uses dynamic sized cpusets and wraps cpu_set_t in
- * a structure. This simplifies some of the gory details
- * of dealing with cpu_set_t.  This should typically be
- * treated as an opaque type.
- */
-
-typedef struct yod_cpuset {
-	cpu_set_t *cpuset;
-	char _buffer[512+1];
-} yod_cpuset_t;
-
-
 extern int yodopt_parse_integer(const char *opt, long int *val, long int lower,
 				long int upper);
-
-extern int yod_max_cpus(void);
-
-/**
- * Allocates a cpuset.
- * @return A dynamically allocated cpu set.  Any memory allocation
- *   failure is assumed to be fatal in yod.  Thus, callers need
- *   not check the pointer for null.
- */
-
-extern yod_cpuset_t *yod_cpuset_alloc(void);
-
-/**
- * Frees a yod_cpuset_t
- */
-extern void yod_cpuset_free(yod_cpuset_t *);
-
-/**
- * Formats a yod_cpuset_t into list (string) format.
- */
-
-extern char *yod_cpuset_to_list(yod_cpuset_t *);
-
-/**
- * Formats a yod_cpuset_t into mask (string) format.
- */
-extern char *yod_cpuset_to_mask(yod_cpuset_t *);
-
-/**
- * Converts the string in list format to a yod_cpuset_t.
- * @param[in] lst The list string to be parsed.
- * @param[out] set The corresponding CPU set.
- * @pre Set is assumed to be non-null.
- * @return 0 if lst was a legal cpu list format.
- */
-extern int yod_parse_cpulist(const char *lst, yod_cpuset_t *set);
-
-/**
- * Converts the string in mask format to a yod_cpuset_t.
- * @param[in] msk The mask string to be parsed.
- * @param[out] set The corresponding CPU set.
- * @pre Set is assumed to be non-null.
- * @return 0 if msk was a legal cpu mask.
- */
-extern int yod_parse_cpumask(const char *msk, yod_cpuset_t *set);
-
-/**
- * Sets the bit on for the given CPU number.
- * @param[in] cpu The CPU number.
- * @param[in] set The CPU set being altered.
- * @pre set is assumed to be non-null.
- * @pre cpu is assumed to be a valid CPU number.
- */
-
-extern void yod_cpuset_set(int cpu, yod_cpuset_t *);
-
-extern size_t yod_setsize(void);
-
-/**
- * The following logical operations are pretty much self-explanatory.
- */
-
-extern void yod_cpuset_xor(yod_cpuset_t *, yod_cpuset_t *, yod_cpuset_t *);
-extern void yod_cpuset_or(yod_cpuset_t *, yod_cpuset_t *, yod_cpuset_t *);
-extern void yod_cpuset_and(yod_cpuset_t *, yod_cpuset_t *, yod_cpuset_t *);
-extern int yod_cpuset_equal(yod_cpuset_t *, yod_cpuset_t *);
-extern int yod_cpuset_is_empty(yod_cpuset_t *);
-extern int yod_cpuset_biggest(yod_cpuset_t *);
-extern int yod_cpuset_cardinality(yod_cpuset_t *);
-extern int yod_cpuset_is_subset(yod_cpuset_t *sub, yod_cpuset_t *super);
-extern void yod_cpuset_not(yod_cpuset_t *, yod_cpuset_t *);
-extern int yod_cpuset_is_set(int cpu, yod_cpuset_t *);
-extern yod_cpuset_t *yod_cpuset_clone(yod_cpuset_t *s);
-extern int yod_cpuset_nth_cpu(int n, yod_cpuset_t *);
 
 enum map_elem_t {
 	YOD_CORE = 0,
@@ -137,17 +50,50 @@ enum map_elem_t {
 struct map_type_t {
 	int size;
 	int capacity;
-	yod_cpuset_t **map;
+	mos_cpuset_t **map;
 };
 
 extern struct map_type_t *yod_get_map(enum map_elem_t typ);
-extern int yod_count_by(yod_cpuset_t *set, enum map_elem_t typ);
-extern int yod_select_by(int n, enum map_elem_t typ, bool ascending, bool partial, yod_cpuset_t *from, yod_cpuset_t *selected);
+extern int yod_count_by(mos_cpuset_t *set, enum map_elem_t typ);
+extern int yod_select_by(int n, enum map_elem_t typ, bool ascending,
+			 bool partial, mos_cpuset_t *from,
+			 mos_cpuset_t *selected);
 
 enum mem_group_t {
-	YOD_DRAM = 0,
-	YOD_MCDRAM = 1,
-	YOD_NUM_MEM_GROUPS
+	YOD_HBM = 0,
+	YOD_DRAM = 1,
+	YOD_NVRAM = 2,
+	YOD_NUM_MEM_GROUPS,
+	YOD_MEM_GROUP_UNKNOWN = -1
+};
+
+enum mem_scopes_t {
+	YOD_SCOPE_MMAP = 0,
+	YOD_SCOPE_STACK = 1,
+	YOD_SCOPE_STATIC = 2,
+	YOD_SCOPE_BRK = 3,
+	YOD_NUM_MEM_SCOPES = 4,
+	YOD_SCOPE_ALL = 4,
+	YOD_SCOPE_UNKNOWN = -1
+};
+
+enum rank_layout_t {
+	YOD_RANK_COMPACT = 0,
+	YOD_RANK_SCATTER = 1,
+	YOD_RANK_DISABLE = 2
+};
+
+struct lock_options_t {
+	/**
+	 * The amount of time to wait to acquire the lock before giving up.
+	 */
+	unsigned long timeout_millis;
+
+	/**
+	 * The rank layout type and stride.
+	 */
+	enum rank_layout_t layout;
+	int stride;
 };
 
 /**
@@ -163,13 +109,13 @@ struct yod_plugin {
 	 * @return 0 if the set was fetched successfully; non-zero if it
 	 *   could not be obtained.
 	 */ 
-	int (*get_designated_lwkcpus)(yod_cpuset_t *set);
+	int (*get_designated_lwkcpus)(mos_cpuset_t *set);
 
 	/**
 	 * Fetch the set of in-use light-weight kernel (LWK) CPUs.
 	 * @param[out] set The set of busy LWK CPUs.
 	 */
-	int (*get_reserved_lwk_cpus)(yod_cpuset_t *);
+	int (*get_reserved_lwk_cpus)(mos_cpuset_t *);
 
 	/**
 	 * Allocate a set of CPUs to be used for this instance of yod.  
@@ -180,7 +126,7 @@ struct yod_plugin {
 	 *   ownership of these CPUs.  Non-zero if the request could not
 	 *   be fulfilled.
 	 */
-	int (*request_lwk_cpus)(yod_cpuset_t *);
+	int (*request_lwk_cpus)(mos_cpuset_t *);
 
 	/**
 	 * Set the number of utility threads for this job launch.
@@ -247,13 +193,12 @@ struct yod_plugin {
 	/**
 	 * Requests that a lock be acquired to perform LWK resource
 	 * request operations.
-	 * @param[in] timeout_millis specifies the approximate amount of
-	 *   time that the plugin should wait before giving up on
-	 *   acquiring the lock.
+	 * @param[in] options provides various parameters to the
+	 *   locking algorithm, including timeout.
 	 * @return 0 if the lock was acquired; -1 if the lock was not
 	 *   acquired.
 	 */
-	int (*lock)(unsigned long timeout_millis);
+	int (*lock)(struct lock_options_t *);
 
 	/**
 	 * Release the request operations lock.
@@ -261,7 +206,7 @@ struct yod_plugin {
 	 *   request.
 	 * @return 0 if the lock was freed; -1 if the lock was not freed.
 	 */
-	int (*unlock)(void);
+	int (*unlock)(struct lock_options_t *);
 
 	/**
 	 * Get the memory distance map for the specified NUMA domain.
@@ -277,7 +222,7 @@ struct yod_plugin {
 	/**
 	 * Passes user-specified options along to the kernel.
 	 */
-	int (*set_options)(char *options);
+	int (*set_options)(char *options, size_t length);
 
 	/**
 	 * Writes memory domain information to the LWK.
@@ -299,13 +244,21 @@ typedef struct lwk_request_t {
 	double fit[YOD_MAX_GROUPS+1];
 	int n_nids;
 	int n_groups;
-	yod_cpuset_t *lwkcpus_request;
+	mos_cpuset_t *lwkcpus_request;
 	char layout_descriptor[128];
 	char layout_request[4096];
 	char options[4096];
+	int options_idx;
 	int lwkmem_domain_info[YOD_NUM_MEM_GROUPS][YOD_MAX_NIDS];
 	int lwkmem_domain_info_len[YOD_NUM_MEM_GROUPS];
 	char lwkmem_domain_info_str[4096];
+	struct memory_preferences_t {
+		enum mem_group_t lower_order[YOD_NUM_MEM_GROUPS];
+		enum mem_group_t upper_order[YOD_NUM_MEM_GROUPS];
+		unsigned long threshold;
+	} memory_preferences[YOD_NUM_MEM_SCOPES];
+	int memory_preferences_present;
+
 	void (*memsize_resolver)(struct lwk_request_t *this);
 	void (*lwkcpus_resolver)(struct lwk_request_t *this);
 	double (*fitness)(struct lwk_request_t *this);
@@ -322,7 +275,7 @@ typedef struct lwk_request_t {
 	 * @post this->lwkcpus_request is a subset of available.
 	 */
 	int (*compute_core_algorithm)(struct lwk_request_t *this,
-				      int num_cores, yod_cpuset_t *available);
+				      int num_cores, mos_cpuset_t *available);
 
 	/**
 	 * The interface for resolving the general memory size state into
@@ -347,4 +300,6 @@ int yod_general_layout_algorithm(struct lwk_request_t *);
 
 extern struct yod_plugin *init_tst_plugin(const char *);
 
+extern mos_cpuset_t *mos_cpuset_alloc_validate(void);
+extern char *mos_cpuset_to_list_validate(mos_cpuset_t *s);
 #endif
