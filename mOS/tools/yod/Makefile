@@ -10,8 +10,6 @@
 # FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
 # more details.
 
-HOST_EXTRACFLAGS += -I$(src)/../../../include
-
 hostprogs-y := yod
 scriptprogs-y := yod.sh yod.1.man 02-mos.rules
 

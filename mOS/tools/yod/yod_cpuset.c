@@ -21,7 +21,7 @@
 #include <errno.h>
 #include <ctype.h>
 #include <sched.h>
-#include <generated/autoconf.h>
+#include "../../../include/generated/autoconf.h"
 #include "yod.h"
 #include "yod_debug.h"
 
