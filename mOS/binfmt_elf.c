@@ -18,8 +18,8 @@
 
 /**
  * elf_map_to_lwkmem() - maps an ELF segment to LWKMEM
- * @eppnt: pointer to the program header of the segment to be mapped
  * @addr: fixed address in virtual memory where this segment needs to be mapped
+ * @size: length of the region
  * @prot: protection flags corresponding to this segment
  * @type: vma flags corresponding to this segment
  *
@@ -27,8 +27,8 @@
  *      In case of success, the mapped address
  *      In case of failure, an error code
  */
-unsigned long elf_map_to_lwkmem(struct elf_phdr *eppnt, unsigned long addr,
-				unsigned long size, int prot, int type)
+unsigned long elf_map_to_lwkmem(unsigned long addr, unsigned long size,
+				int prot, int type)
 {
 	struct mos_process_t *mosp;
 	unsigned long map_addr;
@@ -45,8 +45,13 @@ unsigned long elf_map_to_lwkmem(struct elf_phdr *eppnt, unsigned long addr,
 	if (!size)
 		return addr;
 
+	if (down_write_killable(&current->mm->mmap_sem))
+		return -EINTR;
+
 	map_addr = allocate_blocks_fixed(addr, size, prot, type,
-					 lwkmem_mmap);
+					 lwkmem_static);
+
+	up_write(&current->mm->mmap_sem);
 
 	if (unlikely(LWKMEM_DEBUG_VERBOSE))
 		pr_info("%s: map_addr 0x%lx\n",  __func__, map_addr);
@@ -56,14 +61,22 @@ unsigned long elf_map_to_lwkmem(struct elf_phdr *eppnt, unsigned long addr,
 
 /**
  * elf_unmap_from_lwkmem() - unmaps a previously mapped ELF segment from LWKMEM
- * @eppnt: pointer to the program header of the segment to be unmapped
  * @addr: start address of the segment to be unmapped
+ * @size: length of the region
  */
-long elf_unmap_from_lwkmem(struct elf_phdr *eppnt, unsigned long addr,
-			   unsigned long size)
+long elf_unmap_from_lwkmem(unsigned long addr, unsigned long size)
 {
+	long rc;
+
 	if (!size)
 		return addr;
 
-	return deallocate_blocks(addr, size, current->mos_process);
+	if (down_write_killable(&current->mm->mmap_sem))
+		return -EINTR;
+
+	rc = deallocate_blocks(addr, size, current->mos_process, current->mm);
+
+	up_write(&current->mm->mmap_sem);
+
+	return rc;
 }

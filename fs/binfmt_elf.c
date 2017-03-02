@@ -689,7 +689,6 @@ static int load_elf_binary(struct linux_binprm *bprm)
 	struct arch_elf_state arch_state = INIT_ARCH_ELF_STATE;
 	int data_bss_on_lwkmem = 0;
 #ifdef CONFIG_MOS_LWKMEM
-	long lret = 0;
 	unsigned long lwkmem_start = 0;
 	unsigned long lwkmem_size = 0;
 #endif
@@ -1002,9 +1001,8 @@ static int load_elf_binary(struct linux_binprm *bprm)
 					ELF_PAGEOFFSET(elf_ppnt->p_vaddr);
 			lwkmem_size = ELF_PAGEALIGN(lwkmem_size);
 
-			error = elf_map_to_lwkmem(elf_ppnt, lwkmem_start,
-						  lwkmem_size, elf_prot,
-						  elf_flags);
+			error = elf_map_to_lwkmem(lwkmem_start, lwkmem_size,
+					elf_prot, elf_flags);
 			if (!BAD_ADDR(error)) {
 				/*
 				 * Read data for all initialized sections from
@@ -1013,19 +1011,19 @@ static int load_elf_binary(struct linux_binprm *bprm)
 				 */
 				retval = kernel_read(bprm->file,
 						elf_ppnt->p_offset,
-						load_bias + vaddr,
+						(char *)(load_bias + vaddr),
 						elf_ppnt->p_filesz);
 
 				if (retval != elf_ppnt->p_filesz) {
+					long rc;
 					pr_err("%s: (!) .data read failed!",
 							 __func__);
 					lwkmem_start = ELF_PAGESTART(error);
-					lret = elf_unmap_from_lwkmem(elf_ppnt,
-								lwkmem_start,
-								lwkmem_size);
-					if (lret < 0) {
+					rc = elf_unmap_from_lwkmem(lwkmem_start,
+							lwkmem_size);
+					if (rc < 0) {
 						pr_err(".. Unmap failed %ld",
-						       lret);
+						       rc);
 					}
 					pr_err(", Fallback to Linux memory\n");
 				} else {
@@ -1120,7 +1118,10 @@ static int load_elf_binary(struct linux_binprm *bprm)
 
 		/* Clear padding + bss section */
 		if (likely(elf_bss != elf_brk))
-			clear_user((void __user *) elf_bss, elf_brk-elf_bss);
+			if (clear_user((void __user *) elf_bss, elf_brk-elf_bss)) {
+				pr_err("Could not clear .bss.\n");
+				goto out_free_dentry;
+			}
 	}
 
 	if (elf_interpreter) {

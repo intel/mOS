@@ -351,10 +351,6 @@ done:
 		seq_pad(m, ' ');
 		seq_puts(m, name);
 	}
-#ifdef CONFIG_MOS_LWKMEM
-	if (is_lwkmem(vma))
-		seq_puts(m, " LWK");
-#endif /* CONFIG_MOS_LWKMEM */
 	seq_putc(m, '\n');
 }
 

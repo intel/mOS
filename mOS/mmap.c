@@ -21,6 +21,7 @@
 #include <linux/mos.h>
 #include <linux/sizes.h>
 #include <linux/slab.h>
+#include <linux/mempolicy.h>
 
 #include "lwkmem.h"
 
@@ -30,11 +31,23 @@
 
 extern void list_vmas(struct mm_struct *mm);
 
+static struct vm_area_struct *mos_find_vma(struct mm_struct *mm,
+					   unsigned long addr)
+{
+	struct vm_area_struct *vma;
+
+	vma = find_vma(mm, addr);
+	if (likely(vma && addr >= vma->vm_start && addr < vma->vm_end))
+		return vma;
+	else
+		return NULL;
+}
+
 asmlinkage long lwk_sys_munmap(unsigned long addr, size_t len)
 {
-	struct mm_struct *mm = current->mm;
 	struct mos_process_t *mos_p;
 	struct vm_area_struct *vma;
+	long ret = 0;
 
 	if (LWKMEM_DEBUG)
 		pr_info("%s(addr=0x%lx len=%ld) CPU=%d pid=%d nst=%d\n",
@@ -53,21 +66,28 @@ asmlinkage long lwk_sys_munmap(unsigned long addr, size_t len)
 		return -ENOSYS;
 	}
 
-	vma = find_vma(mm, addr);
+	if (down_write_killable(&current->mm->mmap_sem))
+		return -EINTR;
+
+	vma = mos_find_vma(current->mm, addr);
 	if (!vma) {
 		pr_warn("(!)  %s() no vma for pid %d\n", __func__,
 			current->pid);
-		return -ENOSYS;
+		ret = -ENOSYS;
+		goto out;
 	}
 
-	if (is_lwkmem(vma))
+	if (is_lwkmem(vma)) {
 		/* Deallocate LWK memory blocks.  If this fails, we are going to
 		 * continue regardless; we may not have cleaned up completely
 		 * but we are no worse off than we were before.
 		 */
-		deallocate_blocks(addr, len, mos_p);
+		deallocate_blocks(addr, len, mos_p, current->mm);
+	}
+out:
+	up_write(&current->mm->mmap_sem);
 
-	return -ENOSYS;
+	return ret;
 } /* end of lwk_sys_munmap() */
 
 asmlinkage long lwk_sys_mmap_pgoff(unsigned long addr, unsigned long len,
@@ -76,9 +96,8 @@ asmlinkage long lwk_sys_mmap_pgoff(unsigned long addr, unsigned long len,
 {
 	struct vm_area_struct *vma;
 	struct mos_process_t *mosp;
-	struct allocate_options_t *opts = 0;
+	struct allocate_options_t *opts;
 	long ret;
-	unsigned long rc;
 
 	if (LWKMEM_DEBUG)
 		pr_info("%s(addr=0x%lx len=%ld prot=%lx flags=%lx fd=%ld off=%lX) CPU=%d pid=%d nst=%d\n",
@@ -135,21 +154,29 @@ asmlinkage long lwk_sys_mmap_pgoff(unsigned long addr, unsigned long len,
 			       pgoff);
 	}
 
-	vma = find_vma(current->mm, addr);
-	if ((addr != 0) && vma) {
-		if (LWKMEM_DEBUG_VERBOSE) {
-			pr_info("addr 0x%lx already has a vma!\n", addr);
-			list_vmas(current->mm);
-		}
 
-		if (!is_lwkmem(vma)) {
-			if (LWKMEM_DEBUG_VERBOSE)
-				pr_info("... and it is not one of ours. Let Linux handle it\n");
-			return -ENOSYS;
+	if (down_write_killable(&current->mm->mmap_sem))
+		return -EINTR;
+
+	if (addr) {
+		vma = mos_find_vma(current->mm, addr);
+		if (vma) {
+			if (LWKMEM_DEBUG_VERBOSE) {
+				pr_info("addr 0x%lx already has a vma!\n", addr);
+				list_vmas(current->mm);
+			}
+
+			if (!is_lwkmem(vma)) {
+				if (LWKMEM_DEBUG_VERBOSE)
+					pr_info("... and it is not one of ours. Let Linux handle it\n");
+				ret = -ENOSYS;
+				goto out;
+			}
 		}
 	}
 
-	if (mosp->lwkmem_mmap_fixed && len >= mosp->lwkmem_mmap_fixed) {
+	if (mosp->lwkmem_mmap_aligned_threshold > 0 &&
+	    len >= mosp->lwkmem_mmap_aligned_threshold) {
 		unsigned long fixed;
 
 		fixed = next_lwkmem_address(len, mosp);
@@ -158,23 +185,22 @@ asmlinkage long lwk_sys_mmap_pgoff(unsigned long addr, unsigned long len,
 	} else {
 
 		opts = allocate_options_factory(lwkmem_mmap, len, flags, mosp);
-
-		ret = opts ?
-			allocate_blocks(addr, len, prot, flags, pgoff, opts) :
-			-ENOMEM;
+		if (opts) {
+			ret = opts->allocate_blocks(addr, len, prot, flags,
+						    pgoff, opts);
+			kfree(opts);
+		} else
+			ret = -ENOMEM;
 	}
+out:
+	up_write(&current->mm->mmap_sem);
 
-	kfree(opts);
-
-	if (ret <= 0) {
-		pr_warn("Out of LWK memory\n");
-		return -ENOMEM;
+	if (ret > 0 && (mosp->lwkmem_init & LWKMEM_CLR_BEFORE))
+		memset((void *) ret, 0, len);
+	else if (unlikely(ret == 0)) {
+		pr_warn("%s - out of LWK memory\n", __func__);
+		ret = -ENOMEM;
 	}
-
-	/* For MAP_ANONYMOUS memory needs to be cleared */
-	rc = clear_user((void *)ret, len);
-	if (rc)
-		pr_warn("Only some memory cleared: %ld/%ld\n", rc, len);
 
 	return ret;
 
@@ -216,6 +242,8 @@ asmlinkage long lwk_sys_brk(unsigned long brk)
 	int flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED;
 	struct mm_struct *mm = current->mm;
 	unsigned long len;
+	unsigned long clear_len = 0;
+	void *clear_addr = 0;
 
 	if (LWKMEM_DEBUG)
 		pr_info("(pid=%4d) %s(brk=%lx) CPU=%d nst=%d\n", current->pid,
@@ -241,7 +269,15 @@ asmlinkage long lwk_sys_brk(unsigned long brk)
 
 	if (mosp->lwkmem_brk_disable) {
 		ret = sys_brk(brk);
-	} else if (mosp->brk == 0) {
+		goto out;
+	}
+
+	if (down_write_killable(&mm->mmap_sem)) {
+		ret = -EINTR;
+		goto out;
+	}
+
+	if (mosp->brk == 0) {
 		/* First time here. Allocate initial block of LWK memory for
 		 * the heap in this process. Align it so future requests can
 		 * be satisfied in heap_page_size chunks.
@@ -291,13 +327,10 @@ asmlinkage long lwk_sys_brk(unsigned long brk)
 				current->pid, ret);
 			ret = mosp->brk = mosp->brk_end = sys_brk(brk);
 		} else {
-			ret = clear_user((void *)heap_addr,
-				mosp->heap_page_size);
-			if (ret)
-				pr_warn("(! %4d) Only %lld/%lld cleared (bootstrap)\n",
-					current->pid,
-					mosp->heap_page_size - ret,
-					mosp->heap_page_size);
+			if (mosp->lwkmem_init & LWKMEM_CLR_BEFORE) {
+				clear_addr = (void *)heap_addr;
+				clear_len = mosp->heap_page_size;
+			}
 
 			ret = mosp->brk = heap_addr;
 			mosp->brk_end = heap_addr + mosp->heap_page_size;
@@ -329,7 +362,8 @@ asmlinkage long lwk_sys_brk(unsigned long brk)
 		 *      We then gradually fill the page (case 1 above).
 		 */
 
-		unsigned long clear_len = brk - mosp->brk;
+		clear_len = brk - mosp->brk;
+		clear_addr = (void *)mosp->brk;
 
 		if (brk <= mosp->brk_end) {
 			len = brk - mosp->brk;
@@ -355,19 +389,12 @@ asmlinkage long lwk_sys_brk(unsigned long brk)
 			if (ret != mosp->brk_end) {
 				pr_warn("(! %4d) allocate_blocks_fixed(len %ld) failed\n",
 					current->pid, len);
-				ret = -1;
+				ret = -ENOMEM;
+				up_write(&mm->mmap_sem);
 				goto out;
 			}
 			mosp->brk_end += len;
 		}
-
-		/* Clear only the newly requested amount */
-		ret = clear_len > 0 ?
-			clear_user((void *)mosp->brk, clear_len) : 0;
-		if (ret)
-			pr_warn("(! %4d) Only %ld/%ld cleared (expand)\n",
-				current->pid, clear_len - ret, len);
-
 		ret = mosp->brk = brk;
 	} else {
 		/* Shrinking the brk line.  We don't give memory back at this
@@ -379,6 +406,16 @@ asmlinkage long lwk_sys_brk(unsigned long brk)
 				current->pid, brk, mosp->brk_end - brk);
 
 		ret = mosp->brk = brk;
+	}
+
+	/* Release the semaphore before calling memset, which may
+	 * take a while.
+	 */
+	up_write(&mm->mmap_sem);
+
+	if (clear_len && clear_addr) {
+		/* Clear only the newly requested amount */
+		memset((void *) clear_addr, 0, clear_len);
 	}
 
  out:
@@ -425,7 +462,6 @@ asmlinkage long lwk_sys_remap_file_pages(unsigned long start,
 asmlinkage long lwk_sys_madvise(unsigned long start, size_t len_in,
 		int behavior)
 {
-	struct mm_struct *mm = current->mm;
 	struct mos_process_t *mos_p;
 	struct vm_area_struct *vma;
 	long ret;
@@ -442,7 +478,9 @@ asmlinkage long lwk_sys_madvise(unsigned long start, size_t len_in,
 		return -ENOSYS;
 	}
 
-	vma = find_vma(mm, start);
+	down_read(&current->mm->mmap_sem);
+	vma = mos_find_vma(current->mm, start);
+	up_read(&current->mm->mmap_sem);
 	if (!vma) {
 		pr_warn("(!) %s() no vma for pid %d\n", __func__, current->pid);
 		return -ENOSYS;
@@ -462,22 +500,25 @@ asmlinkage long lwk_sys_mbind(unsigned long start, unsigned long len,
 		unsigned long mode, const unsigned long __user *nmask,
 		unsigned long maxnode, unsigned flags)
 {
-	long ret;
+	struct vm_area_struct *vma;
 
 	if (LWKMEM_DEBUG)
 		pr_info("%s(start=0x%lx len=%ld mode=0x%lx nmask=%p maxnode=%ld flags=0x%x) CPU=%d pid=%d nst=%d\n",
 		       __func__, start, len, mode, nmask, maxnode, flags,
 		       smp_processor_id(), current->pid, current->mos_nesting);
 
-	if (current->mos_nesting > 0)
-		return -ENOSYS;
+	vma = mos_find_vma(current->mm, start);
 
-	current->mos_nesting++;
+	if (vma && is_lwkmem(vma)) {
+		if (mode == MPOL_PREFERRED) {
+			if (LWKMEM_DEBUG)
+				pr_warn("(!) %s : ignoring MPOL_PREFERRED for LWK VMA\n",
+					__func__);
+			return 0;
+		}
+	}
 
-	ret = sys_mbind(start, len, mode, nmask, maxnode, flags);
-
-	--current->mos_nesting;
-	return ret;
+	return -ENOSYS;
 }
 
 asmlinkage long lwk_sys_set_mempolicy(int mode,
@@ -681,11 +722,13 @@ asmlinkage long lwk_sys_mprotect(unsigned long start, size_t len,
 		pr_info("pid=%d nst=%d\n", current->pid, current->mos_nesting);
 	}
 
-	vma = find_vma(current->mm, start);
-	if (vma && is_lwkmem(vma) &&
-		((prot == PROT_NONE) || (prot == PROT_READ))) {
+	down_read(&current->mm->mmap_sem);
+	vma = mos_find_vma(current->mm, start);
+	up_read(&current->mm->mmap_sem);
+	if (vma && is_lwkmem(vma) && ((prot == PROT_NONE) ||
+	    (prot & (PROT_EXEC | PROT_READ)))) {
 		if (LWKMEM_DEBUG)
-			pr_warn("(!) LWK mprotect ignores PROT_NONE and PROT_READ).\n");
+			pr_warn("(!) LWK mprotect ignores PROT_NONE, PROT_READ, and PROT_EXEC).\n");
 
 		return 0;
 	}
@@ -712,6 +755,8 @@ asmlinkage long lwk_sys_mremap(unsigned long addr, unsigned long old_len,
 	int alloc_flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED;
 	int prot = 0;
 	int i;
+	unsigned long clear_len = 0;
+	void *clear_addr = 0;
 
 	static int vm_flags[] = { VM_MAYREAD, VM_MAYWRITE, VM_MAYEXEC };
 	static int prot_flags[] = { PROT_READ, PROT_WRITE, PROT_EXEC };
@@ -729,10 +774,14 @@ asmlinkage long lwk_sys_mremap(unsigned long addr, unsigned long old_len,
 		return -EFAULT;
 	}
 
-	vma = find_vma(current->mm, addr);
+	if (down_write_killable(&current->mm->mmap_sem))
+		return -EINTR;
 
+	vma = mos_find_vma(current->mm, addr);
 	if (!vma || !is_lwkmem(vma)) {
-		ret = sys_mremap(addr, old_len, new_len, flags, new_addr);
+		if (LWKMEM_DEBUG_VERBOSE)
+			pr_info("mremap: VMA 0x%lx is not LWK memory.\n", addr);
+		ret = -ENOSYS;
 		goto out;
 	}
 
@@ -754,19 +803,16 @@ asmlinkage long lwk_sys_mremap(unsigned long addr, unsigned long old_len,
 	}
 
 	/* Copy protection flags from the VMA: */
-
 	for (i = 0; i < ARRAY_SIZE(vm_flags); i++)
 		if (pgprot_val(vma->vm_page_prot) & vm_flags[i])
 			prot |= prot_flags[i];
 
 	ret = allocate_blocks_fixed(addr + old_len, new_len - old_len, prot,
-				    alloc_flags, lwkmem_mremap);
+				    alloc_flags, lwkmem_mmap);
 
 	if (ret == (addr + old_len)) {
-		ret = clear_user((void *)ret, new_len - old_len);
-		if (ret)
-			pr_warn("Only some remapped memory cleared: %ld\n",
-				ret);
+		clear_len = new_len - old_len;
+		clear_addr = (void *) ret;
 		ret = addr;
 	} else {
 		pr_info("%s() : unexpected remap %lx -> %lx\n",
@@ -775,6 +821,11 @@ asmlinkage long lwk_sys_mremap(unsigned long addr, unsigned long old_len,
 	}
 
  out:
+	up_write(&current->mm->mmap_sem);
+
+	if ((mos_p->lwkmem_init & LWKMEM_CLR_BEFORE) && clear_len && clear_addr)
+		memset(clear_addr, 0, clear_len);
+
 	if (LWKMEM_DEBUG)
 		pr_info("(<) %s(addr=0x%lx oldlen=%ld newlen=%ld flags=0x%lx newaddr=0x%lx) = %lx CPU=%d pid=%d nst=%d\n",
 			__func__, addr, old_len, new_len, flags, new_addr,

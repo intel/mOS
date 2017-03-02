@@ -611,9 +611,11 @@ static __latent_entropy int dup_mmap(struct mm_struct *mm,
 		*tmp = *mpnt;
 #ifdef CONFIG_MOS_LWKMEM
 		/* Copied LWK memory areas are not LWK memory. */
-		if (is_lwkmem(tmp))
+		if (is_lwkmem(tmp)) {
+			tmp->vm_ops = NULL;
 			tmp->vm_private_data = (void *) ((unsigned long)
 				tmp->vm_private_data & _LWKMEM_MASK);
+		}
 #endif
 		INIT_LIST_HEAD(&tmp->anon_vma_chain);
 		retval = vma_dup_policy(mpnt, tmp);
@@ -673,6 +675,42 @@ static __latent_entropy int dup_mmap(struct mm_struct *mm,
 
 		if (retval)
 			goto out;
+#ifdef CONFIG_MOS_LWKMEM
+		/* If source memory was LWK memory then 'pre-fault' each
+		 * page to break the sharing of LWK pages between mOS and
+		 * Linux.  The copy is made in the Linux memory so that
+		 * the original LWK memory pages are left alone.
+		 */
+		if (is_lwkmem(mpnt)) {
+			unsigned long addr = tmp->vm_start;
+			unsigned int size = 1;
+			struct page *last_page = NULL;
+
+			for (; addr < tmp->vm_end; addr += size) {
+				struct page *page;
+
+				page = lwkmem_user_to_page(tmp->vm_mm, addr,
+							   &size);
+				if (page && page == last_page)
+					continue;
+				else {
+					int rc;
+
+					if (page)
+						last_page = page;
+					else
+						size = 1;
+
+					rc = handle_mm_fault(tmp, addr,
+						FAULT_FLAG_WRITE |
+						FAULT_FLAG_KILLABLE);
+					WARN_ONCE(rc && rc != VM_FAULT_WRITE,
+						  "address %lx failed, rc=%i\n",
+						  addr, rc);
+				}
+			}
+		}
+#endif
 	}
 	/* a new mm has just been created */
 	arch_dup_mmap(oldmm, mm);

@@ -19,7 +19,6 @@
 #include <linux/cpumask.h>
 #include <linux/sched.h>
 #include <linux/cpuhotplug.h>
-#include <linux/elf.h>
 
 /* Is current and MOS task? */
 #if defined(CONFIG_MOS_FOR_HPC) && defined(MOS_IS_LWK_PROCESS)
@@ -54,9 +53,20 @@ extern void mos_sysfs_update(void);
 
 extern void mos_exit_thread(pid_t pid, pid_t tgid);
 
-enum lwkmem_kind_t {kind_4k = 0, kind_2m, kind_4m, kind_1g, kind_last};
+#if defined(CONFIG_X86_64) || defined(CONFIG_X86_PAE)
+enum lwkmem_kind_t {kind_4k = 0, kind_2m, kind_1g, kind_last};
+#else
+enum lwkmem_kind_t {kind_4k = 0, kind_4m, kind_1g, kind_last};
+#endif
 extern unsigned long lwk_page_shift[];
 enum lwkmem_type_t {lwkmem_dram = 0, lwkmem_hbm, lwkmem_nvram, lwkmem_type_last };
+enum allocate_site_t {
+	lwkmem_mmap = 0,
+	lwkmem_brk = 1,
+	lwkmem_static = 2,
+	lwkmem_stack = 3,
+	lwkmem_site_last = 4
+};
 
 struct mos_process_t {
 	struct list_head list;
@@ -87,7 +97,8 @@ struct mos_process_t {
         struct list_head lwkmem_list;
 
         /* Lists of blocks of each kind partitioned for this process */
-        struct list_head blk_list[kind_last];
+	struct list_head free_list[kind_last][MAX_NUMNODES];
+	struct list_head busy_list[kind_last][MAX_NUMNODES];
 
         /* Number of blocks available of each kind */
         int64_t num_blks[kind_last];
@@ -107,23 +118,32 @@ struct mos_process_t {
 	int64_t max_page_size;
 	int64_t heap_page_size;
 
-	int domain_info[lwkmem_type_last][1 << CONFIG_NODES_SHIFT];
+	int domain_info[lwkmem_type_last][MAX_NUMNODES];
 	int domain_info_len[lwkmem_type_last];
 	int domain_order_index[lwkmem_type_last][kind_last];
 	bool lwkmem_interleave_disable;
+	int lwkmem_interleave;
 
-	unsigned long mcdram_minimum;
-	unsigned long mcdram_exempt_flags;
+	struct memory_preference_t {
+		enum lwkmem_type_t lower_type_order[lwkmem_type_last];
+		enum lwkmem_type_t upper_type_order[lwkmem_type_last];
+		unsigned long threshold;
+	} memory_preference[lwkmem_site_last];
+
 	bool lwkmem_load_elf_segs;
 
-	unsigned long lwkmem_mmap_fixed;
+	unsigned long lwkmem_mmap_aligned_threshold;
+	unsigned long lwkmem_mmap_alignment;
 	unsigned long lwkmem_next_addr;
 
 	/* Total number of blocks used (allocated). */
 	unsigned long blks_allocated[kind_last][MAX_NUMNODES];
+	unsigned long blks_in_use[kind_last][MAX_NUMNODES];
+	unsigned long max_allocated[MAX_NUMNODES];
 	bool report_blks_allocated;
 
 	long brk_clear_len;
+	int lwkmem_init;
 #endif
 
 #ifdef CONFIG_MOS_SCHEDULER
@@ -170,6 +190,7 @@ extern int lwk_config_lwkmem(char *param_value);
 extern void lwkctl_def_partition(void);
 #ifdef CONFIG_MOS_LWKMEM
 /* Memory additions go here */
+#include <linux/page-flags.h>
 
 /*
  * Upper 6 bytes are magic number ("LWKMEM") to identify a vma containing LWK
@@ -187,19 +208,30 @@ extern void lwkctl_def_partition(void);
 #define _LWKPG          ((unsigned long)(0x004c574b5047))
 #define is_lwkpg(page)  ((((page)->private) & _LWKPG) == _LWKPG)
 
+static inline void lwkmem_page_init(struct page *p)
+{
+	SetPageReserved(p);
+	SetPagePrivate(p);
+	set_bit(PG_writeback, &p->flags);
+	SetPageActive(p);
+	SetPageUnevictable(p);
+	SetPageMlocked(p);
+	p->private = _LWKPG;
+}
+
 extern struct page *lwkmem_user_to_page(struct mm_struct *mm,
-					unsigned long addr);
+					unsigned long addr,
+					unsigned int *size);
 extern void lwkmem_available(unsigned long *totalraam, unsigned long *freeraam);
 
-extern unsigned long elf_map_to_lwkmem(struct elf_phdr *eppnt,
-					unsigned long addr, unsigned long size,
+extern unsigned long elf_map_to_lwkmem(unsigned long addr, unsigned long size,
 					int prot, int type);
-extern long elf_unmap_from_lwkmem(struct elf_phdr *eppnt, unsigned long addr,
-					unsigned long size);
+extern long elf_unmap_from_lwkmem(unsigned long addr, unsigned long size);
 
 #else
 #define is_lwkmem(vma) 0
 #define is_lwkpg(page) 0
+static inline void lwkmem_page_init(struct page *p) { }
 #endif /* CONFIG_MOS_LWKMEM */
 
 
@@ -237,6 +269,7 @@ static inline void lwkctl_def_partition(void) {}
 
 #define is_lwkmem(vma) 0
 #define is_lwkpg(page) 0
+static inline void lwkmem_page_init(struct page *p) { }
 
 #endif /* CONFIG_MOS_FOR_HPC */
 #endif /* _LINUX_MOS_H */
