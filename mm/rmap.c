@@ -1383,7 +1383,8 @@ static void page_remove_anon_compound_rmap(struct page *page)
 {
 	int i, nr;
 
-	if (!atomic_add_negative(-1, compound_mapcount_ptr(page)))
+	if (!atomic_add_negative(-1, compound_mapcount_ptr(page)) ||
+	    is_lwkpg(page))
 		return;
 
 	/* Hugepages are not counted in NR_ANON_PAGES for now. */
@@ -1433,7 +1434,8 @@ void page_remove_rmap(struct page *page, bool compound)
 		return page_remove_anon_compound_rmap(page);
 
 	/* page still mapped by someone else? */
-	if (!atomic_add_negative(-1, &page->_mapcount))
+	if (!atomic_add_negative(-1, &page->_mapcount) ||
+	    is_lwkpg(page))
 		return;
 
 	/*

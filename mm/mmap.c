@@ -1131,6 +1131,12 @@ struct vm_area_struct *vma_merge(struct mm_struct *mm,
 	VM_WARN_ON(area && end > area->vm_end);
 	VM_WARN_ON(addr >= end);
 
+#ifdef CONFIG_MOS_LWKMEM
+	/* Do not merge LWK VMA with non-LWK VMA. */
+	if (prev && next && (is_lwkmem(prev) ^ is_lwkmem(next)))
+		return NULL;
+#endif
+
 	/*
 	 * Can it merge with the predecessor?
 	 */
@@ -1162,7 +1168,7 @@ struct vm_area_struct *vma_merge(struct mm_struct *mm,
 #ifdef CONFIG_MOS_LWKMEM
 		if (!is_lwkmem(prev))
 #endif
-		    khugepaged_enter_vma_merge(prev, vm_flags);
+		khugepaged_enter_vma_merge(prev, vm_flags);
 		return prev;
 	}
 
@@ -1190,9 +1196,9 @@ struct vm_area_struct *vma_merge(struct mm_struct *mm,
 		if (err)
 			return NULL;
 #ifdef CONFIG_MOS_LWKMEM
-		if (!is_lwkmem(prev))
+		if (!is_lwkmem(area))
 #endif
-		    khugepaged_enter_vma_merge(area, vm_flags);
+		khugepaged_enter_vma_merge(area, vm_flags);
 		return area;
 	}
 

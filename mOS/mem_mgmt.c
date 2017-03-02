@@ -23,11 +23,12 @@
 #include <linux/perf_event.h>
 #include <linux/printk.h>
 #include <linux/mos.h>
-#include <linux/vmalloc.h>
 #include <linux/rmap.h>
 #include <linux/pkeys.h>
+#include <linux/hugetlb.h>
 #include <asm/setup.h>
 #include "lwkmem.h"
+#include "../mm/internal.h"
 
 #undef pr_fmt
 #define pr_fmt(fmt)	"mOS-mem: " fmt
@@ -43,19 +44,60 @@ static size_t lwkmem_n_nodes;
 /*
  * LWK page size masks and shifts
  */
-char *kind_str[kind_last] = {"4k", "2m", "4m", "1g"};
-int64_t kind_size[kind_last] = {SZ_4K, SZ_2M, SZ_4M, SZ_1G};
-char *lwkmem_type_str[lwkmem_type_last] = {"dram", "mcdram"};
 
-unsigned long lwk_page_shift[kind_last] = {12, 21, 22, 30};
-static unsigned long lwk_page_size[kind_last] = {
-			(1UL << 12), (1UL << 21),
-			(1UL << 22), (1UL << 30)};
-static unsigned long lwk_page_mask[kind_last] = {
-			~((1UL << 12) - 1), ~((1UL << 21) - 1),
+#if defined(CONFIG_X86_64) || defined(CONFIG_X86_PAE)
+static char *kind_str[kind_last] = {"4k", "2m", "1g"};
+static int64_t kind_size[kind_last] = {SZ_4K, SZ_2M, SZ_1G};
+unsigned long lwk_page_shift[kind_last] = {12, 21, 30};
+static unsigned long lwk_page_size[kind_last] = { (1UL << 12), (1UL << 21),
+			(1UL << 30)};
+static unsigned long lwk_page_mask[kind_last] = { ~((1UL << 12) - 1),
+			~((1UL << 21) - 1), ~((1UL << 30) - 1)};
+#define MIN_CHUNK_SIZE (SZ_2M)
+#else
+static char *kind_str[kind_last] = {"4k", "4m", "1g"};
+static int64_t kind_size[kind_last] = {SZ_4K, SZ_4M, SZ_1G};
+unsigned long lwk_page_shift[kind_last] = {12, 22, 30};
+static unsigned long lwk_page_size[kind_last] = { (1UL << 12), (1UL << 22),
+			(1UL << 30)};
+static unsigned long lwk_page_mask[kind_last] = { ~((1UL << 12) - 1),
 			~((1UL << 22) - 1), ~((1UL << 30) - 1)};
+#define MIN_CHUNK_SIZE (SZ_4M)
+#endif
+static const char * const lwkmem_type_str[lwkmem_type_last] = {
+	"dram", "hbm", "nvram"
+};
+static const char * const lwkmem_site_str[lwkmem_site_last] = {
+	"mmap", "brk", "static", "stack"
+};
 
-#define MIN_CHUNK_SIZE	(SZ_2M)
+
+static const char *lwkmem_name(struct vm_area_struct *vma)
+{
+	struct mm_struct *mm = vma->vm_mm;
+	const char *name = arch_vma_name(vma);
+
+	if (!name) {
+		if (!mm)
+			name = "[vdso] LWK";
+		else if (vma->vm_start <= mm->brk &&
+			vma->vm_end >= mm->start_brk)
+			name = "[heap] LWK";
+		else if (vma->vm_start <= mm->start_stack &&
+			vma->vm_end >= mm->start_stack)
+			name = "[stack] LWK";
+		else
+			name = "LWK";
+	}
+
+	return name;
+}
+
+
+static const struct vm_operations_struct lwkmem_vm_ops = {
+	.name = lwkmem_name,
+};
+
 
 static uint64_t pgran_available(struct lwk_process_granule *g)
 {
@@ -72,50 +114,36 @@ void lwkmem_set_debug_level(int level)
 	lwkmem_debug = level;
 }
 
-/*
- * Return number of dTLB entries of this kind on this architecture
- */
-static int num_dTLB(enum lwkmem_kind_t kind)
+int lwkmem_index_of(const char *s, const char * const lst[], const size_t len,
+		    int case_insensitive)
 {
-	int rc = 0;
-	static int limit = 5;
+	size_t i;
 
-	switch (kind) {
-	case kind_1g:
-		rc = tlb_lld_1g[ENTRIES] ? tlb_lld_1g[ENTRIES] : 16;
-		break;
-	case kind_4m:
-#if defined(CONFIG_X86_64) || defined(CONFIG_X86_PAE)
-		rc = 0; /* 4m is not supported in IA-32e paging mode */
-#else
-		rc = tlb_lld_4m[ENTRIES];
-#endif
-		break;
-	case kind_2m:
-#if defined(CONFIG_X86_64) || defined(CONFIG_X86_PAE)
-		rc = tlb_lld_2m[ENTRIES] ? tlb_lld_2m[ENTRIES] : 128;
-#else
-		rc = 0;
-#endif
-		break;
-	case kind_4k:
-		rc = tlb_lld_4k[ENTRIES] ? tlb_lld_4k[ENTRIES] : 256;
-		break;
-	case kind_last:
-		rc = 0;
-		break;
-	default:
-		if (limit > 0) {
-			pr_err("Unknown num_dTLB(%d)! Called from %pS <- %pS\n",
-				kind,  __builtin_return_address(0),
-				__builtin_return_address(1));
-			limit--;
-		}
-	}
+	for (i = 0; i < len; i++)
+		if (case_insensitive && strcasecmp(s, lst[i]) == 0)
+			return i;
+		else if (strcmp(s, lst[i]) == 0)
+			return i;
 
-	return rc;
+	return -1;
+}
 
-} /* end of num_dTLB() */
+static unsigned long block_size_virt(struct blk_list *b, enum lwkmem_kind_t k)
+{
+	return kind_size[k] * (1 + (b->num_blks - 1) * b->stride);
+}
+
+static int lwkmem_type_of(int nid, struct mos_process_t *mosp)
+{
+	int i, t;
+
+	for (t = 0; t < lwkmem_type_last; t++)
+		for (i = 0; i < mosp->domain_info_len[t]; i++)
+			if (mosp->domain_info[t][i] == nid)
+				return t;
+
+	return -1;
+}
 
 #ifdef LWKMEM_DEBUG_ENABLED
 /*
@@ -183,38 +211,56 @@ static void dump_process_mem_list(struct mos_process_t *mos_p)
 static void dump_block_lists(struct mos_process_t *mos_p)
 {
 	struct blk_list *elt;
-	int64_t total_mem_free[kind_last] = {0, 0, 0, 0};
-	int64_t total_mem_assigned[kind_last] = {0, 0, 0, 0};
-	unsigned long total_blks_free[kind_last] = {0, 0, 0, 0};
-	unsigned long total_blks_assigned[kind_last] = {0, 0, 0, 0};
+	int64_t total_mem_free[kind_last+1] = {0};
+	int64_t total_mem_assigned[kind_last+1] = {0};
+	unsigned long total_blks_free[kind_last+1] = {0};
+	unsigned long total_blks_assigned[kind_last+1] = {0};
 	enum lwkmem_kind_t k;
 
 	pr_info("Block lists for process %d\n", mos_p->tgid);
 	for (k = kind_4k; k < kind_last; k++) {
-		list_for_each_entry(elt, &(mos_p->blk_list[k]), list) {
-			unsigned long addr =
-				(unsigned long)elt->phys->base +
-				elt->offset;
-			unsigned long sz = elt->num_blks * kind_size[k];
+		int n;
 
-			if (LWKMEM_DEBUG_EXTREME)
-				pr_info("  [%s] [%#016lx-%#016lx] [%#016lx-%#016lx] pid=%d nid=%d %3lld blocks %s\n",
-					kind_str[k],
-					addr,
-					addr + sz - 1,
-					elt->vma_addr,
-					elt->free ? 0 : elt->vma_addr + sz - 1,
-					elt->phys->owner,
-					elt->phys->nid,
-					elt->num_blks,
-					elt->free ? "free" : "assigned");
+		for_each_online_node(n) {
+			list_for_each_entry(elt, &mos_p->free_list[k][n],
+					    list) {
+				unsigned long addr = (unsigned long)
+					elt->phys->base + elt->offset;
+				unsigned long sz = elt->num_blks * kind_size[k];
 
-			if (elt->free) {
+				if (LWKMEM_DEBUG_EXTREME)
+					pr_info("  [%s] [%#016lx-%#016lx] [%#016lx-%#016lx]:%d pid=%d nid=%d %3lld blocks %s\n",
+						kind_str[k],
+						addr,
+						addr + sz - 1,
+						0UL, 0UL, 1,
+						elt->phys->owner,
+						elt->phys->nid,
+						elt->num_blks,
+						"free");
 				total_blks_free[k] += elt->num_blks;
 				total_mem_free[k] += sz;
-			} else {
+			}
+			list_for_each_entry(elt, &mos_p->busy_list[k][n],
+					    list) {
+				unsigned long addr = (unsigned long)
+					elt->phys->base + elt->offset;
+				unsigned long phys_sz = kind_size[k] *
+					elt->num_blks;
+				unsigned long virt_sz = block_size_virt(elt, k);
+
+				if (LWKMEM_DEBUG_EXTREME)
+					pr_info("  [%s] [%#016lx-%#016lx] [%#016lx-%#016lx]:%d pid=%d nid=%d %3lld blocks %s\n",
+						kind_str[k], addr,
+						addr + phys_sz - 1,
+						elt->vma_addr,
+						elt->vma_addr + virt_sz - 1,
+						elt->stride,
+						elt->phys->owner,
+						elt->phys->nid,
+						elt->num_blks, "assigned");
 				total_blks_assigned[k] += elt->num_blks;
-				total_mem_assigned[k] += sz;
+				total_mem_assigned[k] += phys_sz;
 			}
 		}
 		pr_info("  [%s] Free: %ld blocks (%lld M)   Assigned %ld blocks (%lld M)\n",
@@ -229,18 +275,17 @@ static void dump_block_lists(struct mos_process_t *mos_p)
 				total_blks_free[k],
 				mos_p->num_blks[k]);
 
+		/* Update summary. */
+		total_blks_free[kind_last] += total_blks_free[k];
+		total_mem_free[kind_last] += total_mem_free[k];
+		total_blks_assigned[kind_last] += total_blks_assigned[k];
+		total_mem_assigned[kind_last] += total_mem_assigned[k];
 	}
 	pr_info("All block summary for process %d\n", mos_p->tgid);
 	pr_info("  Free: %ld blocks (%lld M)   Assigned %ld blocks (%lld M)\n",
-		total_blks_free[kind_4k] + total_blks_free[kind_2m] +
-		total_blks_free[kind_4m] + total_blks_free[kind_1g],
-		(total_mem_free[kind_4k] + total_mem_free[kind_2m] +
-		total_mem_free[kind_4m] + total_mem_free[kind_1g]) >> 20,
-		total_blks_assigned[kind_4k] + total_blks_assigned[kind_2m] +
-		total_blks_assigned[kind_4m] + total_blks_assigned[kind_1g],
-		(total_mem_assigned[kind_4k] + total_mem_assigned[kind_2m] +
-		total_mem_assigned[kind_4m] +
-		total_mem_assigned[kind_1g]) >> 20);
+		total_blks_free[kind_last], total_mem_free[kind_last] >> 20,
+		total_blks_assigned[kind_last],
+		total_mem_assigned[kind_last] >> 20);
 
 } /* end of dump_block_lists() */
 #endif /* LWKMEM_DEBUG_ENABLED */
@@ -405,19 +450,39 @@ static int lwkmem_process_init(struct mos_process_t *mosp)
 {
 	enum lwkmem_kind_t k;
 	enum lwkmem_type_t m;
+	enum allocate_site_t s;
+	struct memory_preference_t *mpref;
+	enum lwkmem_type_t *default_order;
 
 	mosp->lwkmem = 0;
 	mosp->brk = mosp->brk_end = 0;
 	mosp->lwkmem_brk_disable = false;
 	mosp->max_page_size = SZ_1G;
 	mosp->heap_page_size = SZ_2M;
-	mosp->mcdram_minimum = 0;
-	mosp->mcdram_exempt_flags = 0;
-	mosp->lwkmem_mmap_fixed = 0;
+	mosp->lwkmem_mmap_aligned_threshold = SZ_2M;
+	mosp->lwkmem_mmap_alignment = SZ_1G;
 	mosp->lwkmem_next_addr = 0x300000000000;
 	mosp->brk_clear_len = 4096;
 	mosp->lwkmem_interleave_disable = false;
 	mosp->lwkmem_load_elf_segs = true;
+	mosp->lwkmem_interleave = 0;
+	mosp->lwkmem_init = LWKMEM_CLR_AFTER;
+
+	/* Initialize all memory preferences */
+	default_order = mosp->memory_preference[lwkmem_mmap].lower_type_order;
+	default_order[0] = lwkmem_hbm;
+	default_order[1] = lwkmem_dram;
+	default_order[2] = lwkmem_nvram;
+
+	for (s = 0; s < lwkmem_site_last; s++) {
+		mpref = &mosp->memory_preference[s];
+		mpref->threshold = 1;
+		if (s != lwkmem_mmap)
+			memcpy(mpref->lower_type_order, default_order,
+			       sizeof(mpref->lower_type_order));
+		memcpy(mpref->upper_type_order, default_order,
+			       sizeof(mpref->upper_type_order));
+	}
 
 	/* Don't randomize address space for LWK processes! */
 	current->personality |= ADDR_NO_RANDOMIZE;
@@ -426,10 +491,13 @@ static int lwkmem_process_init(struct mos_process_t *mosp)
 	for (k = kind_4k; k < kind_last; k++) {
 		int n;
 
-		INIT_LIST_HEAD(&mosp->blk_list[k]);
 		mosp->num_blks[k] = 0;
-		for_each_node_mask(n, node_online_map)
+		for_each_online_node(n) {
+			INIT_LIST_HEAD(&mosp->free_list[k][n]);
+			INIT_LIST_HEAD(&mosp->busy_list[k][n]);
+			mosp->blks_in_use[k][n] =
 			mosp->blks_allocated[k][n] = 0;
+		}
 	}
 
 	mosp->report_blks_allocated = 0;
@@ -523,11 +591,103 @@ static int lwkmem_heap_pg_size_cb(const char *val, struct mos_process_t *mosp)
 	return -EINVAL;
 }
 
-static int lwkmem_mcdram_enable_cb(const char *val,
+static int lwkmem_memory_preferences_cb(const char *val,
 				 struct mos_process_t *mosp)
 {
+	char *opt, *pref_s, *scope_s, *thresh_s, *order_s, *mtype_s;
+	unsigned long thresh;
+	enum allocate_site_t scope;
+	struct memory_preference_t *mpref;
+	enum lwkmem_type_t *order;
+	int t;
+
+	if (!val)
+		goto invalid;
+
+	pr_debug("(>) %s val=%s\n", __func__, val);
+
+	opt = kstrdup(val, GFP_KERNEL);
+	if (!opt)
+		return -ENOMEM;
+
+	/* Format: /scope[:thresh]:order/+ */
+	while ((pref_s = strsep(&opt, "/"))) {
+
+		if (strlen(pref_s) == 0)
+			continue;
+
+		scope_s = strsep(&pref_s, ":");
+		thresh_s = strsep(&pref_s, ":");
+		order_s = strsep(&pref_s, ":");
+
+		pr_debug("(*) %s:%d scope=%s thresh=%s order=%s\n", __func__, __LINE__, scope_s, thresh_s, order_s);
+
+		if (pref_s) {
+			pr_err("%s: Extraneous characters after %s:%s:%s\n",
+				 __func__, scope_s, thresh_s, order_s);
+			goto invalid;
+		}
+
+		if (!order_s) {
+			order_s = thresh_s;
+			thresh = 1;
+		} else if (kstrtoul(thresh_s, 0, &thresh)) {
+			pr_err("%s: Illegal threshold: %s\n",
+			       __func__, thresh_s);
+			goto invalid;
+		}
+
+		scope = lwkmem_index_of(scope_s, lwkmem_site_str,
+				       sizeof(lwkmem_site_str), false);
+		if (scope < 0) {
+			pr_err("%s: Illegal scope: %s\n",
+			       __func__, scope_s);
+			goto invalid;
+		}
+
+		mpref = &mosp->memory_preference[scope];
+		mpref->threshold = thresh;
+		order = mpref->upper_type_order;
+		t = 0;
+
+		while ((mtype_s = strsep(&order_s, ","))) {
+
+			pr_debug("(*) %s:%d   type=%s\n", __func__, __LINE__, mtype_s);
+
+			if (strlen(mtype_s) == 0)
+				continue;
+
+			if (t >= lwkmem_type_last) {
+				pr_err("%s: overflow in order string\n",
+				       __func__);
+				goto invalid;
+			}
+
+			order[t] = lwkmem_index_of(mtype_s, lwkmem_type_str,
+						   lwkmem_type_last, false);
+			if (order[t] < 0) {
+				pr_err("%s: Illegal memory type: %s\n",
+				       __func__, mtype_s);
+			}
+
+			t++;
+		}
+	}
+
+	kfree(opt);
+	pr_debug("(<) %s val=%s\n", __func__, val);
+	return 0;
+
+ invalid:
+	kfree(opt);
+	pr_err("(!) Illegal value (%s) detected in %s.\n", val, __func__);
+	return -EINVAL;
+}
+
+static int lwkmem_aligned_mmap_cb(const char *val, struct mos_process_t *mosp)
+{
 	int rc;
-	char *tok, *opt = 0, *elem;
+	char *tok, *opt = 0;
 
 	if (!val)
 		goto invalid;
@@ -536,70 +696,32 @@ static int lwkmem_mcdram_enable_cb(const char *val,
 	if (!opt)
 		return -ENOMEM;
 
-	/* Format: lwkmem-mcdram-enable=<size>[;x:<flags>]
-	 *
-	 * where:
-	 *
-	 *   <size> identifies the MCDRAM preference line; allocations equal
-	 *       to or larger than this size will first try to use MCDRAM as
-	 *       the backing storage.
-	 *   <flags> identifies MAP_* flags that are exempt, i.e. will NOT
-	 *       prefer MCDRAM as a backing store.
-	 *
-	 * Example: lwkmem-mcdram-enable=1;x:20000 will greedily back all
-	 *   memory requests with MCDRAM until it is exhausted, except for
-	 *   requests that are identified with MAP_STACK (x20000).
-	 */
-
-	while ((tok = strsep(&opt, ";"))) {
-		if (tok[0] == 'x') {
-			elem = strsep(&tok, ":");
-			if (elem[1])
-				goto invalid;
-			elem = strsep(&tok, ":");
-			rc = kstrtoul(elem, 16, &mosp->mcdram_exempt_flags);
-			if (rc)
-				goto invalid;
-		} else {
-			rc = kstrtoul(tok, 0, &mosp->mcdram_minimum);
-			if (rc)
-				goto invalid;
-		}
-	}
-
-	if (LWKMEM_DEBUG)
-		pr_info("(!) MCDRAM line set to %ld / 0x%lx.  Exempt flags:0x%lx\n",
-			mosp->mcdram_minimum, mosp->mcdram_minimum,
-			mosp->mcdram_exempt_flags);
-
-	kfree(opt);
-	return 0;
-
- invalid:
-	kfree(opt);
-	pr_err("(!) Illegal value (%s) detected in %s.\n", val, __func__);
-	return -EINVAL;
-}
-
-static int lwkmem_mmap_fixed_cb(const char *val, struct mos_process_t *mosp)
-{
-	int rc;
-
-	if (!val)
-		goto invalid;
-
-	rc = kstrtoul(val, 0, &mosp->lwkmem_mmap_fixed);
+	tok = strsep(&opt, ":");
+	rc = kstrtoul(tok, 0, &mosp->lwkmem_mmap_aligned_threshold);
 
 	if (rc)
 		goto invalid;
 
-	if (LWKMEM_DEBUG)
-		pr_info("(*) lwkmem-mmap-fixed=%lx\n",
-			mosp->lwkmem_mmap_fixed);
+	tok = strsep(&opt, ":");
+	if (tok)
+		rc = kstrtoul(tok, 0, &mosp->lwkmem_mmap_alignment);
 
+	if (rc)
+		goto invalid;
+
+	if (opt && *opt != '\0')
+		pr_warn("%s: Ignoring extraneous arguments\n", __func__);
+
+	if (LWKMEM_DEBUG)
+		pr_info("(*) lwkmem-mmap-aligned=%lx:%lx\n",
+			mosp->lwkmem_mmap_aligned_threshold,
+			mosp->lwkmem_mmap_alignment);
+
+	kfree(opt);
 	return 0;
 
  invalid:
+	kfree(opt);
 	pr_err("(!) Illegal value (%s) detected in %s.\n", val, __func__);
 	return -EINVAL;
 }
@@ -607,7 +729,12 @@ static int lwkmem_mmap_fixed_cb(const char *val, struct mos_process_t *mosp)
 static int lwkmem_blocks_allocated_cb(const char *val,
 					struct mos_process_t *mosp)
 {
+	int n;
+
 	mosp->report_blks_allocated = 1;
+
+	for_each_node_mask(n, node_online_map)
+		mosp->max_allocated[n] = 0;
 
 	if (LWKMEM_DEBUG)
 		pr_info("(*) lwkmem-blocks-allocated\n");
@@ -660,10 +787,65 @@ static int lwkmem_load_elf_disable_cb(const char *val,
 	return 0;
 }
 
+static int lwkmem_interleave_cb(const char *val, struct mos_process_t *mosp)
+{
+	if (!val)
+		goto invalid;
+
+	if (strcasecmp(val, "4k") == 0)
+		mosp->lwkmem_interleave = SZ_4K;
+	else if (strcasecmp(val, "2m") == 0)
+		mosp->lwkmem_interleave = SZ_2M;
+	else if (strcasecmp(val, "4m") == 0)
+		mosp->lwkmem_interleave = SZ_4M;
+	else if (strcasecmp(val, "1g") == 0)
+		mosp->lwkmem_interleave = SZ_1G;
+	else if (strcasecmp(val, "0") == 0)
+		mosp->lwkmem_interleave = 0;
+	else
+		goto invalid;
+
+	if (mosp->lwkmem_interleave)
+		mosp->max_page_size = mosp->lwkmem_interleave;
+
+	pr_debug("LWK memory interleave size set to %s\n", val);
+
+	return 0;
+
+ invalid:
+	pr_err("(!) Illegal value (%s) detected in %s.\n", val, __func__);
+	return -EINVAL;
+}
+
+static int lwkmem_init_cb(const char *val,
+			  struct mos_process_t *mosp)
+{
+	if (!val)
+		goto invalid;
+
+	if (strcasecmp(val, "all") == 0)
+		mosp->lwkmem_init = LWKMEM_CLR_ALL;
+	else if (strcasecmp(val, "before") == 0)
+		mosp->lwkmem_init = LWKMEM_CLR_BEFORE;
+	else if (strcasecmp(val, "after") == 0)
+		mosp->lwkmem_init = LWKMEM_CLR_AFTER;
+	else
+		goto invalid;
+
+	if (LWKMEM_DEBUG)
+		pr_info("(*) lwkmem-init='%s'\n", val);
+
+	return 0;
+invalid:
+	pr_err("(!) Illegal value (%s) for lwkmem-init option.\n", val ? val :
+	       "null");
+	return -EINVAL;
+}
+
 /*
  * Later during boot, gather all of the memory granules into a
  * consolidated list.  The list meta data is migrated from the
- * memory granules into vmalloc'd data.
+ * memory granules into kmalloc'd data.
  */
 LIST_HEAD(mos_lwk_memory_list);
 
@@ -677,37 +859,22 @@ static int __init mos_collect_bootmem(void)
 	list_for_each_entry(g, &mos_lwk_boot_list, list) {
 		struct mos_lwk_mem_granule *newg;
 
-		newg = vmalloc(sizeof(struct mos_lwk_mem_granule));
+		newg = kmalloc(sizeof(struct mos_lwk_mem_granule), GFP_KERNEL);
 		if (!newg)
 			goto collect_err;
 
 		/* Mark as free */
 		g->owner = -1;
-
 		memcpy(newg, g, sizeof(struct mos_lwk_mem_granule));
 
 		/*
-		** Space for the struct page entries has already been allocated
-		** by the kernel. Make sure the flags are as we need them.
-		*/
+		 * Space for the struct page entries has already been allocated
+		 * by the kernel. Make sure the flags are as we need them.
+		 */
 		p = virt_to_page(g->base);
 		nr_pages = g->length / PAGE_SIZE;
-		for (i = 0; i < nr_pages; i++, p++) {
-			/* Init each struct page in this granule */
-			SetPageReserved(p);
-			SetPagePrivate(p);
-			set_bit(PG_writeback, &p->flags);
-			SetPageActive(p);
-			SetPageUnevictable(p);
-			SetPageMlocked(p);
-			p->private = _LWKPG;	/* Mark it as an LWK page */
-
-			/* Not needed at the moment, but may come in handy
-			   during debugging. */
-			p->index = (pgoff_t)((unsigned long)(g->base) +
-				(i * PAGE_SIZE));
-			p->active = page_to_pfn(p);
-		}
+		for (i = 0; i < nr_pages; i++, p++)
+			lwkmem_page_init(p);
 
 		/* This sorts granules by size, not phys location. May want to
 		 * change this sometime in the future. */
@@ -731,10 +898,10 @@ static int __init mos_collect_bootmem(void)
 				     lwkmem_brk_disable_cb);
 	mos_register_option_callback("lwkmem-max-page-size",
 				     lwkmem_max_pg_size_cb);
-	mos_register_option_callback("lwkmem-mcdram-enable",
-				     lwkmem_mcdram_enable_cb);
-	mos_register_option_callback("lwkmem-mmap-fixed",
-				     lwkmem_mmap_fixed_cb);
+	mos_register_option_callback("lwkmem-memory-preferences",
+				     lwkmem_memory_preferences_cb);
+	mos_register_option_callback("lwkmem-aligned-mmap",
+				     lwkmem_aligned_mmap_cb);
 	mos_register_option_callback("lwkmem-heap-page-size",
 				     lwkmem_heap_pg_size_cb);
 	mos_register_option_callback("lwkmem-blocks-allocated",
@@ -745,6 +912,10 @@ static int __init mos_collect_bootmem(void)
 				     lwkmem_interleave_disable_cb);
 	mos_register_option_callback("lwkmem-load-elf-disable",
 				     lwkmem_load_elf_disable_cb);
+	mos_register_option_callback("lwkmem-interleave",
+				     lwkmem_interleave_cb);
+	mos_register_option_callback("lwkmem-init",
+				     lwkmem_init_cb);
 
 	return 0;
 
@@ -807,16 +978,16 @@ static struct blk_list *create_and_link_block(struct lwk_process_granule *pgran,
 	struct blk_list *newb;
 	uint64_t addr;
 
-	newb = vmalloc(sizeof(struct blk_list));
+	newb = kmalloc(sizeof(struct blk_list), GFP_KERNEL);
 	if (!newb)
 		return NULL;
 
 	newb->offset = pgran->offset;
 	newb->num_blks = length / kind_size[knd];
-	newb->free = 1;
 	newb->phys = pgran->granule;
 	newb->vma_addr = 0;
-	list_add(&newb->list, &mosp->blk_list[knd]);
+	newb->stride = 1;
+	list_add(&newb->list, &mosp->free_list[knd][newb->phys->nid]);
 
 	/* Move the watermark in the process granule: */
 	pgran->offset += length;
@@ -852,19 +1023,23 @@ static struct blk_list *create_and_link_block(struct lwk_process_granule *pgran,
 static int partition_task_mem(struct mos_process_t *mosp, int64_t reserved)
 {
 	struct lwk_process_granule *g;
-	enum lwkmem_kind_t knd, nxt;
+	int knd, nxt;
 	uint64_t addr, delta;
 
 	list_for_each_entry(g, &mosp->lwkmem_list, list) {
+		/* Clear the granule if instructed to do so. */
+		if (mosp->lwkmem_init == LWKMEM_CLR_ALL)
+			memset(g->granule->base, 0, g->granule->length);
 
-		/* Incrementally align with the next sized TLB */
+		/* Incrementally align with the next sized TLB or until the
+		 * task's maximum page size is hit.
+		 */
 		for (knd = 0; knd < kind_last - 1; knd++) {
-			if (num_dTLB(knd) == 0)
-				continue;
 
-			for (nxt = knd + 1; nxt < kind_last; nxt++)
-				if (nxt < kind_last && num_dTLB(nxt) > 0)
-					break;
+			if (kind_size[knd] == mosp->max_page_size)
+				break;
+
+			nxt = knd + 1;
 
 			addr = (uint64_t)g->granule->base + g->offset;
 
@@ -884,21 +1059,23 @@ static int partition_task_mem(struct mos_process_t *mosp, int64_t reserved)
 			}
 		}
 
-		/* We are now aligned to the largest TLB boundary (1G).  Consume
+		/* We are now aligned to the largest TLB boundary.  Consume
 		 * the remainder of the granule in the largest possible blocks:
 		 */
 
 		for (knd = kind_last - 1; knd >= 0; knd--) {
+
+			if (kind_size[knd] > mosp->max_page_size)
+				continue;
+
 			if (g->offset >= g->granule->length)
 				break;
-
-			if (num_dTLB(knd) == 0)
-				continue;
 
 			delta = rounddown(g->granule->length - g->offset,
 					  kind_size[knd]);
 			if (!delta)
 				continue;
+
 			if (!create_and_link_block(g, delta, knd, mosp))
 				return -1;
 		}
@@ -947,15 +1124,34 @@ static void release_task_mem_blocks(void)
 		return;
 
 	for (k = kind_4k; k < kind_last; k++) {
-		list_for_each_entry_safe(p_blk, tmp, &mos_p->blk_list[k],
-				list) {
-			p_blk->phys->owner = -1;
-			list_del(&p_blk->list);
-			vfree(p_blk);
+		int n;
+
+		for_each_online_node(n) {
+			list_for_each_entry_safe(p_blk, tmp,
+						 &mos_p->free_list[k][n],
+						 list) {
+				p_blk->phys->owner = -1;
+				list_del(&p_blk->list);
+				kfree(p_blk);
+			}
+			list_for_each_entry_safe(p_blk, tmp,
+						 &mos_p->busy_list[k][n],
+						 list) {
+				unsigned long addr, len;
+
+				addr = ((unsigned long) p_blk->phys->base) +
+					p_blk->offset;
+				len = min_t(unsigned long, p_blk->phys->length
+					    - p_blk->offset,
+					    p_blk->num_blks * kind_size[k]);
+				memset((void *) addr, 0, len);
+				p_blk->phys->owner = -1;
+				list_del(&p_blk->list);
+				kfree(p_blk);
+			}
 		}
 		mos_p->num_blks[k] = 0;
 	}
-
 } /* end of release_task_mem_blocks() */
 
 /*
@@ -1001,9 +1197,22 @@ void lwkmem_release(struct mos_process_t *mos_p)
 			rc = snprintf(str, sizeof(str), "%s\t", kind_str[k]);
 			for_each_node_mask(n, node_online_map)
 				rc += snprintf((str+rc), sizeof(str)-rc, "%8lu ",
-						mos_p->blks_allocated[k][n]); 
+						mos_p->blks_allocated[k][n]);
 			pr_info("%s\n", str);
 		}
+
+		pr_info("PID %u max memory usage by domain:\n", mos_p->tgid);
+		rc = snprintf(str, sizeof(str), "mem/nid\t");
+		for_each_node_mask(n, node_online_map)
+			rc += snprintf((str+rc), sizeof(str)-rc, "%8u ", n);
+		pr_info("%s\n", str);
+
+		/* Output block usage data. */
+		rc = snprintf(str, sizeof(str), "Max:\t");
+		for_each_node_mask(n, node_online_map)
+			rc += snprintf((str+rc), sizeof(str)-rc, "%8lu ",
+				       mos_p->max_allocated[n]);
+		pr_info("%s\n", str);
 	}
 
 	/* Reset the granules that were assigned to this process in the
@@ -1022,7 +1231,7 @@ void lwkmem_release(struct mos_process_t *mos_p)
 		p_granule->granule->owner = -1;
 		p_granule->granule = NULL;
 		list_del(&p_granule->list);
-		vfree(p_granule);
+		kfree(p_granule);
 	}
 
 	if (LWKMEM_DEBUG_VERBOSE) {
@@ -1038,7 +1247,7 @@ void lwkmem_release(struct mos_process_t *mos_p)
 			next->base = elt->base;
 			next->length = next->length + elt->length;
 			list_del(&elt->list);
-			vfree(elt);
+			kfree(elt);
 	    }
 	}
 
@@ -1055,7 +1264,7 @@ void lwkmem_release(struct mos_process_t *mos_p)
  */
 void lwkmem_available(unsigned long *totalraam, unsigned long *freeraam)
 {
-	int64_t available[kind_last] = {0, 0, 0, 0};
+	int64_t available[kind_last] = {0};
 	int64_t total_avail = 0;
 	int64_t total_alloc = 0;
 	enum lwkmem_kind_t k;
@@ -1066,20 +1275,19 @@ void lwkmem_available(unsigned long *totalraam, unsigned long *freeraam)
 	if (!mos_p)
 		return;
 
-	if (LWKMEM_DEBUG)
-		pr_info("lwkmem_available() for pid %d\n", current->pid);
-
 	for (k = kind_4k; k < kind_last; k++) {
-		list_for_each_entry(p_blk, &mos_p->blk_list[k], list)
-			if (p_blk->free) {
-				available[k] = available[k] +
-					p_blk->num_blks * kind_size[k];
-				total_avail = total_avail +
-					p_blk->num_blks * kind_size[k];
-			} else {
-				total_alloc = total_alloc +
-					p_blk->num_blks * kind_size[k];
+		int n;
+
+		for_each_online_node(n) {
+			list_for_each_entry(p_blk, &mos_p->free_list[k][n],
+					    list) {
+				available[k] +=	p_blk->num_blks * kind_size[k];
+				total_avail += p_blk->num_blks * kind_size[k];
 			}
+			list_for_each_entry(p_blk, &mos_p->busy_list[k][n],
+					    list)
+				total_alloc += p_blk->num_blks * kind_size[k];
+		}
 		if (LWKMEM_DEBUG)
 			pr_info("pid %d %s blocks available: %16lld M\n",
 				current->pid, kind_str[k], available[k] >> 20);
@@ -1101,7 +1309,7 @@ static int64_t blocks_wanted(int64_t len, int64_t *wanted,
 	enum lwkmem_kind_t k;
 
 	for (k = kind_last - 1; (int)k >= 0 && len > 0; k--) {
-		if (num_dTLB(k) <= 0 || kind_size[k] > options->max_page_size)
+		if (kind_size[k] > options->max_page_size)
 			continue;
 
 		wanted[k] = len / kind_size[k];
@@ -1125,7 +1333,8 @@ static int64_t blocks_wanted(int64_t len, int64_t *wanted,
 ** page. LWK memory is always pinned, so there is always a struct page for
 ** an LWK memory user address.
 */
-struct page *lwkmem_user_to_page(struct mm_struct *mm, unsigned long addr)
+struct page *lwkmem_user_to_page(struct mm_struct *mm, unsigned long addr,
+				 unsigned int *size)
 {
 	unsigned long *PML4E;
 	unsigned long *PDPTE;
@@ -1143,6 +1352,7 @@ struct page *lwkmem_user_to_page(struct mm_struct *mm, unsigned long addr)
 		pg = virt_to_page(__va(PDPTE[pud_index(addr)] & PG1G_MASK));
 		offset = addr & 0x03fffffff;
 		pg = pg + (offset / PAGE_SIZE);
+		*size = SZ_1G;
 		return pg;
 	}
 	PDE = __va(PDPTE[pud_index(addr)] & PHYSICAL_PAGE_MASK);
@@ -1151,6 +1361,7 @@ struct page *lwkmem_user_to_page(struct mm_struct *mm, unsigned long addr)
 		pg = virt_to_page(__va(PDE[pmd_index(addr)] & PG2M_MASK));
 		offset = addr & 0x0001fffff;
 		pg = pg + (offset / PAGE_SIZE);
+		*size = SZ_2M;
 		return pg;
 	}
 	PTE = __va(PDE[pmd_index(addr)] & PHYSICAL_PAGE_MASK);
@@ -1158,10 +1369,11 @@ struct page *lwkmem_user_to_page(struct mm_struct *mm, unsigned long addr)
 		/* This is a pointer to a 4k page */
 		pg = virt_to_page(__va(PTE[pte_index(addr)] & ADDR_MASK));
 		/* No need to adjust; offset is < PAGE_SIZE */
+		*size = SZ_4K;
 		return pg;
 	}
-	pr_err("Addr 0x%lx is not in a mapped LWK page. Something is wrong!\n",
-		addr);
+	if (LWKMEM_DEBUG)
+		pr_info("Addr 0x%lx is not in a mapped LWK page.\n", addr);
 
 	return NULL;
 
@@ -1473,7 +1685,7 @@ void print_pgd(pgd_t *cr3, unsigned long addr)
  */
 static int build_pagetbl(enum lwkmem_kind_t knd, struct vm_area_struct *vma,
 			 unsigned long phys, unsigned long addr,
-			 unsigned long end)
+			 unsigned long end, unsigned int stride)
 {
 	struct mm_struct *mm = current->mm;
 	int rc = 0;
@@ -1481,10 +1693,6 @@ static int build_pagetbl(enum lwkmem_kind_t knd, struct vm_area_struct *vma,
 	phys = (phys + lwk_page_size[knd] - 1) & lwk_page_mask[knd];
 	while (addr < end) {
 		struct page *p;
-		unsigned long pfn;
-		unsigned long addr_end = addr + kind_size[knd];
-
-		/* Build the page table */
 		pgd_t *pgd;
 		pud_t *pud;
 		pmd_t *pmd;
@@ -1511,7 +1719,6 @@ static int build_pagetbl(enum lwkmem_kind_t knd, struct vm_area_struct *vma,
 			/* Setup the PUD (for a 1g page) */
 			entry = __pud(((phys_addr_t)phys) |
 					massage_pgprot(vma->vm_page_prot));
-			pfn = pud_pfn(entry);
 
 			/* _PAGE_PWT cache write combining */
 			/* _PAGE_PCD */
@@ -1525,6 +1732,16 @@ static int build_pagetbl(enum lwkmem_kind_t knd, struct vm_area_struct *vma,
 
 			/* *pud = entry */
 			set_pud(pud, entry);
+
+			/* Initialize pages and add mapping. */
+			p = pud_page(entry);
+			lwkmem_page_init(p);
+			prep_compound_page(p, PUD_SHIFT-PMD_SHIFT);
+			prep_transhuge_page(p);
+			page_add_new_anon_rmap(p, vma, addr & PUD_MASK, true);
+			ClearPageSwapBacked(p);
+			init_page_count(p);
+
 			spin_unlock(ptl);
 
 		} else if (knd == kind_2m) {
@@ -1541,7 +1758,6 @@ static int build_pagetbl(enum lwkmem_kind_t knd, struct vm_area_struct *vma,
 
 			/* Setup the PMD (for a 2m page) */
 			entry = pfn_pmd(phys >> PAGE_SHIFT, vma->vm_page_prot);
-			pfn = pmd_pfn(entry);
 
 			/* _PAGE_PWT cache write combining */
 			/* _PAGE_PCD */
@@ -1553,6 +1769,16 @@ static int build_pagetbl(enum lwkmem_kind_t knd, struct vm_area_struct *vma,
 
 			/* *pmd = entry */
 			set_pmd_at(mm, addr, pmd, entry);
+
+			/* Initialize pages and add mapping. */
+			p = pmd_page(entry);
+			lwkmem_page_init(p);
+			prep_compound_page(p, HPAGE_PMD_ORDER);
+			prep_transhuge_page(p);
+			page_add_new_anon_rmap(p, vma, addr & HPAGE_PMD_MASK,
+					       true);
+			ClearPageSwapBacked(p);
+			init_page_count(p);
 
 			spin_unlock(ptl);
 		} else if (knd == kind_4k) {
@@ -1576,7 +1802,6 @@ static int build_pagetbl(enum lwkmem_kind_t knd, struct vm_area_struct *vma,
 
 			entry = pfn_pte((phys >> PAGE_SHIFT),
 					vm_get_page_prot(vma->vm_flags));
-			pfn = pte_pfn(entry);
 
 			/* _PAGE_PCD | _PAGE_PWT == uncached; don't want that */
 			entry = pte_clear_flags(entry, _PAGE_PWT|_PAGE_PCD);
@@ -1586,6 +1811,15 @@ static int build_pagetbl(enum lwkmem_kind_t knd, struct vm_area_struct *vma,
 			/* *pte = entry */
 			set_pte_at(mm, addr, pte, entry);
 
+			/* Initialize page and add mapping. */
+			p = pte_page(entry);
+			ClearPageHead(p);
+			p->compound_head &= ~1; /* Ensure not a tail page */
+			lwkmem_page_init(p);
+			page_add_new_anon_rmap(p, vma, addr, false);
+			ClearPageSwapBacked(p);
+			init_page_count(p);
+
 			pte_unmap_unlock(pte, ptl);
 		} else {
 			pr_err("Other page sizes not supported yet!\n");
@@ -1593,13 +1827,7 @@ static int build_pagetbl(enum lwkmem_kind_t knd, struct vm_area_struct *vma,
 			goto pagetbl_err;
 		}
 
-		/* Add mapping for each page. */
-		for (p = pfn_to_page(pfn); addr < addr_end; p++,
-		     addr += PAGE_SIZE) {
-			page_add_new_anon_rmap(p, vma, addr, false);
-			ClearPageSwapBacked(p);
-		}
-
+		addr += (kind_size[knd] * stride);
 		phys += kind_size[knd];
 	}
 
@@ -1642,7 +1870,8 @@ static int lwkvma_attempt_merge(struct mm_struct *mm, unsigned long addr,
 static long build_lwkvma(enum lwkmem_kind_t knd, unsigned long addr,
 			 unsigned long len, unsigned long prot,
 			 unsigned long mmap_flags, unsigned long pgoff,
-			 unsigned long phys, unsigned long total_length)
+			 unsigned long total_length,
+			 struct vm_area_struct **vma)
 {
 
 	int rc = 0;
@@ -1650,7 +1879,7 @@ static long build_lwkvma(enum lwkmem_kind_t knd, unsigned long addr,
 	struct mm_struct *mm = current->mm;
 	vm_flags_t vm_flags;
 	struct rb_node **rb_link, *rb_parent;
-	struct vm_area_struct *vma, *prev;
+	struct vm_area_struct *prev;
 
 	/* Ignore those per man page */
 	mmap_flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
@@ -1700,6 +1929,8 @@ static long build_lwkvma(enum lwkmem_kind_t knd, unsigned long addr,
 	vm_flags = calc_vm_prot_bits(prot, pkey) |
 		calc_vm_flag_bits(mmap_flags) | mm->def_flags | VM_MAYREAD |
 		VM_MAYWRITE | VM_MAYEXEC | VM_READ | VM_WRITE | VM_ACCOUNT;
+	if (knd != kind_4k)
+		vm_flags |= VM_HUGEPAGE;
 
 	/* Pretend I/O space, but map cacheable (see below)
 	 * We don't want to set VM_HUGETLB in vm_flags because we are doing
@@ -1728,7 +1959,6 @@ static long build_lwkvma(enum lwkmem_kind_t knd, unsigned long addr,
 	}
 
 	/* find_vma_links() finds the place where this vm entry should go */
-	down_write(&mm->mmap_sem);
 	rc = find_vma_links(mm, addr, addr + len, &prev, &rb_link, &rb_parent);
 	if (rc) {
 		pr_err("%s: find_vma_links(%p, 0x%lx, 0x%lx, ...)=%i\n",
@@ -1738,54 +1968,52 @@ static long build_lwkvma(enum lwkmem_kind_t knd, unsigned long addr,
 	}
 
 	/* See if we can merge with an existing vma */
-	vma = 0;
+	*vma = 0;
 	if (lwkvma_attempt_merge(mm, addr, addr + len, prev, knd))
-		vma = vma_merge(mm, prev, addr, addr + len, vm_flags, NULL,
-				NULL, pgoff, NULL, prev->vm_userfaultfd_ctx);
-	if (!vma) {
+		*vma = vma_merge(mm, prev, addr, addr + len, vm_flags, NULL,
+				 NULL, pgoff, NULL, prev->vm_userfaultfd_ctx);
+	if (!*vma) {
 		/* Get us some memory to store our vm_area_struct structure */
-		vma = kmem_cache_zalloc(vm_area_cachep, GFP_KERNEL);
+		*vma = kmem_cache_zalloc(vm_area_cachep, GFP_KERNEL);
 		if (!vma) {
 			pr_err("kmem_cache_zalloc() failed on line %d\n",
 				__LINE__);
 			goto out;
 		}
 
-		vma->vm_mm = mm;
-		vma->vm_start = addr;
-		vma->vm_end = addr + len;
-		vma->vm_flags = vm_flags;
-		vma->vm_page_prot = vm_get_page_prot(vm_flags);
-		vma->vm_pgoff = pgoff;
+		(*vma)->vm_mm = mm;
+		(*vma)->vm_start = addr;
+		(*vma)->vm_end = addr + len;
+		(*vma)->vm_flags = vm_flags;
+		(*vma)->vm_page_prot = vm_get_page_prot(vm_flags);
+		(*vma)->vm_pgoff = pgoff;
+		(*vma)->vm_ops = &lwkmem_vm_ops;
 
 		/* Now link our entry into the vma list */
-		INIT_LIST_HEAD(&vma->anon_vma_chain);
-		vma_link(mm, vma, prev, rb_link, rb_parent);
+		INIT_LIST_HEAD(&(*vma)->anon_vma_chain);
+		vma_link(mm, *vma, prev, rb_link, rb_parent);
 	}
 
 	/* Mark as LWK memory and record page size.  Used by show_map_vma() */
-	vma->vm_private_data = (void *)(_LWKMEM |
+	(*vma)->vm_private_data = (void *)(_LWKMEM |
 		(lwk_page_shift[knd] - PAGE_SHIFT));
 
-	rc = anon_vma_prepare(vma);
+	rc = anon_vma_prepare(*vma);
 	if (rc) {
-		kmem_cache_free(vm_area_cachep, vma);
+		kmem_cache_free(vm_area_cachep, *vma);
 		addr = rc;
 		goto out;
 	}
 
-	perf_event_mmap(vma);
-
-	rc = build_pagetbl(knd, vma, phys, addr, addr + len);
+	perf_event_mmap(*vma);
 
 	if (LWKMEM_DEBUG && !rc) {
 		pr_info("built a %s x %lld vma vm_start 0x%lx, vm_end 0x%lx\n",
-			kind_str[knd], len / kind_size[knd], vma->vm_start,
-			vma->vm_end);
+			kind_str[knd], len / kind_size[knd], (*vma)->vm_start,
+			(*vma)->vm_end);
 	}
 
 out:
-	up_write(&mm->mmap_sem);
 	return rc ? rc : addr;
 
 } /* end of build_lwkvma() */
@@ -1804,9 +2032,7 @@ static struct blk_list *divide_block(enum lwkmem_kind_t knd,
 	struct blk_list *elt = 0, *newb = 0;
 
 	/* Find the next larger sized block that is actually used: */
-	for (nxt = knd + 1; num_dTLB(nxt) == 0 && nxt < kind_last; nxt++)
-		;
-
+	nxt = knd + 1;
 	if (nxt >= kind_last) {
 		if (LWKMEM_DEBUG)
 			pr_err("Cannot divide %s blocks\n", kind_str[knd]);
@@ -1837,14 +2063,14 @@ static struct blk_list *divide_block(enum lwkmem_kind_t knd,
 	 * the entire block needs to be consumed.
 	 */
 	if (elt->num_blks > 1) {
-		newb = vmalloc(sizeof(struct blk_list));
+		newb = kmalloc(sizeof(struct blk_list), GFP_KERNEL);
 		if (!newb)
 			return 0;
 		newb->phys = elt->phys;
 		newb->offset = elt->offset;
 		newb->num_blks = kind_size[nxt] / kind_size[knd];
-		newb->free = 1;
 		newb->vma_addr = 0;
+		newb->stride = 1;
 		elt->num_blks--;
 		elt->offset += kind_size[nxt];
 	} else {
@@ -1856,7 +2082,7 @@ static struct blk_list *divide_block(enum lwkmem_kind_t knd,
 	}
 
 	/* Add the block to the list */
-	list_add(&(newb->list), &(opts->mosp->blk_list[knd]));
+	list_add(&newb->list, &opts->mosp->free_list[knd][newb->phys->nid]);
 
 	/* Update block counts */
 	opts->mosp->num_blks[knd] += newb->num_blks;
@@ -1868,58 +2094,29 @@ static struct blk_list *divide_block(enum lwkmem_kind_t knd,
 	return newb;
 }
 
-struct blk_list *find_available_blk_list(enum lwkmem_kind_t knd,
-					 struct allocate_options_t *opts)
-{
-	struct blk_list *elt;
-	int count = 0;
-	list_for_each_entry(elt, &opts->mosp->blk_list[knd], list) {
-		count++;
-		if (elt->free) {
-			if (LWKMEM_DEBUG)
-				pr_info("%s elt=%016llX %s free:%lld depth:%d\n",
-					__func__,
-					(unsigned long)elt->phys->base +
-					elt->offset, kind_str[knd],
-					elt->num_blks, count);
-			return elt;
-		}
-
-	}
-
-	if (LWKMEM_DEBUG_VERBOSE)
-		pr_info("(<) %s elt=NONE %s depth=%d\n",
-			__func__, kind_str[knd], count);
-
-	return 0;
-}
-
 static struct blk_list *find_available_by_nid(enum lwkmem_kind_t knd, int nid,
 		       struct allocate_options_t *opts)
 {
 	int count = 0;
-	struct blk_list *elt;
+	int n = (nid >= 0 ? nid : 0);
+	struct blk_list *elt, *blk = NULL;
 
-	list_for_each_entry(elt, &opts->mosp->blk_list[knd], list) {
+	list_for_each_entry(elt, &opts->mosp->free_list[knd][n], list) {
 		count++;
-		if (!elt->free)
-			continue;
 
 		if (elt->phys->nid == nid || nid == -1) {
-			if (LWKMEM_DEBUG)
-				pr_info("(<) %s nid=%d elt=%016llX %s depth=%d\n",
-					__func__, nid,
-					(unsigned long)elt->phys->base +
-					elt->offset, kind_str[knd], count);
-			return elt;
+			blk = elt;
+			break;
 		}
 	}
 
 	if (LWKMEM_DEBUG)
-		pr_info("(<) %s nid=%d elt=NONE %s depth=%d\n",
-			__func__, nid, kind_str[knd], count);
+		pr_info("(<) %s nid=%d %s addr=%p depth=%d\n",
+			__func__, nid, kind_str[knd],
+			blk ? blk->phys->base + blk->offset : NULL,
+			count);
 
-	return 0;
+	return blk;
 }
 
 static struct blk_list *find_available_by_nid_list(enum lwkmem_kind_t knd,
@@ -1984,24 +2181,43 @@ static struct blk_list *find_available_by_nid_list(enum lwkmem_kind_t knd,
 	return 0;
 }
 
-long allocate_blocks(unsigned long addr, int64_t len,
+struct blk_list *split_block(struct blk_list *bl, enum lwkmem_kind_t k,
+			     unsigned long offset, struct mos_process_t *mosp);
+
+static void update_max_allocated(struct mos_process_t *mosp)
+{
+	unsigned long total;
+	int k, n;
+
+	for_each_node_mask(n, node_online_map) {
+		total = 0;
+		for (k = kind_4k; k < kind_last; k++)
+			total += kind_size[k] * mosp->blks_in_use[k][n];
+		if (mosp->max_allocated[n] < total)
+			mosp->max_allocated[n] = total;
+	}
+}
+
+static long allocate_blocks(unsigned long addr, int64_t len,
 		     unsigned long prot, unsigned long mmap_flags,
 		     unsigned long pgoff, struct allocate_options_t *opts)
 {
-	int64_t wanted[kind_last] = {0, 0, 0, 0};
+	int64_t wanted[kind_last] = {0};
 	int64_t total = 0;
 	struct blk_list *elt, *new_blk;
 	enum lwkmem_kind_t k;
 	long new_addr;
 	long first_addr = 0;
-
-	mutex_lock(&lwkmem_mutex);
+	struct mos_process_t *mosp = opts->mosp;
+	unsigned long phys;
+	struct vm_area_struct *vma;
+	int64_t sublen;
 
 	if (LWKMEM_DEBUG_EXTREME) {
 		pr_info("(>) %s(addr=%lx len=%lld / 0x%llx prot=%lx flags=%lx off=%lx) CPU=%d\n",
 			__func__, addr, len, len, prot, mmap_flags, pgoff,
 			smp_processor_id());
-		dump_block_lists(opts->mosp);
+		dump_block_lists(mosp);
 	}
 
 	/* Round up to the nearest, smallest page */
@@ -2012,13 +2228,6 @@ long allocate_blocks(unsigned long addr, int64_t len,
 	for (k = kind_last - 1; (int)k >= 0; k--) {
 		if (wanted[k] <= 0)
 			continue;
-
-		if (num_dTLB(k) == 0) {
-			wanted[k - 1] += wanted[k] *
-				kind_size[k] / kind_size[k - 1];
-			wanted[k] = 0;
-			continue;
-		}
 
 		while (wanted[k] > 0) {
 			elt = opts->find_available(k, opts);
@@ -2040,69 +2249,79 @@ long allocate_blocks(unsigned long addr, int64_t len,
 				goto alloc_err;
 			}
 
+			phys = virt_to_phys(elt->phys->base + elt->offset);
+
 			/* Let's grab some or all of this block */
 			if (wanted[k] < elt->num_blks) {
+
+				sublen = wanted[k] * kind_size[k];
+
 				/* Split block in two and grab first one */
-				new_addr = build_lwkvma(k, addr,
-					wanted[k] * kind_size[k], prot,
-					mmap_flags, pgoff,
-					virt_to_phys(elt->phys->base +
-							elt->offset), len);
+				new_addr = build_lwkvma(k, addr, sublen, prot,
+						mmap_flags, pgoff, len, &vma);
 				if (new_addr <= 0)
 					goto alloc_err;
 
-				new_blk = vmalloc(sizeof(struct blk_list));
+				new_blk = split_block(elt, k, sublen, mosp);
+
 				if (!new_blk) {
 					new_addr = -ENOMEM;
 					goto alloc_err;
 				}
 
-				new_blk->phys = elt->phys;
-				new_blk->offset = elt->offset;
-				new_blk->num_blks = wanted[k];
-				new_blk->free = 0;
-				new_blk->vma_addr = new_addr;
-				list_add(&new_blk->list, &elt->list);
+				elt->vma_addr = new_addr;
+				elt->stride = 1;
 
-				elt->offset += wanted[k] * kind_size[k];
-				elt->num_blks -= wanted[k];
-				elt = new_blk;
+				list_move(&elt->list,
+					  &mosp->busy_list[k][elt->phys->nid]);
+				list_add(&new_blk->list,
+					 &mosp->free_list[k][elt->phys->nid]);
 
-				addr = new_addr + wanted[k] * kind_size[k];
+				addr = new_addr + sublen;
 				if (!first_addr) {
 					first_addr = new_addr;
 					mmap_flags |= MAP_FIXED;
 				}
-				total -= wanted[k] * kind_size[k];
-				opts->mosp->num_blks[k] -= wanted[k];
-				if (opts->mosp->report_blks_allocated)
-					opts->mosp->blks_allocated[k][elt->phys->nid] += wanted[k];
+				total -= sublen;
+				mosp->num_blks[k] -= wanted[k];
 				wanted[k] = 0;
 			} else {
 				/* Grab the whole block */
 				new_addr = build_lwkvma(k, addr,
-					elt->num_blks * kind_size[k], prot,
-					mmap_flags, pgoff,
-					virt_to_phys(elt->phys->base +
-						     elt->offset), len);
+						elt->num_blks * kind_size[k],
+						prot, mmap_flags, pgoff, len,
+						&vma);
 				if (new_addr <= 0)
 					goto alloc_err;
 
 				elt->vma_addr = new_addr;
-				elt->free = 0;
+				elt->stride = 1;
+
+				list_move(&elt->list,
+					  &mosp->busy_list[k][elt->phys->nid]);
 				wanted[k] -= elt->num_blks;
-				total -= elt->num_blks * kind_size[k];
-				addr = new_addr + elt->num_blks * kind_size[k];
+				sublen = elt->num_blks * kind_size[k];
+				total -= sublen;
+				addr = new_addr + sublen;
 				if (!first_addr) {
 					first_addr = new_addr;
 					mmap_flags |= MAP_FIXED;
 				}
-				opts->mosp->num_blks[k] -= elt->num_blks;
-				if (opts->mosp->report_blks_allocated)
-					opts->mosp->blks_allocated[k][elt->phys->nid] += elt->num_blks;
+				mosp->num_blks[k] -= elt->num_blks;
+			}
+
+			if (build_pagetbl(k, vma, phys, new_addr, new_addr + sublen, elt->stride))
+				goto alloc_err;
+
+			if (mosp->report_blks_allocated) {
+				mosp->blks_allocated[k][elt->phys->nid] += elt->num_blks;
+				mosp->blks_in_use[k][elt->phys->nid] += elt->num_blks;
 			}
 		}
 	}
+
+	if (mosp->report_blks_allocated)
+		update_max_allocated(mosp);
 
 	if (total != 0) {
 		pr_err("%s: INTERNAL ERROR: %lld bytes unallocated.\n",
@@ -2112,14 +2331,11 @@ long allocate_blocks(unsigned long addr, int64_t len,
 	}
 
 	if (LWKMEM_DEBUG_VERBOSE)
-		dump_block_lists(opts->mosp);
-
-	mutex_unlock(&lwkmem_mutex);
+		dump_block_lists(mosp);
 
 	return first_addr;
 
 alloc_err:
-	mutex_unlock(&lwkmem_mutex);
 	return new_addr;
 
 } /* end of allocate_blocks() */
@@ -2143,16 +2359,11 @@ unsigned long allocate_blocks_fixed(unsigned long inaddr, unsigned long len,
 	mosp = current->mos_process;
 
 	for (knd = 0; knd < kind_last; knd++) {
-		if (num_dTLB(knd) == 0)
-			continue;
-
 		if (knd < kind_last - 1) {
 			/* Find the next larger sized TLB that is actually
 			 * used:
 			 */
-			nxt = knd;
-			while (num_dTLB(++nxt) == 0)
-				;
+			nxt = knd + 1;
 
 			/* The amount to allocate in this pass is the lesser of
 			 * the distance to the next sized boundary and the
@@ -2184,7 +2395,7 @@ unsigned long allocate_blocks_fixed(unsigned long inaddr, unsigned long len,
 			goto out;
 		}
 
-		ret = allocate_blocks(addr, delta, prot, flags, 0, opts);
+		ret = opts->allocate_blocks(addr, delta, prot, flags, 0, opts);
 		kfree(opts);
 		if (ret != addr) {
 			ret = -ENOMEM;
@@ -2203,6 +2414,285 @@ unsigned long allocate_blocks_fixed(unsigned long inaddr, unsigned long len,
 			__func__, inaddr, len, prot, flags, site, ret);
 
 	return ret;
+}
+
+static struct blk_list *find_available_interleaved(enum lwkmem_kind_t knd,
+					   struct allocate_options_t *opts)
+{
+	struct blk_list *b, *newb;
+	int i = 0, j = 0, k, nid, domain_index;
+	struct mos_process_t *mosp = opts->mosp;
+
+	/* Search each kind of memory in the established order (e.g. HBM first,
+	 * DRAM second, etc.).  But only search the most preferred domain of
+	 * that type.  If unavailable, go onto the next memory type rather than
+	 * searching another domain of the same type.  This results in better
+	 * interleaving for very large allocations and has no impact on small
+	 * allocations for which there is sufficiently available memory.
+	 */
+
+	while (1) {
+
+		int t = opts->type_order[i];
+
+		if (opts->nid_order_len[t] == 0) {
+			pr_debug("(*) %s No memory of type %d (%s)\n",
+				 __func__, t, lwkmem_type_str[t]);
+			goto next;
+		}
+
+		domain_index = (mosp->domain_order_index[t][knd] + j) %
+			opts->nid_order_len[t];
+		nid = opts->nid_order[t][domain_index];
+
+		pr_debug("(*) %s searching NID=%d starting with %s\n",
+			 __func__, nid, kind_str[knd]);
+
+		for (k = knd; k < kind_last; k++) {
+			b = find_available_by_nid(k, nid, opts);
+			if (!b)
+				continue;
+
+			/* If we obtained a block of a larger size than
+			 * what we want, tear the first block off and
+			 * subdivide it.  Do this interatively until we
+			 * have a block of the appropriate size.
+			 */
+			while (k > knd) {
+				pr_debug("(*) %s dividing block=%p num=%lld sz=%s\n",
+					 __func__, b, b->num_blks,
+					 kind_str[k]);
+
+				if (b->num_blks > 1) {
+					newb = split_block(b, k,
+							   kind_size[k], mosp);
+					list_add(&newb->list,
+						 &mosp->free_list[k][nid]);
+				}
+
+				b->num_blks = kind_size[k] / kind_size[k-1];
+				list_move(&b->list, &mosp->free_list[k-1][nid]);
+
+				mosp->num_blks[k]--;
+				mosp->num_blks[k-1] += b->num_blks;
+
+				k--;
+			}
+
+			pr_debug("(<) %s block phys=%pK nid=%d size=%s num=%lld\n",
+				 __func__,
+				 b->phys->base + b->offset,
+				 nid, kind_str[knd], b->num_blks);
+
+			if (LWKMEM_DEBUG_VERBOSE)
+				dump_block_lists(mosp);
+
+			return b;
+		}
+next:
+		i++;
+		if (i >= lwkmem_type_last) {
+			i = 0;
+			j++;
+
+			if (j >= MAX_NIDS) {
+				pr_debug("(<) %s b=NONE\n", __func__);
+				return 0;
+			}
+		}
+	}
+}
+
+static long allocate_blocks_interleaved(unsigned long addr, int64_t len,
+		     unsigned long prot, unsigned long mmap_flags,
+		     unsigned long pgoff, struct allocate_options_t *opts)
+{
+
+	int64_t wanted[kind_last] = {0};
+	long base_addr = 0, vma_addr = addr, sub_addr;
+	int knd = kind_4k;
+	unsigned int sub_wanted;
+	int i, t, N, nid;
+	struct vm_area_struct *vma;
+	unsigned long sub_len;
+	struct mos_process_t *mosp = opts->mosp;
+	struct blk_list *b, *nwb;
+	int t_used[lwkmem_type_last], t_n, t_nid, t_preferred;
+
+	pr_debug("(>) %s addr=%lx len=%lld\n", __func__, addr, len);
+
+	/* Round up to the nearest, smallest page */
+	len = roundup(len, kind_size[0]);
+
+	/* Determine how many blocks of each size is wanted, irresspective,
+	 * of any interleaving.
+	 */
+	opts->blocks_wanted(len, wanted, opts);
+
+	/* Use the domain count for the most preferred type of memory when
+	 * determining how many domains to interleave.
+	 */
+
+	t = 0;
+	while (!(N = opts->nid_order_len[opts->type_order[t]]))
+		t++;
+	t_preferred = opts->type_order[t];
+
+	for (knd = kind_last - 1; knd >= 0; knd--) {
+
+		if (unlikely(!wanted[knd]))
+			continue;
+
+		pr_debug("(*) %s want=%lld knd=%s\n",
+			 __func__, wanted[knd], kind_str[knd]);
+
+		/* Construct a VMA that spans all blocks of this size,
+		 * irrespective of interleaving.
+		 */
+
+		vma_addr = build_lwkvma(knd, vma_addr,
+					wanted[knd] * kind_size[knd], prot,
+					mmap_flags, pgoff, len, &vma);
+
+		if (unlikely(vma_addr <= 0))
+			goto alloc_error;
+
+		if (!base_addr) {
+			base_addr = vma_addr;
+			mmap_flags |= MAP_FIXED;
+		}
+
+		/* For each of the N domains, get blocks until the request is
+		 * fulfilled.  Use the stride and block size to interleave
+		 * the block lists in virtual space.
+		 */
+		for (i = 0; i < N; i++) {
+
+			/* Divide the number of wanted blocks for this size
+			 * equally (or nearly equally) among the N domains:
+			 */
+
+			sub_wanted = (wanted[knd] / N) +
+				(wanted[knd] % N > i ? 1 : 0);
+
+			if (unlikely(!sub_wanted))
+				break;
+
+			t_n = 0; /* no types allocated yet */
+			sub_addr = vma_addr + (i * kind_size[knd]);
+
+			pr_debug("(*) %s N=%d/%d want=%d prefer:%d->%s:%d addr:%lx\n",
+				 __func__, i, N, sub_wanted,
+				 mosp->domain_order_index[t_preferred][knd],
+				 lwkmem_type_str[t_preferred],
+				 opts->nid_order[t_preferred][mosp->domain_order_index[t_preferred][knd]],
+				 sub_addr);
+
+			while (sub_wanted) {
+
+				b = opts->find_available(knd, opts);
+
+				if (unlikely(!b))
+					goto alloc_error;
+
+				sub_len = sub_wanted * kind_size[knd];
+				nid = b->phys->nid;
+
+				/* If the located free block is larger than what
+				 * we need, then split off what we need.
+				 * Otherwise, consume the entire block.
+				 */
+				if (likely(sub_wanted < b->num_blks)) {
+					nwb = split_block(b, knd, sub_len, mosp);
+					if (!nwb)
+						goto alloc_error;
+
+					list_add(&nwb->list,
+						 &mosp->free_list[knd][nid]);
+					sub_wanted = 0;
+				} else {
+					sub_wanted -= b->num_blks;
+					nwb = NULL;
+				}
+
+				b->vma_addr = sub_addr;
+				b->stride = N;
+				list_move(&b->list, &mosp->busy_list[knd][nid]);
+
+				pr_debug("(*) %s mapping block addr=%lx phys=%pK nblks=%lld nid=%d stride=%d\n",
+					 __func__, b->vma_addr,
+					 b->phys->base + b->offset,
+					 b->num_blks, b->phys->nid,
+					 b->stride);
+
+				sub_len  = b->num_blks * kind_size[knd];
+
+				if (build_pagetbl(knd, vma,
+						  virt_to_phys(b->phys->base + b->offset),
+						  sub_addr,
+						  sub_addr + sub_len * N,
+						  N))
+					goto alloc_error;
+
+				/* Increment the next virtual address for this
+				 * NID using the stride.
+				 */
+				if (unlikely(sub_wanted))
+					sub_addr += (sub_len * N);
+
+				mosp->num_blks[knd] -= b->num_blks;
+				if (mosp->report_blks_allocated) {
+					mosp->blks_allocated[knd][nid] +=
+						b->num_blks;
+					mosp->blks_in_use[knd][nid] +=
+						b->num_blks;
+				}
+
+				/* Keep track of the types of memory allocated
+				 * so that we can increment the interleaving
+				 * indices later.
+				 */
+
+				t_nid = lwkmem_type_of(nid, mosp);
+				if (!t_n || t_used[t_n - 1] != t_nid) {
+					t_used[t_n++] = t_nid;
+					pr_debug("(*) %s used[%d] = %d (%s)\n",
+						 __func__, t_n - 1, t_used[t_n - 1],
+						 lwkmem_type_str[t_used[t_n - 1]]);
+				}
+			}
+
+			/* Now that we have fulfilled the wanted blocks for a
+			 * given NUMA domain, increment to the next preferred
+			 * domain(s).
+			 */
+
+			for (t = 0; t < t_n; t++) {
+				mosp->domain_order_index[t_used[t]][knd]++;
+				mosp->domain_order_index[t_used[t]][knd] %=
+					opts->nid_order_len[t_used[t]];
+			}
+		}
+
+		/* Advance the address for the next VMA and set of interleaved
+		 * blocks.
+		 */
+		vma_addr += wanted[knd] * kind_size[knd];
+	}
+
+	if (mosp->report_blks_allocated)
+		update_max_allocated(mosp);
+
+	pr_debug("(<) %s addr=%lx\n", __func__, base_addr);
+	if (LWKMEM_DEBUG_VERBOSE)
+		dump_block_lists(mosp);
+
+	return base_addr;
+
+ alloc_error:
+	pr_err("(!) %s failed.\n", __func__);
+	return base_addr;
+
 }
 
 static int _all_granules(struct mos_lwk_mem_granule *g)
@@ -2311,7 +2801,8 @@ int lwkmem_request(struct mos_process_t *mos_p, unsigned long *req, size_t n)
 
 			if (wanted < elt->length) { /* Split granule into two */
 				newg =
-				vmalloc(sizeof(struct mos_lwk_mem_granule));
+				kmalloc(sizeof(struct mos_lwk_mem_granule),
+					GFP_KERNEL);
 				if (!newg) {
 					rc = -ENOMEM;
 					goto unlock;
@@ -2348,7 +2839,8 @@ int lwkmem_request(struct mos_process_t *mos_p, unsigned long *req, size_t n)
 			}
 
 			/* Add this granule to the processes' list */
-			p_granule = vmalloc(sizeof(struct lwk_process_granule));
+			p_granule = kmalloc(sizeof(struct lwk_process_granule),
+					    GFP_KERNEL);
 			if (!p_granule) {
 				rc = -ENOMEM;
 				goto unlock;
@@ -2374,6 +2866,8 @@ struct allocate_options_t *allocate_options_factory(enum allocate_site_t site,
 			    struct mos_process_t *mosp)
 {
 	struct allocate_options_t *options;
+	enum lwkmem_type_t *order;
+	int i, t;
 
 	options = kmalloc(sizeof(struct allocate_options_t), GFP_KERNEL);
 	if (!options)
@@ -2381,54 +2875,44 @@ struct allocate_options_t *allocate_options_factory(enum allocate_site_t site,
 
 	options->mosp = mosp;
 	options->blocks_wanted = blocks_wanted;
-	options->find_available = find_available_blk_list;
+	options->find_available = find_available_by_nid_list;
 	options->divide_block = divide_block;
-	options->max_page_size = mosp->max_page_size;
+	options->allocate_blocks = allocate_blocks;
 
-	switch (site) {
-	case lwkmem_brk:
-		if (mosp->heap_page_size < options->max_page_size)
-			options->max_page_size = mosp->heap_page_size;
-		break;
-
-	case lwkmem_mmap:
-	case lwkmem_mremap:
-		break;
+	if (mosp->lwkmem_interleave) {
+		options->allocate_blocks = allocate_blocks_interleaved;
+		options->find_available = find_available_interleaved;
+		options->max_page_size = mosp->lwkmem_interleave;
+	} else {
+		options->max_page_size = mosp->max_page_size;
 	}
 
-	if (mosp->mcdram_minimum > 0) {
+	if (site == lwkmem_brk && mosp->heap_page_size < options->max_page_size)
+		options->max_page_size = mosp->heap_page_size;
+	else if (site == lwkmem_mmap && (flags & (MAP_STACK | MAP_NORESERVE)))
+		site = lwkmem_stack;
 
-		int i;
-		enum lwkmem_type_t t;
+	if (len >= mosp->memory_preference[site].threshold)
+		order = mosp->memory_preference[site].upper_type_order;
+	else
+		order = mosp->memory_preference[site].lower_type_order;
 
-		options->find_available = find_available_by_nid_list;
+	memcpy(options->type_order, order,
+	       sizeof(mosp->memory_preference[0].lower_type_order));
 
-		if (len >= mosp->mcdram_minimum &&
-		    !(mosp->mcdram_exempt_flags & flags)) {
-			options->type_order[0] = lwkmem_mcdram;
-			options->type_order[1] = lwkmem_dram;
-		} else {
-			options->type_order[0] = lwkmem_dram;
-			options->type_order[1] = lwkmem_mcdram;
-		}
+	for (i = 0; i < lwkmem_type_last; i++) {
+		int index = options->type_order[i];
 
-		for (i = 0; i < lwkmem_type_last; i++) {
-			int index = options->type_order[i];
-
-			memcpy(options->nid_order[index],
-			       mosp->domain_info[index],
-			       mosp->domain_info_len[index] * sizeof(int));
-			options->nid_order_len[index] =
-				mosp->domain_info_len[index];
-		}
-
-		if (LWKMEM_DEBUG_VERBOSE)
-			for (t = 0; t < lwkmem_type_last; t++)
-				for (i = 0; i < options->nid_order_len[t]; i++)
-					pr_info("nid_order(%d) = %d\n", i,
-						options->nid_order[t][i]);
+		memcpy(options->nid_order[index], mosp->domain_info[index],
+		       mosp->domain_info_len[index] * sizeof(int));
+		options->nid_order_len[index] = mosp->domain_info_len[index];
 	}
 
+	if (LWKMEM_DEBUG_VERBOSE)
+		for (t = 0; t < lwkmem_type_last; t++)
+			for (i = 0; i < options->nid_order_len[t]; i++)
+				pr_info("nid_order(%d) = %d\n", i,
+					options->nid_order[t][i]);
 	return options;
 }
 
@@ -2453,60 +2937,109 @@ int lwkmem_set_domain_info(struct mos_process_t *mos_p, enum lwkmem_type_t typ,
 
 unsigned long next_lwkmem_address(unsigned long len, struct mos_process_t *mosp)
 {
+
 	unsigned long addr;
 
 	mutex_lock(&lwkmem_mutex);
 	addr = mosp->lwkmem_next_addr;
-	mosp->lwkmem_next_addr = roundup(mosp->lwkmem_next_addr + len, SZ_1G);
+	mosp->lwkmem_next_addr = roundup(mosp->lwkmem_next_addr + len,
+					 mosp->lwkmem_mmap_alignment);
 	mutex_unlock(&lwkmem_mutex);
 
 	return addr;
 }
 
-long unmap_pagetbl(enum lwkmem_kind_t k, unsigned long addr, unsigned long len)
+int unmap_pagetbl(enum lwkmem_kind_t k, unsigned long addr, unsigned long end,
+		  unsigned int stride, struct mm_struct *mm)
 {
 	pgd_t *pgd;
 	pud_t *pud;
 	pmd_t *pmd;
 	pte_t *pte;
 	spinlock_t *ptl;
-	unsigned long end = addr + len;
+	struct mos_process_t *mosp = current->mos_process;
+	unsigned long size = kind_size[k];
+	unsigned long remain = end - addr;
 
 	if (LWKMEM_DEBUG_VERBOSE)
-		pr_info("(>) %s addr=%lx len=%ld (%lx)\n",
-			__func__, addr, len, len);
+		pr_info("(>) %s addr=%lx end=%lx mm=%p\n", __func__, addr, end,
+			mm);
 
-	while (addr < end) {
+	if (mm == NULL) {
+		pr_err("(!) %s: no mm context!\n", __func__);
+		return -EINVAL;
+	}
 
-		pgd = pgd_offset(current->mm, addr);
+	for (; addr < end; addr += (size * stride), remain -= size) {
+		unsigned long sublen = min_t(unsigned long, remain, size);
+
+		pgd = pgd_offset(mm, addr);
+
+		if (!pgd_present(*pgd))
+			continue;
+
 		pud = pud_offset(pgd, addr);
 
-		if (k == kind_1g) {
-			ptl = &current->mm->page_table_lock;
+		if (!pud_present(*pud))
+			continue;
+
+		if (size == SZ_1G) {
+			ptl = &mm->page_table_lock;
 			spin_lock(ptl);
+			if (mosp->lwkmem_init & LWKMEM_CLR_AFTER) {
+				*pud = __pud((native_pud_val(*pud) &
+					     ~_PAGE_PROTNONE) | _PAGE_RW |
+					     _PAGE_PRESENT | _PAGE_PSE);
+				set_pud(pud, *pud);
+				memset((void *) addr, 0, sublen);
+			}
 			pud_clear(pud);
 			spin_unlock(ptl);
-		} else if (k == kind_2m) {
+		} else if (size == SZ_2M) {
 			pmd = pmd_offset(pud, addr);
-			ptl = pmd_lock(current->mm, pmd);
-			pmd_clear(pmd);
-			spin_unlock(ptl);
-		} else if (k == kind_4k) {
-			pte = get_locked_pte(current->mm, addr, &ptl);
-			pte_clear(current->mm, addr, pte);
+			if (pmd_present(*pmd)) {
+				ptl = pmd_lock(mm, pmd);
+				if (mosp->lwkmem_init & LWKMEM_CLR_AFTER) {
+					*pmd = pmd_clear_flags(*pmd,
+						_PAGE_PROTNONE);
+					*pmd = pmd_set_flags(*pmd,
+						_PAGE_PRESENT | _PAGE_RW |
+						_PAGE_PSE);
+					set_pmd_at(mm, addr, pmd, *pmd);
+					memset((void *) addr, 0, sublen);
+				}
+				pmd_clear(pmd);
+				spin_unlock(ptl);
+			}
+		} else if (size == SZ_4K) {
+			pte = get_locked_pte(mm, addr, &ptl);
+			if (!pte) {
+				pr_warn("%s - 4K PTE fail at %lx", __func__,
+					addr);
+				continue;
+			}
+			if (pte_present(*pte)) {
+				if (mosp->lwkmem_init & LWKMEM_CLR_AFTER) {
+					*pte = pte_clear_flags(*pte,
+						_PAGE_PROTNONE);
+					*pte = pte_set_flags(*pte,
+						_PAGE_PRESENT | _PAGE_RW);
+					set_pte_at(mm, addr, pte, *pte);
+					memset((void *) addr, 0, sublen);
+				}
+				pte_clear(mm, addr, pte);
+			}
 			spin_unlock(ptl);
 		} else {
-			pr_err("Other page sizes not supported.\n");
-			return -1;
+			pr_err("Page size %lu not supported.\n", size);
+			return -EINVAL;
 		}
-
-		addr += kind_size[k];
 	}
 
 	if (LWKMEM_DEBUG_VERBOSE)
-		pr_info("(<) %s addr=%lx len=%ld (%lx)\n",
-			__func__, addr, len, len);
-	return len;
+		pr_info("(<) %s addr=%lx end=%lx mm=%p\n", __func__, addr, end,
+			mm);
+	return 0;
 }
 
 struct blk_list *split_block(struct blk_list *bl, enum lwkmem_kind_t k,
@@ -2522,56 +3055,67 @@ struct blk_list *split_block(struct blk_list *bl, enum lwkmem_kind_t k,
 		return NULL;
 	}
 
-	newb = vmalloc(sizeof(struct blk_list));
+	newb = kmalloc(sizeof(struct blk_list), GFP_KERNEL);
 	if (!newb)
 		return NULL;
 
 	newb->phys = bl->phys;
 	newb->offset = bl->offset + offset;
 	newb->num_blks = bl->num_blks - blks;
-	newb->vma_addr = bl->vma_addr + offset;
-	newb->free = bl->free;
+	newb->vma_addr = bl->vma_addr + blks * bl->stride * kind_size[k];
+	newb->stride = bl->stride;
 	bl->num_blks = blks;
 
-	list_add(&newb->list, &mosp->blk_list[k]);
+	INIT_LIST_HEAD(&newb->list);
 
 	if (LWKMEM_DEBUG_VERBOSE) {
 		pr_info("(<) %s bl=%p offs=%lx sz=%llx\n",
 			__func__, bl, offset, kind_size[k]);
-		dump_block_lists(mosp);
+		//dump_block_lists(mosp);
 	}
 
 	return newb;
 }
 
 static long deallocate_block(unsigned long addr, unsigned long len,
-			     struct mos_process_t *mosp)
+			     struct mos_process_t *mosp,
+			     struct mm_struct *mm)
 {
-	enum lwkmem_kind_t k;
-	struct blk_list *bl, *newb;
-	unsigned long sz, offset;
 	long rc = 0;
+	enum lwkmem_kind_t k;
+	int n;
 
 	if (LWKMEM_DEBUG_VERBOSE)
 		pr_info("(>) %s addr=%lX len=%ld\n",
 			__func__, addr, len);
 
-	for (k = 0; k < kind_last; k++) {
-		list_for_each_entry(bl, &mosp->blk_list[k], list) {
-			if (bl->free)
-				continue;
+	for (k = kind_4k; k < kind_last; k++) {
+		for_each_online_node(n) {
+			struct blk_list *bl, *newb, *tmp;
 
-			sz = bl->num_blks * kind_size[k];
+			list_for_each_entry_safe(bl, tmp,
+						 &mosp->busy_list[k][n], list) {
+				int left, right;
+				unsigned long offset;
+				unsigned long sz = bl->num_blks * kind_size[k];
 
-			if (addr >= bl->vma_addr && addr < bl->vma_addr + sz) {
-				int left = addr == bl->vma_addr;
-				int right = (addr + len) >= (bl->vma_addr + sz);
+				if (bl->stride != 1) {
+					pr_warn("(!) %s assumes stride of 1\n", __func__);
+					return -1;
+				}
+
+				if (addr < bl->vma_addr ||
+				    addr >= bl->vma_addr + sz)
+					continue;
 
 				if (addr & (kind_size[k] - 1)) {
 					pr_warn("(!) %s addr=%lx is not %s aligned\n",
 						__func__, addr, kind_str[k]);
 					return -1;
 				}
+
+				left = addr == bl->vma_addr;
+				right = (addr + len) >= (bl->vma_addr + sz);
 
 				if (!right && ((addr + len) & (kind_size[k] - 1))) {
 					pr_warn("(!) %s addr+len=%lx+%ld is not %s aligned\n",
@@ -2581,9 +3125,8 @@ static long deallocate_block(unsigned long addr, unsigned long len,
 				}
 
 				if (LWKMEM_DEBUG_VERBOSE) {
-					char annot = left & right ? 'X' :
-						(left ? 'L' :
-						 (right ? 'R' : 'M'));
+					char annot = left & right ? 'X' : (left
+						? 'L' : (right ? 'R' : 'M'));
 
 					pr_info("%s %#016lx,%ld -> <%c> [%#016lx-%#016lx] [%#016llx] %3lld x %s = %ld\n",
 						__func__, addr, len, annot,
@@ -2598,49 +3141,64 @@ static long deallocate_block(unsigned long addr, unsigned long len,
 				if (left && right) {
 					/* deallocate entire block */
 					bl->vma_addr = 0;
-					bl->free = 1;
+					list_move(&bl->list,
+						  &mosp->free_list[k][n]);
 					mosp->num_blks[k] += bl->num_blks;
-					len = sz;
+					sz = min_t(unsigned long, sz, len);
 				} else if (left) {
 					/* deallocate left side of the block */
 					newb = split_block(bl, k, len, mosp);
 					if (!newb)
 						return -ENOMEM;
-
-					bl->free = 1;
+					list_add(&newb->list,
+						 &mosp->busy_list[k][n]);
+					list_move(&bl->list,
+						  &mosp->free_list[k][n]);
 					bl->vma_addr = 0;
-					mosp->num_blks[k] += bl->num_blks;
+					mosp->num_blks[k] += len / kind_size[k];
+					sz = len;
 				} else if (right) {
 					/* deallocate right side of the block */
 					newb = split_block(bl, k, offset, mosp);
 					if (!newb)
 						return -ENOMEM;
-
-					newb->free = 1;
+					list_add(&newb->list,
+						 &mosp->free_list[k][n]);
 					newb->vma_addr = 0;
-					mosp->num_blks[k] += newb->num_blks;
-					len = sz - offset;
+					mosp->num_blks[k] += len / kind_size[k];
+					sz = len;
 				} else {
 					/* deallocate middle of the block */
-					unsigned long offs2;
+					unsigned long offs2 = addr + len -
+						bl->vma_addr;
 
-					offs2 = addr + len - bl->vma_addr;
-
+					/* Split at end of address range. */
 					newb = split_block(bl, k, offs2, mosp);
 					if (!newb)
 						return -ENOMEM;
+					list_add(&newb->list,
+						 &mosp->busy_list[k][n]);
 
+					/* Split at start of address range. */
 					newb = split_block(bl, k, offset, mosp);
 					if (!newb)
 						return -ENOMEM;
-
-					newb->free = 1;
+					list_add(&newb->list,
+						 &mosp->free_list[k][n]);
 					newb->vma_addr = 0;
-					mosp->num_blks[k] += newb->num_blks;
+					mosp->num_blks[k] += len / kind_size[k];
+					sz = len;
 				}
 
-				rc = unmap_pagetbl(k, addr, len);
-				goto out;
+				if (mosp->report_blks_allocated)
+					mosp->blks_in_use[k][n] -=
+						(sz / kind_size[k]);
+
+				rc = unmap_pagetbl(k, addr, addr + sz, 1, mm);
+				addr += sz;
+				len -= sz;
+				if (rc || !len)
+					goto out;
 			}
 		}
 	}
@@ -2652,20 +3210,150 @@ static long deallocate_block(unsigned long addr, unsigned long len,
 	return rc;
 }
 
+/* Compute the overlap of a block relative to the interval
+ * [addr, addr + len).  The result is in terms of the offset
+ * (in blocks) within the block, and the number of blocks that
+ * are covered.
+ */
+
+static void block_overlap(struct blk_list *b, unsigned long addr,
+			  unsigned long len, enum lwkmem_kind_t knd,
+			  unsigned long *offset, unsigned long *count)
+{
+	unsigned long right, i, bl_addr;
+
+	right = b->vma_addr + block_size_virt(b, knd);
+
+	*offset = 0;
+	*count = 0;
+
+	if (addr >= right || (addr + len) < b->vma_addr)
+		return;
+
+	if (addr <= b->vma_addr && right <= (addr + len)) {
+		*count = b->num_blks;
+		return;
+	}
+
+	for (i = 0; i < b->num_blks; i++) {
+		bl_addr = b->vma_addr + i * b->stride * kind_size[knd];
+
+		if (bl_addr < addr)
+			(*offset)++;
+		if (bl_addr >= addr && bl_addr < (addr + len))
+			(*count)++;
+	}
+}
+
+static long deallocate_blocks_interleaved(unsigned long addr, unsigned long len,
+				   struct mos_process_t *mosp,
+				   struct mm_struct *mm)
+{
+	int k, n;
+	long rc;
+	unsigned long remaining = len;
+	struct blk_list *bl, *newb, *tmp, *freed;
+	unsigned long offs, cnt;
+	struct list_head *freel, *busyl;
+
+	pr_debug("(>) %s len=%ld addr=[%lx,%lx)\n",
+		 __func__, len, addr, addr + len);
+
+	for (k = kind_4k; k < kind_last; k++) {
+		for_each_online_node(n) {
+
+			freel = &mosp->free_list[k][n];
+			busyl = &mosp->busy_list[k][n];
+
+			list_for_each_entry_safe(bl, tmp, busyl, list) {
+
+				block_overlap(bl, addr, len, k, &offs, &cnt);
+
+				if (!cnt)
+					continue;
+
+				pr_debug("(*) %s block va=%lx phys=%pK sz=%s nblocks=%lld stride=%d, offs=%lx cnt=%ld rem=%ld\n",
+					 __func__, bl->vma_addr,
+					 bl->phys->base + bl->offset,
+					 kind_str[k], bl->num_blks, bl->stride,
+					 offs, cnt, remaining);
+
+				/* Some or all of the block is being freed.  A
+				 * non-zero offset indicates that a portion of
+				 * the left side of the block will remain busy.
+				 * After accounting for that region, we can
+				 * determine if a portionon the right side will
+				 * also remain busy.
+				 */
+
+				if (likely(offs == 0))
+					freed = bl;
+				else {
+					freed = split_block(bl, k,
+						    offs * kind_size[k],
+						    mosp);
+					if (unlikely(!freed))
+						goto err;
+				}
+
+				if (unlikely(cnt < freed->num_blks)) {
+					newb = split_block(freed, k,
+						   (freed->num_blks - cnt) * kind_size[k],
+						   mosp);
+					if (unlikely(!newb))
+						goto err;
+					list_add(&newb->list, busyl);
+				}
+
+				rc = unmap_pagetbl(k, freed->vma_addr,
+					   freed->vma_addr + block_size_virt(freed, k),
+					   freed->stride, mm);
+
+				if (rc)
+					goto err;
+
+				list_move(&freed->list, freel);
+
+				mosp->num_blks[k] += freed->num_blks;
+				remaining -= freed->num_blks * kind_size[k];
+
+				if (mosp->report_blks_allocated)
+					mosp->blks_in_use[k][n] -=
+						freed->num_blks;
+
+				if (!remaining)
+					goto out;
+			}
+		}
+	}
+
+ out:
+	if (LWKMEM_DEBUG_VERBOSE)
+		dump_block_lists(mosp);
+	return 0;
+
+ err:
+	pr_err("(!) %s failed.\n", __func__);
+	return -1;
+}
+
+
 long deallocate_blocks(unsigned long addr, unsigned long len,
-		       struct mos_process_t *mosp)
+		       struct mos_process_t *mosp,
+		       struct mm_struct *mm)
 {
 	long ret = 0;
-
-	mutex_lock(&lwkmem_mutex);
 
 	if (LWKMEM_DEBUG_VERBOSE)
 		pr_info("(>) %s addr=%#016lx len=%ld\n", __func__, addr, len);
 
+	if (mosp->lwkmem_interleave)
+		return deallocate_blocks_interleaved(addr, len, mosp, mm);
+
 	len = roundup(len, kind_size[0]);
 
 	while (len > 0) {
-		ret = deallocate_block(addr, len, mosp);
+		ret = deallocate_block(addr, len, mosp, mm);
 		if (ret <= 0)
 			goto out;
 
@@ -2679,7 +3367,6 @@ long deallocate_blocks(unsigned long addr, unsigned long len,
 		pr_info("(<) %s addr=%#016lx len=%ld --> ret=%ld\n",
 			__func__, addr, len, ret);
 	}
-	mutex_unlock(&lwkmem_mutex);
 
 	return ret;
 }
