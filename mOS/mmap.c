@@ -732,8 +732,9 @@ asmlinkage long lwk_sys_mremap(unsigned long addr, unsigned long old_len,
 	vma = find_vma(current->mm, addr);
 
 	if (!vma || !is_lwkmem(vma)) {
-		ret = sys_mremap(addr, old_len, new_len, flags, new_addr);
-		goto out;
+		if (LWKMEM_DEBUG_VERBOSE)
+			pr_info("mremap: VMA 0x%lx is not LWK memory.\n", addr);
+		return -ENOSYS;
 	}
 
 	if (new_len <= old_len) {
