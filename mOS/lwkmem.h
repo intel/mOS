@@ -34,6 +34,10 @@ extern int lwkmem_debug;
 #define dump_block_lists(...)
 #endif
 
+#define LWKMEM_CLR_BEFORE	1
+#define LWKMEM_CLR_AFTER	2
+#define LWKMEM_CLR_ALL		-1
+
 #define MAX_NIDS (1 << CONFIG_NODES_SHIFT)
 
 /*
@@ -70,7 +74,7 @@ struct blk_list {
 	int64_t offset;		/* start of this block, in bytes, within phys */
 	uint64_t num_blks;	/* Num blocks represented by this entry */
 	unsigned long vma_addr; /* User-space virtual address */
-	int free;
+	unsigned int stride;    /* Virtual address stride (in blocks) */
 };
 
 struct allocate_options_t {
@@ -88,17 +92,17 @@ struct allocate_options_t {
 
 	struct blk_list *(*divide_block)(enum lwkmem_kind_t knd,
 					 struct allocate_options_t *opts);
+
+	long (*allocate_blocks)(unsigned long addr, int64_t len,
+			     unsigned long prot, unsigned long mmap_flags,
+			     unsigned long pgoff, struct allocate_options_t *);
+
 };
 
-enum allocate_site_t { lwkmem_mmap, lwkmem_brk, lwkmem_mremap };
 
 struct allocate_options_t *allocate_options_factory(enum allocate_site_t,
 			    unsigned long addr, unsigned long flags,
 			    struct mos_process_t *);
-
-extern long allocate_blocks(unsigned long addr, int64_t len,
-			    unsigned long prot, unsigned long mmap_flags,
-			    unsigned long pgoff, struct allocate_options_t *);
 
 extern unsigned long allocate_blocks_fixed(unsigned long addr,
 			   unsigned long len, unsigned long prot,
@@ -108,6 +112,7 @@ extern unsigned long next_lwkmem_address(unsigned long len,
 					 struct mos_process_t *mosp);
 
 extern long deallocate_blocks(unsigned long addr, unsigned long len,
-			      struct mos_process_t *mosp);
+			      struct mos_process_t *mosp,
+			      struct mm_struct *mm);
 
 #endif /* _LWKMEM_H_ */

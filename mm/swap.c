@@ -102,6 +102,9 @@ static void __put_compound_page(struct page *page)
 
 void __put_page(struct page *page)
 {
+	if (is_lwkpg(page))
+		return;
+
 	if (is_zone_device_page(page)) {
 		put_dev_pagemap(page->pgmap);
 
@@ -785,6 +788,9 @@ void release_pages(struct page **pages, int nr, bool cold)
 		if (!put_page_testzero(page))
 			continue;
 
+		if (is_lwkpg(page))
+			continue;
+
 		if (PageCompound(page)) {
 			if (locked_pgdat) {
 				spin_unlock_irqrestore(&locked_pgdat->lru_lock, flags);
@@ -811,9 +817,6 @@ void release_pages(struct page **pages, int nr, bool cold)
 			__ClearPageLRU(page);
 			del_page_from_lru_list(page, lruvec, page_off_lru(page));
 		}
-
-		if (is_lwkpg(page))
-			continue;
 
 		/* Clear Active bit in case of parallel mark_page_accessed */
 		__ClearPageActive(page);
