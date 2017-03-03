@@ -1,0 +1,65 @@
+#! /usr/bin/env stap
+
+# Multi Operating System (mOS)
+# Copyright (c) 2016, Intel Corporation.
+#
+# This program is free software; you can redistribute it and/or modify it
+# under the terms and conditions of the GNU General Public License,
+# version 2, as published by the Free Software Foundation.
+#
+# This program is distributed in the hope it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+# more details.
+
+
+probe begin {
+	printf("Tracing SID == %d != PID\n", target());
+}
+
+probe syscall.write {
+	if (sid() == target() && fd == 54321)
+		printf("%s === ERROR: %s ============\n", thread_indent(0),
+			user_string_n(buf_uaddr, count));
+}
+
+probe kernel.function("sys_*").call {
+	if (sid() == target() && sid() != pid()) {
+		printf("%s --> [%s] cpu=%d\n", thread_indent(0), ppfunc(), cpu());
+		thread_indent_depth(4);
+	}
+}
+
+probe kernel.function("sys_*").return {
+	if (sid() == target() && sid() != pid()) {
+		thread_indent_depth(-4)
+		printf("%s <-- [%s] cpu=%d\n", thread_indent(0), ppfunc(), cpu());
+	}
+}
+
+
+function nesting() {
+	return @cast(task_current(), "task_struct", "kernel<linux/sched.h>")->mos_nesting;
+}
+
+
+probe kernel.function("mos_linux_enter").call {
+	if (sid() == target() && sid() != pid())
+		printf("%s m>L { cpu=%d nest=%d\n", thread_indent(0), cpu(), nesting());
+}
+
+probe kernel.function("mos_linux_enter").return {
+	if (sid() == target() && sid() != pid())
+		printf("%s m>L } cpu=%d nest=%d\n", thread_indent(0), cpu(), nesting());
+}
+
+
+probe kernel.function("mos_linux_leave").call {
+	if (sid() == target() && sid() != pid())
+		printf("%s m<L { cpu=%d nest=%d\n", thread_indent(0), cpu(), nesting());
+}
+
+probe kernel.function("mos_linux_leave").return {
+	if (sid() == target() && sid() != pid())
+		printf("%s m<L } cpu=%d nest=%d\n", thread_indent(0), cpu(), nesting());
+}

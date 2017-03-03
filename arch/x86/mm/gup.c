@@ -10,6 +10,7 @@
 #include <linux/highmem.h>
 #include <linux/swap.h>
 #include <linux/memremap.h>
+#include <linux/mos.h>
 
 #include <asm/mmu_context.h>
 #include <asm/pgtable.h>
@@ -308,6 +309,14 @@ int __get_user_pages_fast(unsigned long start, int nr_pages, int write,
 	unsigned long flags;
 	pgd_t *pgdp;
 	int nr = 0;
+#ifdef CONFIG_MOS_LWKMEM
+	int ret;
+
+	down_read(&mm->mmap_sem);
+	ret = get_user_pages(start, nr_pages, write, pages, NULL);
+	up_read(&mm->mmap_sem);
+	return ret;
+#endif
 
 	start &= PAGE_MASK;
 	addr = start;
@@ -387,6 +396,10 @@ int get_user_pages_fast(unsigned long start, int nr_pages, int write,
 #ifdef CONFIG_X86_64
 	if (end >> __VIRTUAL_MASK_SHIFT)
 		goto slow_irqon;
+#endif
+
+#ifdef CONFIG_MOS_LWKMEM
+	goto slow_irqon;
 #endif
 
 	/*

@@ -35,6 +35,7 @@
 #include <linux/hugetlb.h>
 #include <linux/mos.h>
 #include <linux/page_idle.h>
+#include <linux/mos.h>
 
 #include "internal.h"
 
@@ -58,6 +59,10 @@ static DEFINE_PER_CPU(struct pagevec, activate_page_pvecs);
  */
 static void __page_cache_release(struct page *page)
 {
+	/* The LWK does not give pages back to Linux */
+	if (is_lwkpg(page))
+		return;
+
 	if (PageLRU(page)) {
 		struct zone *zone = page_zone(page);
 		struct lruvec *lruvec;
@@ -799,6 +804,9 @@ void release_pages(struct page **pages, int nr, bool cold)
 			__ClearPageLRU(page);
 			del_page_from_lru_list(page, lruvec, page_off_lru(page));
 		}
+
+		if (is_lwkpg(page))
+			continue;
 
 		/* Clear Active bit in case of parallel mark_page_accessed */
 		__ClearPageActive(page);

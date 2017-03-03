@@ -44,6 +44,7 @@
 #include <linux/userfaultfd_k.h>
 #include <linux/moduleparam.h>
 #include <linux/pkeys.h>
+#include <linux/mos.h>
 
 #include <asm/uaccess.h>
 #include <asm/cacheflush.h>
@@ -470,7 +471,10 @@ anon_vma_interval_tree_post_update_vma(struct vm_area_struct *vma)
 		anon_vma_interval_tree_insert(avc, &avc->anon_vma->rb_root);
 }
 
-static int find_vma_links(struct mm_struct *mm, unsigned long addr,
+#ifndef CONFIG_MOS_LWKMEM
+static
+#endif
+int find_vma_links(struct mm_struct *mm, unsigned long addr,
 		unsigned long end, struct vm_area_struct **pprev,
 		struct rb_node ***rb_link, struct rb_node **rb_parent)
 {
@@ -584,7 +588,10 @@ __vma_link(struct mm_struct *mm, struct vm_area_struct *vma,
 	__vma_link_rb(mm, vma, rb_link, rb_parent);
 }
 
-static void vma_link(struct mm_struct *mm, struct vm_area_struct *vma,
+#ifndef CONFIG_MOS_LWKMEM
+static
+#endif
+void vma_link(struct mm_struct *mm, struct vm_area_struct *vma,
 			struct vm_area_struct *prev, struct rb_node **rb_link,
 			struct rb_node *rb_parent)
 {
@@ -1138,7 +1145,10 @@ struct vm_area_struct *vma_merge(struct mm_struct *mm,
 					 end, prev->vm_pgoff, NULL, prev);
 		if (err)
 			return NULL;
-		khugepaged_enter_vma_merge(prev, vm_flags);
+#ifdef CONFIG_MOS_LWKMEM
+		if (!is_lwkmem(prev))
+#endif
+		    khugepaged_enter_vma_merge(prev, vm_flags);
 		return prev;
 	}
 
@@ -1165,7 +1175,10 @@ struct vm_area_struct *vma_merge(struct mm_struct *mm,
 		}
 		if (err)
 			return NULL;
-		khugepaged_enter_vma_merge(area, vm_flags);
+#ifdef CONFIG_MOS_LWKMEM
+		if (!is_lwkmem(prev))
+#endif
+		    khugepaged_enter_vma_merge(area, vm_flags);
 		return area;
 	}
 
@@ -2504,6 +2517,12 @@ static int __split_vma(struct mm_struct *mm, struct vm_area_struct *vma,
 	struct vm_area_struct *new;
 	int err;
 
+#ifdef CONFIG_MOS_LWKMEM
+	if (is_lwkmem(vma)) {
+		pr_err("Not __split_vma() for LWK memory!\n");
+		return -EINVAL;
+	}
+#endif /* CONFIG_MOS_LWKMEM */
 	if (is_vm_hugetlb_page(vma) && (addr &
 					~(huge_page_mask(hstate_vma(vma)))))
 		return -EINVAL;
@@ -2597,6 +2616,13 @@ int do_munmap(struct mm_struct *mm, unsigned long start, size_t len)
 		return 0;
 	prev = vma->vm_prev;
 	/* we have  start < vma->vm_end  */
+
+#ifdef CONFIG_MOS_LWKMEM
+	if (is_lwkmem(vma)) {
+		/* FIXME: We need to do some of the stuff below */
+		return 0;
+	}
+#endif /* CONFIG_MOS_LWKMEM */
 
 	/* if it doesn't overlap, we have nothing.. */
 	end = start + len;
@@ -2920,6 +2946,13 @@ void exit_mmap(struct mm_struct *mm)
 	if (mm->locked_vm) {
 		vma = mm->mmap;
 		while (vma) {
+#ifdef CONFIG_MOS_LWKMEM
+			if (is_lwkmem(vma)) {
+				pr_err("exit_mmap() not calling munlock_vma_pages_all()\n");
+				vma = vma->vm_next;
+				continue;
+			}
+#endif /* CONFIG_MOS_LWKMEM */
 			if (vma->vm_flags & VM_LOCKED)
 				munlock_vma_pages_all(vma);
 			vma = vma->vm_next;
@@ -2932,6 +2965,12 @@ void exit_mmap(struct mm_struct *mm)
 	if (!vma)	/* Can happen if dup_mmap() received an OOM */
 		return;
 
+#ifdef CONFIG_MOS_LWKMEM
+	if (is_lwkmem(vma)) {
+		pr_err("exit_mmap() returning early\n");
+		return;
+	}
+#endif /* CONFIG_MOS_LWKMEM */
 	lru_add_drain();
 	flush_cache_mm(mm);
 	tlb_gather_mmu(&tlb, mm, 0, -1);

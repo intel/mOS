@@ -3425,8 +3425,12 @@ static int kswapd(void *p)
 
 	lockdep_set_current_reclaim_state(GFP_KERNEL);
 
+#ifdef CONFIG_MOS_SCHEDULER
+	mos_set_cpus_allowed_kthread(tsk, cpumask);
+#else
 	if (!cpumask_empty(cpumask))
 		set_cpus_allowed_ptr(tsk, cpumask);
+#endif
 	current->reclaim_state = &reclaim_state;
 
 	/*
@@ -3585,9 +3589,13 @@ static int cpu_callback(struct notifier_block *nfb, unsigned long action,
 
 			mask = cpumask_of_node(pgdat->node_id);
 
+#ifdef CONFIG_MOS_SCHEDULER
+			mos_set_cpus_allowed_kthread(pgdat->kswapd, mask);
+#else
 			if (cpumask_any_and(cpu_online_mask, mask) < nr_cpu_ids)
 				/* One of our CPUs online: restore mask */
 				set_cpus_allowed_ptr(pgdat->kswapd, mask);
+#endif
 		}
 	}
 	return NOTIFY_OK;

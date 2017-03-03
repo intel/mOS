@@ -1390,6 +1390,27 @@ struct sched_rt_entity {
 #endif
 };
 
+#ifdef CONFIG_MOS_SCHEDULER
+enum mos_thread_type {
+	mos_thread_type_normal = 0,
+	mos_thread_type_utility,
+	mos_thread_type_idle,
+	mos_thread_type_guest
+};
+
+struct sched_mos_entity {
+	struct list_head run_list;
+	struct list_head util_list;
+	unsigned int orig_time_slice;
+	unsigned int time_slice;
+	int assimilated;
+	enum mos_thread_type thread_type;
+	int cpu_home;
+	unsigned long clone_flags;
+	bool move_syscalls_disable;
+};
+#endif
+
 struct sched_dl_entity {
 	struct rb_node	rb_node;
 
@@ -1505,6 +1526,9 @@ struct task_struct {
 	const struct sched_class *sched_class;
 	struct sched_entity se;
 	struct sched_rt_entity rt;
+#ifdef CONFIG_MOS_SCHEDULER
+	struct sched_mos_entity mos;
+#endif
 #ifdef CONFIG_CGROUP_SCHED
 	struct task_group *sched_task_group;
 #endif
@@ -2455,7 +2479,10 @@ static inline int set_cpus_allowed_ptr(struct task_struct *p,
 	return 0;
 }
 #endif
-
+#ifdef CONFIG_MOS_SCHEDULER
+extern void mos_set_cpus_allowed_kthread(struct task_struct *,
+					 const struct cpumask *);
+#endif
 #ifdef CONFIG_NO_HZ_COMMON
 void calc_load_enter_idle(void);
 void calc_load_exit_idle(void);
@@ -2631,6 +2658,10 @@ extern struct task_struct *idle_task(int cpu);
  */
 static inline bool is_idle_task(const struct task_struct *p)
 {
+#ifdef CONFIG_MOS_SCHEDULER
+	if (p->mos.thread_type == mos_thread_type_idle)
+		return 1;
+#endif
 	return p->pid == 0;
 }
 extern struct task_struct *curr_task(int cpu);
