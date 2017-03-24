@@ -27,8 +27,8 @@ class NoPlugin(yod.YodTestCase):
         n_lwk_cores = lwkcpus.countBy(self.topology.cores)
 
         @contextlib.contextmanager
-        def process(i):
-            with _yod(self, '-C', 1, '-u', 0, '-M', '4M', '--resource_algorithm', 'simple',
+        def process(i, n):
+            with _yod(self, '-R', '1/{}'.format(n), '-u', 0, '--resource_algorithm', 'simple',
                       './affinity_test', 'wait', i,
                       env=self.test_env, bg=True, pipe='io') as p:
                 # wait for it to get started
@@ -43,9 +43,13 @@ class NoPlugin(yod.YodTestCase):
                 stack.enter_context(self.subTest(concurrent=n))
                 # launch n processes waiting on stdin
                 expected = yod.CpuSet(0)
-                for i in range(1, n+1):
-                    stack.enter_context(process(i))
-                    expected += lwkcpus.selectNthBy(i, self.topology.cores)
+                cores_per_proc = n_lwk_cores // n
+                for i in range(n):
+                    stack.enter_context(process(i+1, n))
+                    # Each process consumes 1/nth of the LWK cores:
+                    for j in range(1, cores_per_proc+1):
+                        expected += lwkcpus.selectNthBy(i*cores_per_proc + j, self.topology.cores)
+
                 # compare expected and actual reserved CPUs
                 actual = cpulist(get_file('/sys/kernel/mOS/lwkcpus_reserved'))
                 self.assertEqual(int(actual), int(expected))
