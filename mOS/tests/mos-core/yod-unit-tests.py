@@ -12,6 +12,8 @@
 
 from mostests import *
 import yod
+from itertools import permutations
+import math
 
 logger = logging.getLogger()
 
@@ -501,6 +503,69 @@ class Mem(yod.YodTestCase):
                 cmd = cpu_cmd + mem_cmd + rest_of_the_cmd
                 self.expand_and_run(cmd, 0)
 
+    def test_aligned_mmap(self):
+        for size in [1, 4096, '4k', 2*1024*1024, '2m', 1024*1024*1024, '1g']:
+            for alignment in [None, 8*1024, '8K', 2*1024*1024, '2m', 1024*1024*1024, '1G']:
+                alopt = '{}'.format(size) if alignment is None else '{}:{}'.format(size, alignment)
+                cmd = ['--aligned-mmap', alopt, '%HELLO%']
+                self.expand_and_run(cmd, 0)
+
+    def test_invalid_aligned_mmap(self):
+        for opt in [None, '1:', '-1', '-1:1G', 'foo', '1q', '1mq', '1:bar', '1:1', '1:4096', '1:4k', '1:8kx', '1:-8k', '1:q', '1:8kk']:
+            cmd = ['--aligned-mmap'] + ([opt] if opt is not None else []) + ['%HELLO%']
+            self.expand_and_run(cmd, EINVAL)
+
+    def test_brk_clear_length(self):
+        for size in [-1, 0, 1, 4096, '4k', '2m', '2.1M', '1g']:
+            cmd = ['--brk-clear-length', size, '%HELLO%']
+            self.expand_and_run(cmd, 0)
+
+    def test_invalid_brk_clear_length(self):
+        for illegal in ['x', '1:']:
+            cmd = ['--brk-clear-length', illegal, '%HELLO%']
+            self.expand_and_run(cmd, EINVAL)
+
+    def test_mem_preferences(self):
+
+        patterns = [
+            (['all:dram'], '/mmap:dram,hbm,nvram,/stack:dram,hbm,nvram,/static:dram,hbm,nvram,/brk:dram,hbm,nvram,'),
+            (['stack:dram'], '/mmap:hbm,dram,nvram,/stack:dram,hbm,nvram,/static:hbm,dram,nvram,/brk:hbm,dram,nvram,'),
+            (['stack:1:dram'], '/mmap:hbm,dram,nvram,/stack:dram,hbm,nvram,/static:hbm,dram,nvram,/brk:hbm,dram,nvram,'),
+            (['stack:1000:dram'], '/mmap:hbm,dram,nvram,/stack:hbm,dram,nvram,/stack:1000:dram,hbm,nvram,/static:hbm,dram,nvram,/brk:hbm,dram,nvram,'),
+            (['stack:0x1000:dram'], '/mmap:hbm,dram,nvram,/stack:hbm,dram,nvram,/stack:4096:dram,hbm,nvram,/static:hbm,dram,nvram,/brk:hbm,dram,nvram,'),
+            (['/mmap:2:nvram/stack:3:dram,nvram/static:4:hbm,nvram/brk:5:dram/'], '/mmap:hbm,dram,nvram,/mmap:2:nvram,hbm,dram,/stack:hbm,dram,nvram,/stack:3:dram,nvram,hbm,/static:hbm,dram,nvram,/static:4:hbm,nvram,dram,/brk:hbm,dram,nvram,/brk:5:dram,hbm,nvram,'),
+            (['/mmap:2:nvram', '/stack:3:dram,nvram', 'static:4:hbm,nvram', 'brk:5:dram/'], '/mmap:hbm,dram,nvram,/mmap:2:nvram,hbm,dram,/stack:hbm,dram,nvram,/stack:3:dram,nvram,hbm,/static:hbm,dram,nvram,/static:4:hbm,nvram,dram,/brk:hbm,dram,nvram,/brk:5:dram,hbm,nvram,'),
+        ]
+
+        for prefs, result in patterns:
+            cmd = []
+            for p in prefs:
+                cmd += ['%MEMPREFS%', p]
+
+            cmd += ['%HELLO%', 'options!']
+            self.expand_and_run(cmd, 0)
+
+            options = self.get_options()
+            self.assertTrue('lwkmem-memory-preferences={}'.format(result) in options)
+
+    def test_invalid_mem_preferences(self):
+        invalid = [
+            'bad',
+            'stack:bad',
+            'stack:-1:dram',
+            'stack:1junk:dram',
+            'stack:1:bad',
+            'stack:1:dram,bad',
+            'stack:1:dram,dram',
+            'stack:1:dram:bad',
+            'stack:dram:bad',
+            'stack:1:dram:bad',
+        ]
+
+        for bad in invalid:
+            cmd = ['%MEMPREFS%', bad, '%HELLO%']
+            self.expand_and_run(cmd, EINVAL)
+
 class CpuAlgorithm(yod.YodTestCase):
     def test_random(self):
         # Exercise the random CPU assignment algorithm.
@@ -608,6 +673,12 @@ class Options(yod.YodTestCase):
         ['foo=bar', 'fum'],
     ]
 
+    def _check_options(self, options):
+        actual = self.get_options()
+        for o in options:
+            logger.debug('Checking for {}'.format(o))
+            self.assertTrue(o in actual)
+
     def test_options(self):
         for options in self.option_patterns:
             cmd = []
@@ -616,19 +687,30 @@ class Options(yod.YodTestCase):
             cmd += ['%HELLO%', 'options!']
             self.expand_and_run(cmd, 0)
 
-            with open(self.var['FS_LWK_OPTIONS']) as f:
-                self.assertEqual(','.join(options), f.read().strip('\0'))
+            self._check_options(options)
 
     def test_env_options(self):
         for options in self.option_patterns:
-            options = ','.join(options)
-
-            env = {'YOD_OPTIONS': options}
+            env = {'YOD_OPTIONS': ' '.join(options)} # separate options with spaces
             cmd = ['%HELLO%', 'options!']
+
             self.expand_and_run(cmd, 0, env=env)
 
-            with open(self.var['FS_LWK_OPTIONS']) as f:
-                self.assertEqual(options, f.read().strip('\0'))
+            self._check_options(options)
+
+    def test_interleave_default(self):
+        cmd = ['%HELLO%', 'options!']
+        self.expand_and_run(cmd, 0)
+        options = self.get_options()
+        self.assertTrue('lwkmem-interleave=2m' in options)
+
+    def test_interleave_override(self):
+        cmd = ['%OPT%', 'lwkmem-interleave=4k', '%HELLO%', 'options!']
+        self.expand_and_run(cmd, 0)
+        options = self.get_options()
+        self.assertTrue('lwkmem-interleave=4k' in options)
+        self.assertFalse('lwkmem-interleave=2m' in options)
+
 
 class Assorted(yod.YodTestCase):
     def test_no_args(self):
@@ -645,3 +727,76 @@ class Assorted(yod.YodTestCase):
         # Test "yod --verbose=9 foo".
         cmd = ['--verbose=9', '-C', '1', '-M', 'all', '%HELLO%', 'from', 'yod']
         self.expand_and_run(cmd, 0)
+
+    def test_rank_layout_option(self):
+        # Test "yod --rank-layout <x> foo".
+
+        options = ['compact', 'scatter', 'scatter:1', 'disable']
+        for o in options:
+            cmd = ['-C', '1', '-M', 'all', '--rank-layout', o, '%HELLO%', 'from', 'yod']
+            self.expand_and_run(cmd, 0)
+
+    def test_invalid_rank_layout_option(self):
+        # Test "yod --rank-layout <x> foo" where <x> is invalid.
+
+        options = [None, 'compact:1', 'scatter:1x', 'disable:1', 'fred']
+        for o in options:
+            cmd = ['-C', '1', '-M', 'all', '--rank-layout'] + ([o] if o is not None else []) + ['%HELLO%', 'from', 'yod']
+            self.expand_and_run(cmd, EINVAL)
+
+class Layout(yod.YodTestCase):
+
+    def test_layouts(self):
+        # Exercise the various layouts
+        layouts = ['scatter', 'compact']
+        for perm in permutations(['cpu', 'core', 'tile', 'node'], 4):
+            layouts.append(','.join(list(perm)))
+
+        for layout in layouts:
+            cmd = ['--layout', layout, '%HELLO%', 'from', 'yod']
+            self.expand_and_run(cmd, 0)
+
+            # Add a ":1" to the first term of all of each layout
+            terms = layout.split(',', maxsplit=1)
+            if len(terms) == 2:
+                cmd = ['--layout', terms[0] + ':1,' + terms[1], '%HELLO%', 'from', 'yod']
+                self.expand_and_run(cmd, 0)
+
+    def test_invalid_layouts(self):
+
+        layouts = [
+            'core,tile,cpu',            # Need to specify all four kinds
+            'cpu,core,tile,tile,node',  # No duplicates
+            'cpu,core,tile,foo',        # invalid dimension
+        ]
+        for invalid in layouts:
+            cmd = ['--layout', invalid, '%HELLO%', 'from', 'yod']
+            self.expand_and_run(cmd, EINVAL)
+
+        boundaries = {
+            'cpu'  : math.ceil(self.topology.allcpus.countCpus() / len(self.topology.cores)), # CPUs per core
+            'core' : math.ceil(len(self.topology.cores) / len(self.topology.tiles)),          # cores per tile
+            'tile' : math.ceil(len(self.topology.tiles) / len(self.topology.nodes)),          # tiles per node
+            'node' : len(self.topology.nodes)                                                 # nodes per system
+        }
+
+        # For every slot in every permutation, test the following illegal
+        # scenarios:
+        #   - a non-integer count
+        #   - a zero count
+        #   - a (just slightly) large, invalid count
+
+        for perm in permutations(list(boundaries.keys())):
+            for i, el in enumerate(perm):
+
+                invalid = list(perm[0:i]) + ['{}:1x'.format(el)] + list(perm[i+1:])
+                cmd = ['--layout', ','.join(invalid), '%HELLO%', 'from', 'yod']
+                self.expand_and_run(cmd, EINVAL)
+
+                invalid = list(perm[0:i]) + ['{}:0'.format(el)] + list(perm[i+1:])
+                cmd = ['--layout', ','.join(invalid), '%HELLO%', 'from', 'yod']
+                self.expand_and_run(cmd, EINVAL)
+
+                invalid = list(perm[0:i]) + ['{}:{}'.format(el, boundaries[el] + 1)] + list(perm[i+1:])
+                cmd = ['--layout', ','.join(invalid), '%HELLO%', 'from', 'yod']
+                self.expand_and_run(cmd, EINVAL)

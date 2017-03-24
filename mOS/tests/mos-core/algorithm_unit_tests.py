@@ -59,12 +59,12 @@ class AlgorithmUnitTests(yod.YodTestCase):
         super().setUp()
 
         dram_size = 16 * 1024 * 1024 * 1024
-        mcdram_size = 4 * 1024 * 1024 * 1024
+        hbm_size = 4 * 1024 * 1024 * 1024
         nvram_size = 0
 
-        self.lwkmem = [dram_size] * 4  +  [mcdram_size] * 4
+        self.lwkmem = [dram_size] * 4  +  [hbm_size] * 4
         self.mem_groups = [[0, 1, 2, 3], [4, 5, 6, 7]]
-        self.mem_group_names = ['dram', 'mcdram']
+        self.mem_group_names = ['dram', 'hbm']
 
         self.n_desig_cores = self.designated.countBy(self.topology.cores)
         self.n_desig_cpus = self.designated.countCpus()
@@ -96,8 +96,12 @@ class AlgorithmUnitTests(yod.YodTestCase):
         return result
 
     def check_lwkmem_domain_info(self):
-        info = get_file(self.var['FS_LWKMEM_DOMAIN_INFO']).strip('\0')
-        self.assertEqual(info, self.domain_info)
+        # The domain info map associates memory types with domains,
+        # e.g. "dram=1 hbm=4".  So we don't really care about the order
+        # within the content.
+        actual = sorted(get_file(self.var['FS_LWKMEM_DOMAIN_INFO']).strip('\0').split())
+        expected = sorted(self.domain_info.split())
+        self.assertEqual(actual, expected)
 
     def test_simple_one_core(self):
         core_mask = self.designated.selectNthBy(1, self.topology.cores)
@@ -344,7 +348,7 @@ class AlgorithmUnitTests(yod.YodTestCase):
 
                 # Now gather up resources from the free domains:
 
-                dom_info = {'dram': [], 'mcdram': []}
+                dom_info = {'dram': [], 'hbm': []}
 
                 for n in range(len(self.topology.nodes)):
                     if n == c or n == m:
@@ -355,7 +359,7 @@ class AlgorithmUnitTests(yod.YodTestCase):
                         lwkmem_reserved_after[self.nearest(n, g)] = self.lwkmem[self.nearest(n, g)]
                         dom_info[self.mem_group_names[g]].append(str(self.nearest(n, g)))
 
-                self.domain_info = 'dram={} mcdram={}'.format(','.join(dom_info['dram']), ','.join(dom_info['mcdram']))
+                self.domain_info = 'dram={} hbm={}'.format(','.join(dom_info['dram']), ','.join(dom_info['hbm']))
 
                 cmd = ['-v', 2, '%RESOURCES%', '.5', '--resource_algorithm', 'numa',
                        '%AFFINITY_TEST%',
@@ -376,7 +380,7 @@ class AlgorithmUnitTests(yod.YodTestCase):
         lwkmem_reserved_after = [0] * self.n_mem_nodes
 
         cores_remaining = self.designated.countBy(self.topology.cores) // 2
-        dom_info = {'dram': [], 'mcdram': []}
+        dom_info = {'dram': [], 'hbm': []}
 
         for nid in range(len(self.topology.nodes)):
             nodes.append(self.designated & self.topology.allcpus.selectNthBy(nid + 1, self.topology.nodes))
@@ -404,7 +408,7 @@ class AlgorithmUnitTests(yod.YodTestCase):
 
         self.var['I_LWKCPUS_RESERVED'] = str(lwkcpus_reserved)
         self.var['I_LWKMEM_RESERVED'] = strseq(lwkmem_reserved_before)
-        self.domain_info = 'dram={} mcdram={}'.format(','.join(dom_info['dram']), ','.join(dom_info['mcdram']))
+        self.domain_info = 'dram={} hbm={}'.format(','.join(dom_info['dram']), ','.join(dom_info['hbm']))
 
         cmd = ['-v', 2, '%RESOURCES%', '.5', '--resource_algorithm', 'numa',
                '%AFFINITY_TEST%',

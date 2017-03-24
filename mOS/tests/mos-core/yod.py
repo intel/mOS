@@ -353,6 +353,7 @@ class YodTestCase(TestCase):
             '%UTIL_THREADS%':   ['--util_threads', '-u'],
             '%MEM%':            ['--mem', '-M'],
             '%RESOURCES%':      ['--resources', '-R'],
+            '%MEMPREFS%':       ['--memory-preference', '-p'],
             '%VERBOSE%':        ['--verbose', '-v'],
             '%OPT%':            ['--opt', '-o'],
             '%HELP%':           ['--help', '-h'],
@@ -478,3 +479,11 @@ class YodTestCase(TestCase):
 
         logger.error('get_n_cores: Should not get here!')
         return None
+
+    def get_options(self):
+        with open(self.var['FS_LWK_OPTIONS']) as f:
+            # The test plugin will reflect the options on separate lines and
+            # may include an extraneous null character and/or new lines:
+
+            lst = f.read().strip('\0').strip().split('\n')
+            return lst
