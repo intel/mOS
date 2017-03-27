@@ -78,31 +78,10 @@ class Base(TestCase):
 
 class Basics(Base):
     def test_lwkmem(self):
-        # Compare the actual lwkmem sysfs attribute against what is
-        # found in the kernel boot argument.
+        # Check if there is any designated LWK memory.
         self.update_lwk_state()
-        cmdline = zerovec(self.lwkmem)
-        for arg in CMDLINE.get('lwkmem', '0:0').split(','):  # NOTENOTE
-            # if no nid or an illegal nid, spread evenly across domains
-            distribute_evenly = False
-            if ':' in arg:
-                nid, size = arg.split(':')
-                nid = int(nid)
-                if nid < 0 or nid >= len(self.lwkmem):
-                    distribute_evenly = True
-                else:
-                    cmdline[nid] = memstr_to_int(size)
-            else:
-                size = arg
-                distribute_evenly = True
-
-            if distribute_evenly:
-                per_nid = memstr_to_int(size) // len(self.lwkmem)
-                for nid in range(len(self.lwkmem)):
-                    cmdline[nid] += per_nid
-        logging.debug('kernel cmdline -> {}'.format(cmdline))
-        self.assertEqual(self.lwkmem, cmdline,
-                         'sysfs and kernel boot arg should match')
+        self.assertNotEqual(self.lwkmem, zerovec(self.lwkmem),
+                         'could not find designated LWK memory')
 
     def test_lwkmem_request(self):
         # Launch a task on all designated CPUs and memory.
@@ -194,3 +173,58 @@ class Yod(Base):
         subtest(clrlen=-1)
         for n in range(4):
             subtest(clrlen = (n + 1) * 0x1000)
+
+    def test_aligned_mmap(self):
+        # Launch an mmap alignment test
+        def subtest(size, alignment):
+            with self.subTest(size=size, alignment=alignment):
+                yod(self, '--aligned-mmap', '{}:{}'.format(size, alignment), './alignmenttest', '--verbose', '--size', size, '--alignment', alignment, '--iterations', 3)
+        for size in [1, 4*KiB, 256*KiB, 2*MiB, 64*MiB]:
+            for alignment in [8*KiB, 256*KiB, 2*MiB, 1*GiB]:
+                subtest(size, alignment)
+
+    def test_aligned_mmap_default(self):
+        # Launch an mmap alignment test without yod options to
+        # validate the default behavior
+        with self.subTest():
+            yod(self, './alignmenttest', '--verbose', '--size', 2*MiB, '--alignment', 1*GiB, '--iterations', 3)
+
+    def test_get_addr(self):
+         with self.subTest():
+            yod(self, './get_addr_test')
+
+
+class Options(Base):
+    require = [YOD, 'options']
+    page_sizes = ['4k', '4K', '2m', '2M', '1g', '1G']
+
+    def _test_with_options(self, options):
+        opts = []
+        for o in options:
+            opts += ['-o', o]
+        opts += ['./options']
+        yod(self, *opts)
+
+    def test_brk_disable(self):
+        self._test_with_options(['lwkmem-brk-disable'])
+
+    def test_max_page_size(self):
+        for sz in self.page_sizes:
+            self._test_with_options(['lwkmem-max-page-size={}'.format(sz)])
+
+    def test_heap_page_size(self):
+        for sz in self.page_sizes:
+            self._test_with_options(['lwkmem-heap-page-size={}'.format(sz)])
+
+    def test_blocks_allocated(self):
+        self._test_with_options(['lwkmem-blocks-allocated'])
+
+    def test_load_elf_disable(self):
+        self._test_with_options(['lwkmem-load-elf-disable'])
+
+    def test_interleave_disable(self):
+        self._test_with_options(['lwkmem-interleave-disable'])
+
+    def test_interleave(self):
+        for sz in self.page_sizes + ['0']:
+            self._test_with_options(['lwkmem-interleave={}'.format(sz)])
