@@ -10,11 +10,14 @@
 # FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
 # more details.
 
-subdir-y += lwkreset yod
+.NOTPARALLEL:
+
+subdir-y += lwkreset yod libmos
 
 _toolinst_: $(subdir-y:%=%_toolinst_)
 
 $(subdir-y:%=%_toolinst_): %_toolinst_:
 	$(Q)$(MAKE) $(build)=$(src)/$* _toolinst_
+
 
 PHONY += _toolinst_ $(subdir-y:%=%_toolinst_)
