@@ -1,5 +1,5 @@
 # Multi Operating System (mOS)
-# Copyright (c) 2016, Intel Corporation.
+# Copyright (c) 2017, Intel Corporation.
 #
 # This program is free software; you can redistribute it and/or modify it
 # under the terms and conditions of the GNU General Public License,
@@ -10,14 +10,15 @@
 # FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
 # more details.
 
-.NOTPARALLEL:
+hostprogs-y := lwkctl
+scriptprogs-y := lwkctl.sh lwkctl.1.man
+mos-lib-objs := ../lib/mos_cpuset.o
+lwkctl-objs := lwkctl_sysfs.o lwkctl.o
+lwkctl-objs += $(mos-lib-objs)
 
-subdir-y += lwkreset yod lwkctl libmos
+lwkctl.sh_installname := lwkctl
+lwkctl.sh_installpath := /usr/bin
+lwkctl.1.man_installname := lwkctl.1
+lwkctl.1.man_installpath := /usr/share/man/man1
 
-_toolinst_: $(subdir-y:%=%_toolinst_)
-
-$(subdir-y:%=%_toolinst_): %_toolinst_:
-	$(Q)$(MAKE) $(build)=$(src)/$* _toolinst_
-
-
-PHONY += _toolinst_ $(subdir-y:%=%_toolinst_)
+include $(src)/../Makefile.tool

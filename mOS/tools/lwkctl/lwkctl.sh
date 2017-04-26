@@ -1,5 +1,7 @@
+#!/bin/sh
+
 # Multi Operating System (mOS)
-# Copyright (c) 2016, Intel Corporation.
+# Copyright (c) 2017, Intel Corporation.
 #
 # This program is free software; you can redistribute it and/or modify it
 # under the terms and conditions of the GNU General Public License,
@@ -10,14 +12,12 @@
 # FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
 # more details.
 
-.NOTPARALLEL:
+lwkctl="/lib/modules/`uname -r`/lwkctl"
+if ! [ -x "$lwkctl" ]; then
+	cat 1>&2 <<EOF
+$0: `uname -r` is not a mOS kernel
 
-subdir-y += lwkreset yod lwkctl libmos
-
-_toolinst_: $(subdir-y:%=%_toolinst_)
-
-$(subdir-y:%=%_toolinst_): %_toolinst_:
-	$(Q)$(MAKE) $(build)=$(src)/$* _toolinst_
-
-
-PHONY += _toolinst_ $(subdir-y:%=%_toolinst_)
+EOF
+	exit 1
+fi
+exec "$lwkctl" "$@"
