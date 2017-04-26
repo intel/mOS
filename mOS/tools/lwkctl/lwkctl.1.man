@@ -1,0 +1,99 @@
+.\"                                      Hey, EMACS: -*- nroff -*-
+.\" First parameter, NAME, should be all caps
+.\" Second parameter, SECTION, should be 1-8, maybe w/ subsection
+.\" other parameters are allowed: see man(7), man(1)
+.TH LWKCTL 1 "April 26, 2017"
+.\" Please adjust this date whenever revising the manpage.
+.\"
+.\" Some roff macros, for reference:
+.\" .nh        disable hyphenation
+.\" .hy        enable hyphenation
+.\" .ad l      left justify
+.\" .ad b      justify to both left and right margins
+.\" .nf        disable filling
+.\" .fi        enable filling
+.\" .br        insert line break
+.\" .sp <n>    insert n+1 empty lines
+.\" for manpage-specific macros, see man(7)
+.SH NAME
+lwkctl \- creates, deletes or shows Light Weight Kernel (LWK) partitions in
+Multi-OS (mOS)
+.SH SYNOPSIS
+.B lwkctl [options]
+.SH DESCRIPTION
+
+\fBlwkctl\fP is the command used to partition resources - CPUs/Memory between
+Linux and LWK in Multi-OS (mOS). It offlines the resources on Linux and hands
+it over to LWK. Once this partitioning is complete, within the LWK further
+resource partitioning between LWK processes is done using mOS job launch
+utility \- \fByod\fP. \fBlwkctl\fP command needs to be executed with root
+privileges in order to create or delete LWK partitions.
+
+.SH OPTIONS
+
+.TP
+.B --create, -c lwkcpus=<\fIlwkcpu_spec\fP>
+Creates a new LWK partition. If an LWK partition exists previously then it
+will be deleted before creating the new partition. The LWK CPU specifications
+for the new partition \fIlwkcpu_spec\fP is passed as an argument in the
+following format,
+
+lwkcpus=<syscall cpu1>.<lwkcpu set1>:<syscall cpu2>.<lwkcpu set2>...
+
+.TP
+.B --delete, -d
+Deletes the existing LWK partition and hands it over to Linux. Currently
+supports only deleting of entire LWK partition.
+
+.TP
+.B --show, -s
+Displays information of the existing LWK partition.
+
+.TP
+.B --verbose, -v <\fInumber\fP>
+Controls the verbosity of \fBlwkctl\fP.  \fINumber\fP is an integer between 0
+and 4.  Note that the argument is required.
+
+.TP
+.B --help, -h
+Prints a terse version of this documentation.
+
+.SH CPU MASKS AND LISTS
+.PP
+CPUs in \fBlwkctl\fP are numbered in C fashion.  That is, the first logical CPU
+is CPU 0, the second is CPU 1 and so on.
+.PP
+CPU masks in \fBlwkctl\fP are hexadecimal literals specified in little endian order.
+That is, the least significant bit corresponds to CPU 0, and so on.  Masks
+must begin with either "0x" or "0X".
+.PP
+CPU lists are CPU numbers or ranges of numbers separated by commas.
+.PP
+So, for example, the list '0-2,8' is equivalent to mask 0x107.
+
+.SH EXAMPLES
+
+.TP
+.B sudo lwkctl -c lwkcpus=1.2-17
+
+Creates a new LWK partition with CPU2 to CPU17 as LWK CPUs and CPU1 as syscall CPU.
+
+.TP
+.B lwkctl -d all
+
+Deletes existing LWK partition and hands over all resources to Linux.
+
+.SH BUGS
+.PP
+Dynamic partitioning of memory between Linux and LWK is not yet supported.
+
+.SH AUTHORS
+lwkctl was written by Sharath Kumar Bhat
+
+.SH COPYRIGHT
+Copyright \(co 2017 Intel Corp.
+
+.SH SEE ALSO
+.I yod(1)
+.br
+
