@@ -15,6 +15,7 @@
 #ifndef __MOS_CPUSET__
 #define __MOS_CPUSET__
 
+#define _GNU_SOURCE
 #include <sched.h>
 
 /**

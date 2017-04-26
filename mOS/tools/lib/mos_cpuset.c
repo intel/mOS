@@ -121,8 +121,10 @@ char *mos_cpuset_to_list(mos_cpuset_t *s)
 		}
 
 		/* Eliminate the trailing ',' */
-		if (s->_buffer[0])
-			*p = '\0';
+		if (s->_buffer[0]) {
+			if (*--p == ',')
+				*p = '\0';
+		}
 
 		return s->_buffer;
 	}
