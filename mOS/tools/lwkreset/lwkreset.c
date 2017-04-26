@@ -69,7 +69,7 @@ static int get_lwk_processes(char *buff, size_t len)
 
 	if (rc < 0) {
 		LWKRESET_ERR("Could not read \"%s\" (rc = %ld)", MOS_SYSFS_LWKPROCESSES, len);
-	} else if (rc < len) 
+	} else if ((unsigned int)rc < len)
 		buff[rc] = 0; /* force end-of-string */
 
 	fclose(fptr);
@@ -84,7 +84,7 @@ static int get_lwkpid(char **ppidstr)
         unsigned long int pid;
         pid = strtoul(*ppidstr, &endptr, 0);
         *ppidstr = endptr;
-        if (**ppidstr == ',') 
+	if (**ppidstr == ',')
                 *ppidstr += 1;
         return pid;
 }
@@ -97,13 +97,13 @@ void lwkreset_abort(int rc, const char* format, ...)
 	vsprintf(buffer, format, args);
 	fprintf(stderr, "[lwkreset:%d] %s (rc=%d)\n", getpid(), buffer, rc);
 	va_end(args);
-        
+
 	exit(rc);
 }
 
 static void usage(void)
 {
-	int i;
+	unsigned int i;
 
 	printf("Usage: lwkreset [options]\n");
 	printf("Options:\n");
