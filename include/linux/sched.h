@@ -1408,17 +1408,34 @@ enum mos_thread_type {
 	mos_thread_type_guest
 };
 
+struct mos_clone_hints {
+	unsigned int flags;
+	unsigned int behavior;
+	unsigned int location;
+	unsigned long key;
+	nodemask_t nodes;
+	struct mos_clone_result __user *result;
+};
+
+struct mos_active_hints {
+	unsigned int behavior;
+	unsigned int location;
+	nodemask_t nodes;
+};
+
 struct sched_mos_entity {
 	struct list_head run_list;
 	struct list_head util_list;
+	struct mos_clone_hints clone_hints;
+	struct mos_active_hints active_hints;
+	const struct sched_class *orig_class;
+	unsigned long clone_flags;
 	unsigned int orig_time_slice;
 	unsigned int time_slice;
-	int assimilated;
 	unsigned int orig_policy;
-	const struct sched_class *orig_class;
-	enum mos_thread_type thread_type;
+	int assimilated;
 	int cpu_home;
-	unsigned long clone_flags;
+	enum mos_thread_type thread_type;
 	bool move_syscalls_disable;
 };
 #endif

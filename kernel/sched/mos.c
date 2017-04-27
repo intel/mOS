@@ -39,6 +39,9 @@
 #include <linux/vtime.h>
 #include <linux/cacheinfo.h>
 #include <linux/topology.h>
+#include <uapi/linux/mos.h>
+#include <linux/uaccess.h>
+#include <linux/syscalls.h>
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/mos.h>
@@ -48,22 +51,46 @@
  * timeslicing.
  */
 #define MOS_TIMESLICE		(100 * HZ / 1000)
-#define COMMIT_NOLIMIT		INT_MAX		/* No limit */
+#define COMMIT_MAX		INT_MAX		/* Max limit */
+
+/* Maximum supported number of active utility thread groups */
+#define UTIL_GROUP_LIMIT   4
+
+#define PLACEMENT_SAMEDIFF     (MOS_CLONE_ATTR_SAME_L1CACHE | \
+				MOS_CLONE_ATTR_SAME_L2CACHE | \
+				MOS_CLONE_ATTR_SAME_L3CACHE | \
+				MOS_CLONE_ATTR_DIFF_L1CACHE | \
+				MOS_CLONE_ATTR_DIFF_L2CACHE | \
+				MOS_CLONE_ATTR_DIFF_L3CACHE | \
+				MOS_CLONE_ATTR_SAME_DOMAIN | \
+				MOS_CLONE_ATTR_DIFF_DOMAIN)
+#define PLACEMENT_CONFLICTS (PLACEMENT_SAMEDIFF | MOS_CLONE_ATTR_USE_NODE_SET)
 
 enum MatchType {FirstAvail = 0,
 		SameCore,
 		SameL1,
 		SameL2,
 		SameL3,
-		SameNuma,
+		SameDomain,
 		OtherCore,
 		OtherL1,
 		OtherL2,
 		OtherL3,
-		OtherNuma,
+		OtherDomain,
+		InNMask,
 		};
 
 static cpumask_var_t saved_wq_mask;
+
+raw_spinlock_t util_grp_lock;
+
+static struct util_group {
+	int index;
+	struct {
+		long int key;
+		struct mos_topology topology;
+	} entry[UTIL_GROUP_LIMIT];
+} util_grp;
 
 static inline struct task_struct *mos_task_of(struct sched_mos_entity *mos_se)
 {
@@ -80,6 +107,37 @@ static void sched_stats_init(struct mos_sched_stats *stats)
 	memset(stats, 0, sizeof(struct mos_sched_stats));
 }
 
+static inline bool acceptable_behavior(unsigned int b)
+{
+	if ((b == 0) ||
+	    (b & MOS_CLONE_ATTR_EXCL) ||
+	    (b & MOS_CLONE_ATTR_HCPU) ||
+	    (b & MOS_CLONE_ATTR_HPRIO) ||
+	    (b & MOS_CLONE_ATTR_LPRIO) ||
+	    (b & MOS_CLONE_ATTR_NON_COOP))
+		return true;
+	return false;
+}
+
+static inline bool location_match(enum MatchType t, int i, struct mos_rq *q,
+				  nodemask_t *n)
+{
+	if ((t == FirstAvail) ||
+	    (t == SameDomain && i == q->topology.numa_id) ||
+	    (t == SameCore && i == q->topology.core_id) ||
+	    (t == SameL1 && i == q->topology.l1c_id) ||
+	    (t == SameL2 && i == q->topology.l2c_id) ||
+	    (t == SameL3 && i == q->topology.l3c_id) ||
+	    (t == OtherDomain && i != q->topology.numa_id) ||
+	    (t == OtherCore && i != q->topology.core_id) ||
+	    (t == OtherL1 && i != q->topology.l1c_id) ||
+	    (t == OtherL2 && i != q->topology.l2c_id) ||
+	    (t == OtherL3 && i != q->topology.l3c_id) ||
+	    (t == InNMask && node_isset(q->topology.numa_id, *n)))
+		return true;
+	return false;
+}
+
 static void sched_stats_prepare_launch(struct mos_sched_stats *stats)
 {
 	/* leave stats->guests unchanged */
@@ -91,6 +149,7 @@ static void sched_stats_prepare_launch(struct mos_sched_stats *stats)
 	stats->timer_pop = 0;
 	stats->sysc_migr = 0;
 	stats->setaffinity = 0;
+	stats->pushed = 0;
 }
 
 static void init_mos_topology(struct rq *rq)
@@ -101,14 +160,14 @@ static void init_mos_topology(struct rq *rq)
 	int cpu;
 	struct mos_rq *mos_rq = &rq->mos;
 
-	mos_rq->core_id = -1;
-	mos_rq->l1c_id = -1;
-	mos_rq->l2c_id = -1;
-	mos_rq->l3c_id = -1;
-	mos_rq->tindex = -1;
+	mos_rq->topology.core_id = -1;
+	mos_rq->topology.l1c_id = -1;
+	mos_rq->topology.l2c_id = -1;
+	mos_rq->topology.l3c_id = -1;
+	mos_rq->topology.tindex = -1;
 
 	/* Get the numa node identifier associated with this CPU */
-	mos_rq->numa_id = cpu_to_node(rq->cpu);
+	mos_rq->topology.numa_id = cpu_to_node(rq->cpu);
 
 	cpu = cpumask_first(topology_sibling_cpumask(rq->cpu));
 	if (cpu < nr_cpu_ids) {
@@ -116,13 +175,13 @@ static void init_mos_topology(struct rq *rq)
 		 * Generate a unique core identifier value equal to the first
 		 * CPUID in the list of CPUs associated with this core.
 		 */
-		mos_rq->core_id = cpu;
+		mos_rq->topology.core_id = cpu;
 
 		/* Generate a hyperthread index value for this CPU */
 		for (i = 0; cpu != rq->cpu; i++)
 			cpu = cpumask_next(cpu,
 				topology_sibling_cpumask(rq->cpu));
-		mos_rq->tindex = i;
+		mos_rq->topology.tindex = i;
 	}
 	/*
 	 * Get the cache boundary information. When running on KNL
@@ -135,13 +194,13 @@ static void init_mos_topology(struct rq *rq)
 		for (i = 0; i < cci->num_leaves; i++) {
 			ci = cci->info_list + i;
 			if (ci->level == 1)
-				mos_rq->l1c_id =
+				mos_rq->topology.l1c_id =
 					cpumask_first(&ci->shared_cpu_map);
 			else if (ci->level == 2)
-				mos_rq->l2c_id =
+				mos_rq->topology.l2c_id =
 					cpumask_first(&ci->shared_cpu_map);
 			else if (ci->level == 3)
-				mos_rq->l3c_id =
+				mos_rq->topology.l3c_id =
 					cpumask_first(&ci->shared_cpu_map);
 		}
 	}
@@ -211,59 +270,90 @@ static int commit_cpu(struct task_struct *p, int cpu)
 	return commit;
 }
 
+static int select_shared_utility_cpu(struct task_struct *p,
+				     enum MatchType type,
+				     int id, nodemask_t *node_mask)
+{
+	int commit;
+
+	/* Look for a matching CPU at the lowest commit level */
+	for (commit = 0; commit < COMMIT_MAX; commit++) {
+		int match = 0;
+		int util_cpu;
+
+		for_each_cpu(util_cpu, p->mos_process->utilcpus) {
+			struct mos_rq *mos_rq = &cpu_rq(util_cpu)->mos;
+
+			if (!location_match(type, id, mos_rq, node_mask))
+				continue;
+			match  = 1;
+			if (atomic_read(&mos_rq->commit_level) == commit)
+				return util_cpu;
+		}
+		if (!match)
+			return -1;
+	}
+	return -1;
+}
+
 /*
  * Attempt to find a CPU within the commit level limit and affinity
  * matching requested.
  */
 static int _select_cpu_candidate(struct task_struct *p,
 				int commit_level_limit,
-				bool reverse,
-				enum MatchType type,
+				bool reverse_search,
+				enum MatchType matchtype,
 				int id,
+				nodemask_t *nodemask,
 				int range)
 {
-	int cpu, commitment, n;
-	struct mos_rq *mos_rq;
+	int commitment;
 	int *cpu_list = p->mos_process->lwkcpus_sequence;
 	int fpath = cpumask_equal(&p->cpus_allowed, p->mos_process->lwkcpus);
-	int lastindex = (range) ? (range - 1) : p->mos_process->num_lwkcpus - 1;
+	int num_slots_to_search = (range < 0) ?
+					p->mos_process->num_lwkcpus : range;
+	int lastindex = p->mos_process->num_lwkcpus - 1;
 
 	/*
 	 * Using the lwkcpus_sequence list in the mos_process object, look for
 	 * the least committed CPU starting at one end of the list and
 	 * and walking sequentially through it.
 	 */
+	if (!range)
+		goto out;
 	for (commitment = 0; commitment <= commit_level_limit; commitment++) {
-		for (n = 0; n <= lastindex; n++) {
-			cpu = reverse ? cpu_list[lastindex - n] : cpu_list[n];
+		int n;
+		int match = 0;
+
+		for (n = 0; n < num_slots_to_search; n++) {
+			struct mos_rq *mos_rq;
+			int cpu;
+
+			cpu = (reverse_search ?
+			       cpu_list[lastindex - n] : cpu_list[n]);
 			mos_rq = &cpu_rq(cpu)->mos;
-			if ((type != FirstAvail) &&
-			    ((type == SameNuma && id != mos_rq->numa_id) ||
-			     (type == SameCore && id != mos_rq->core_id) ||
-			     (type == SameL1 && id != mos_rq->l1c_id) ||
-			     (type == SameL2 && id != mos_rq->l2c_id) ||
-			     (type == SameL3 && id != mos_rq->l3c_id) ||
-			     (type == OtherNuma && id == mos_rq->numa_id) ||
-			     (type == OtherCore && id == mos_rq->core_id) ||
-			     (type == OtherL1 && id == mos_rq->l1c_id) ||
-			     (type == OtherL2 && id == mos_rq->l2c_id) ||
-			     (type == OtherL3 && id == mos_rq->l3c_id)
-			    ))
+			if (!location_match(matchtype, id, mos_rq, nodemask))
 				continue;
+			match = 1;
 			if (fpath ||
 			    cpumask_test_cpu(cpu, &(p->cpus_allowed))) {
 				if (atomic_read(&mos_rq->commit_level) ==
 						commitment) {
 					trace_mos_cpu_select(p, cpu,
 							     commitment,
-							     type, id);
+							     matchtype, id);
 					return cpu;
 				}
 			}
 		}
+		if (!match)
+			goto out;
 	}
-	/* No CPU is available at the requested commitment limit and topology */
-	trace_mos_cpu_select_unavail(p, commit_level_limit, type, id);
+out:
+	/* No CPU is available at the requested commitment range and topology */
+	trace_mos_cpu_select_unavail(p, commit_level_limit, matchtype, id,
+									range);
 
 	return -1;
 }
@@ -272,12 +362,12 @@ static inline int select_cpu_candidate(struct task_struct *p,
 				       int commit_level_limit)
 {
 	return _select_cpu_candidate(p, commit_level_limit, 0,
-				     FirstAvail, 0, 0);
+				     FirstAvail, 0, NULL, -1);
 }
 
 static inline int initial_cpu_if_uncommitted(struct task_struct *p)
 {
-	return _select_cpu_candidate(p, 0, 0, FirstAvail, 0, 1);
+	return _select_cpu_candidate(p, 0, 0, FirstAvail, 0, NULL, 1);
 }
 
 extern struct rq *sched_context_switch(struct rq *, struct task_struct *,
@@ -604,7 +694,7 @@ select_task_rq_mos(struct task_struct *p, int cpu, int sd_flag, int flags)
 	else if (sd_flag == SD_BALANCE_FORK) {
 
 		/* Find the best cpu candidate for the mOS clone operation */
-		ncpu = select_cpu_candidate(p, COMMIT_NOLIMIT);
+		ncpu = select_cpu_candidate(p, COMMIT_MAX);
 
 		trace_mos_clone_cpu_assign(ncpu, p);
 
@@ -623,7 +713,7 @@ select_task_rq_mos(struct task_struct *p, int cpu, int sd_flag, int flags)
 			}
 		} else {
 			/* Need to select a cpu in the allowed mask */
-			ncpu = select_cpu_candidate(p, COMMIT_NOLIMIT);
+			ncpu = select_cpu_candidate(p, COMMIT_MAX);
 		}
 	}
 	return ncpu;
@@ -749,76 +839,230 @@ static void switched_to_mos(struct rq *rq, struct task_struct *p)
 	}
 }
 
-static inline int utility_thread_moveable(void)
+static void move_to_linux_scheduler(struct task_struct *p,
+				unsigned long behavior)
 {
-	return 1;
+	int nice;
+
+	if (behavior & MOS_CLONE_ATTR_HPRIO)
+		nice = -20;
+	else if (behavior & MOS_CLONE_ATTR_LPRIO)
+		nice = 19;
+	else
+		nice = 0;
+
+	p->policy = SCHED_NORMAL;
+	p->static_prio = NICE_TO_PRIO(nice);
+	p->rt_priority = 0;
+	p->prio = p->normal_prio = p->static_prio;
+	p->se.load.weight =
+		sched_prio_to_weight[p->static_prio - MAX_RT_PRIO];
+	p->se.load.inv_weight =
+		sched_prio_to_wmult[p->static_prio - MAX_RT_PRIO];
+	p->sched_class = &fair_sched_class;
 }
-static void set_utility_cpus_allowed(struct task_struct *p, int which_thread)
+
+static void adjust_util_behavior(struct task_struct *p, unsigned long behavior)
+{
+	/*
+	 * If this is a high priority thread, bump
+	 * its priority above that of all other mOS
+	 * threads. No other lower priority mOS threads will
+	 * be allowed to run if this thread is not blocked
+	 */
+	if (behavior & MOS_CLONE_ATTR_HPRIO) {
+		p->prio = MOS_HIGH_PRIO;
+		p->normal_prio = MOS_HIGH_PRIO;
+	} else if (behavior & MOS_CLONE_ATTR_LPRIO) {
+		p->prio = MOS_LOW_PRIO;
+		p->normal_prio = MOS_LOW_PRIO;
+	}
+	/*
+	 * If this thread does not play well with others,
+	 * forceably time-slice it so it does not starve
+	 * the other threads when others are running.
+	 */
+	if (behavior & MOS_CLONE_ATTR_NON_COOP)
+		p->policy = SCHED_RR;
+}
+
+static void set_utility_cpus_allowed(struct task_struct *p,
+				     int which_thread,
+				     struct mos_clone_hints *hints)
 {
 
 	cpumask_var_t new_mask;
-	int util_cpu = -1;
+	int util_cpu, loopmax, i, cpu_home;
+	struct mos_topology *topology;
 	struct mos_process_t *proc = p->mos_process;
-	bool add_to_list = 0;
+	int loc_id = -1;
+	bool reverse_search = true;
+	int allowed_commit_level = (proc->max_util_threads_per_cpu < 0) ?
+			COMMIT_MAX : (proc->max_util_threads_per_cpu - 1);
+	int range = proc->max_cpus_for_util;
+	enum MatchType matchtype = FirstAvail;
+	nodemask_t *node_mask = NULL;
+	bool shared = 0;
+	bool placement_honored = true;
+	bool key_store_pending = false;
 
+	if (hints->key) {
+		raw_spin_lock(&util_grp_lock);
+		/* Search the list */
+		for (i = 0, topology = NULL; i < UTIL_GROUP_LIMIT; i++) {
+			if (util_grp.entry[i].key == hints->key) {
+				topology = &util_grp.entry[i].topology;
+				break;
+			}
+		}
+		if (topology) {
+			/* An entry in the group was found. Use topology */
+			raw_spin_unlock(&util_grp_lock);
+		} else {
+			key_store_pending = true;
+			/* Reset all same/different location requests since
+			 * they will be used by other processes creating
+			 * threads with the same key that we will be storing.
+			 * We get to choose the location.
+			 */
+			hints->location &= ~PLACEMENT_SAMEDIFF;
+			/* Don't release the location_group_lock yet */
+		}
+	} else {
+		/* Cannot use our current CPU for location matching since
+		 * we may be running on a Linux syscall CPU (e.g. in clone).
+		 * Use the CPU designated as the LWK CPU home for this task.
+		 * We should have a valid LWK CPU home. However if it is not
+		 * valid, default to the first LWK CPU in the process mask.
+		 */
+		cpu_home = current->mos.cpu_home;
+		if (likely(cpu_home >= 0))
+			topology = &(cpu_rq(cpu_home)->mos.topology);
+		else {
+			topology =
+			  &(cpu_rq(cpumask_first(proc->lwkcpus))->mos.topology);
+			pr_warn("mOS: Expected a valid cpu_home in %s.\n",
+					__func__);
+		}
+	}
 	/* We are placing a thread on a Utility CPU */
 	if (zalloc_cpumask_var(&new_mask, GFP_KERNEL)) {
 
+		if (hints->location & MOS_CLONE_ATTR_SAME_L1CACHE) {
+			matchtype = SameL1;
+			loc_id = topology->l1c_id;
+		} else if (hints->location & MOS_CLONE_ATTR_SAME_L2CACHE) {
+			matchtype = SameL2;
+			loc_id = topology->l2c_id;
+		} else if (hints->location & MOS_CLONE_ATTR_SAME_L3CACHE) {
+			matchtype = SameL3;
+			loc_id = topology->l3c_id;
+		} else if (hints->location & MOS_CLONE_ATTR_DIFF_L1CACHE) {
+			matchtype = OtherL1;
+			loc_id = topology->l1c_id;
+		} else if (hints->location & MOS_CLONE_ATTR_DIFF_L2CACHE) {
+			matchtype = OtherL2;
+			loc_id = topology->l2c_id;
+		} else if (hints->location & MOS_CLONE_ATTR_DIFF_L3CACHE) {
+			matchtype = OtherL3;
+			loc_id = topology->l3c_id;
+		} else if (hints->location & MOS_CLONE_ATTR_SAME_DOMAIN) {
+			matchtype = SameDomain;
+			loc_id = topology->numa_id;
+		} else if (hints->location & MOS_CLONE_ATTR_DIFF_DOMAIN) {
+			matchtype = OtherDomain;
+			loc_id = topology->numa_id;
+		} else if (hints->location & MOS_CLONE_ATTR_USE_NODE_SET) {
+			matchtype = InNMask;
+			node_mask = &hints->nodes;
+		}
 		/*
-		 * Search for an uncommitted CPU in the reverse order
-		 * in an attempt to stay away from worker threads
+		 * Try to honor the location request looking at the lwkcpus
+		 * and shared utility pool. If location cannot be
+		 * satisfied repeat looking for first available CPU at the
+		 * requested level of overcommitment. If we still cannot satisfy
+		 * the request, continue to bump up the level of allowed
+		 * overcommitment until we have a match. The loop has a
+		 * threshold value to prevent us from hanging the kernel due
+		 * to some unexpected condition.
 		 */
-		util_cpu = _select_cpu_candidate(p, 0, 1, FirstAvail, 0, 0);
-
-		/* Did we find a CPU? */
-		if (util_cpu < 0) {
-			/* Time to use our shared utility CPU pool */
-			int commit;
-			struct mos_rq *mos_rq;
-			bool found;
-
-			/*
-			 * We are sharing utility CPUs with other mos
-			 * processes therefore we want to round-robin
-			 * the utility threads. Set the policy to
-			 * SCHED_RR. We are still in control using our
-			 * mos scheduling class.
-			 */
-			p->policy = SCHED_RR;
-
-			/*
-			 * Using the shared utility cpu mask, look for the least
-			 * committed CPU starting with the first CPU in the
-			 * mask and stepping sequencially through it.
-			 */
-			for (commit = 0, found = 0; !found; commit++) {
-				for_each_cpu(util_cpu, proc->utilcpus) {
-					mos_rq = &cpu_rq(util_cpu)->mos;
-					if (atomic_read(
-					       &mos_rq->commit_level) == commit
-							) {
-						found = 1;
-						break;
-					}
+		for (i = 0, util_cpu = -1, loopmax = 100; i < loopmax; i++) {
+			if (!(hints->location & MOS_CLONE_ATTR_FWK_CPU)) {
+				util_cpu = _select_cpu_candidate(p,
+						allowed_commit_level,
+						reverse_search,
+						matchtype,
+						loc_id,
+						node_mask,
+						range);
+				if (util_cpu >= 0) {
+					shared = 0;
+					adjust_util_behavior(p,
+							     hints->behavior);
+					break;
 				}
 			}
-		} else if (utility_thread_moveable())
-			/*
-			 * If this is a moveable util thread, chain
-			 * onto the list of movelable utilty threads which are
-			 * executing on LWK CPUs. Add to the front of the list.
-			 * Since the util threads are allocated from the end of
-			 * the sequence list, later when a util thread is
-			 * selected for pushing, it will push the CPU that was
-			 * next in the sequence for the non-util threads,
-			 * thereby preserving the desired allocation sequence
-			 */
-			add_to_list = 1;
+			if (!(hints->location & MOS_CLONE_ATTR_LWK_CPU)) {
+				util_cpu = select_shared_utility_cpu(p,
+							     matchtype,
+							     loc_id,
+							     node_mask);
+				if (util_cpu >= 0) {
+					shared = 1;
+					/*
+					 * We will be running this thread on a
+					 * Linux CPU with other mos threads and
+					 * Linux tasks therefore we must play by
+					 * Linux rules. Give the task back to
+					 * the Linux scheduler. We will no
+					 * longer be in control of the
+					 * scheduling of this thread.
+					 */
+					move_to_linux_scheduler(p,
+							hints->behavior);
+					break;
+				}
+			}
+			if (unlikely(matchtype == FirstAvail)) {
+				/* The only reason we should be here is
+				 * if LWK placement is explicitly requested
+				 * along with not being able to satisfy the
+				 * requested limit on overcommitment. If this
+				 * is the case, bump up the allowed level of
+				 * overcommitment and take another pass through
+				 * the while loop.
+				 */
+				if (unlikely(!(hints->location &
+					       MOS_CLONE_ATTR_LWK_CPU) ||
+					     allowed_commit_level ==
+					     COMMIT_MAX)) {
+					/* We should not be here. FirstAvail is
+					 * set and shared cpu assignment is
+					 * allowed so we should always be
+					 * able to find a CPU for the utility
+					 * thread. Break out of this loop.
+					 * Warning will be surfaced on exit.
+					 */
+					util_cpu = -1;
+					break;
+				}
+				/* Bump up the allowed level of overcommitment
+				 * and try again
+				 */
+				allowed_commit_level++;
+			} else {
+				/* Give up on domain and cache placement */
+				matchtype = FirstAvail;
+				placement_honored = false;
+			}
+		}
 
 		if (likely((util_cpu >= 0) && (util_cpu < nr_cpu_ids))) {
-			cpumask_set_cpu(util_cpu, new_mask);
+
+			int placement_result, behavior_result;
 
 			/* Set the cpus allowed mask for the utility thread */
+			cpumask_set_cpu(util_cpu, new_mask);
 			set_cpus_allowed_mos(p, new_mask);
 #ifdef CONFIG_MOS_MOVE_SYSCALLS
 			/* Keep task where it belongs for syscall return */
@@ -828,7 +1072,30 @@ static void set_utility_cpus_allowed(struct task_struct *p, int which_thread)
 			/* Mark this mos thread as a utility thread */
 			p->mos.thread_type = mos_thread_type_utility;
 
-			if (add_to_list) {
+			/* If we are responsible for storing the location
+			 * key, do it now and release the lock.
+			 */
+			if (key_store_pending) {
+				topology = &(cpu_rq(util_cpu)->mos.topology);
+				i = (util_grp.index++)%UTIL_GROUP_LIMIT;
+				util_grp.entry[i].key =	hints->key;
+				util_grp.entry[i].topology = *topology;
+				key_store_pending = false;
+				raw_spin_unlock(&util_grp_lock);
+			}
+			/*
+			 * If this is a moveable util thread, chain
+			 * onto the list of movelable utilty threads which are
+			 * executing on LWK CPUs. Add to the front of the list.
+			 * Since the util threads are allocated from the end of
+			 * the sequence list, later when a util thread is
+			 * selected for pushing, it will push the the utility
+			 * thread off of the CPU that was next in the sequence
+			 * for the non-util threads, thereby preserving the
+			 * desired allocation sequence of the worker threads.
+			 */
+			if (!shared &&
+			    ~(hints->behavior & MOS_CLONE_ATTR_EXCL)) {
 				/* Grab the utility list lock */
 				mutex_lock(&proc->util_list_lock);
 
@@ -840,16 +1107,78 @@ static void set_utility_cpus_allowed(struct task_struct *p, int which_thread)
 			} else
 				commit_cpu(p, util_cpu);
 
-			trace_mos_util_thread_assigned(util_cpu);
-		} else
+			if (placement_honored) {
+				p->mos.active_hints.location = hints->location;
+				placement_result = MOS_CLONE_PLACEMENT_ACCEPTED;
+			} else {
+				p->mos.active_hints.location = 0;
+				placement_result = MOS_CLONE_PLACEMENT_REJECTED;
+			}
+			if (acceptable_behavior(hints->behavior)) {
+				p->mos.active_hints.behavior = hints->behavior;
+				behavior_result = MOS_CLONE_BEHAVIOR_ACCEPTED;
+			} else {
+				p->mos.active_hints.behavior = 0;
+				behavior_result = MOS_CLONE_BEHAVIOR_REJECTED;
+			}
+			if (hints->result) {
+				put_user(placement_result,
+					 &hints->result->placement);
+				put_user(behavior_result,
+					 &hints->result->behavior);
+			}
+			trace_mos_util_thread_assigned(util_cpu,
+							placement_honored);
+		} else {
+			if (key_store_pending)
+				raw_spin_unlock(&util_grp_lock);
 			pr_warn("Utility cpu selection failure in %s.\n",
 					__func__);
+		}
 		free_cpumask_var(new_mask);
 	} else
 		pr_warn("CPU mask allocation failure in %s.\n", __func__);
 }
 
-static void push_utility_thread(struct task_struct *p)
+static void push_to_linux_scheduler(struct task_struct *p)
+{
+	struct rq_flags rf;
+	bool queued;
+	bool running;
+	struct rq *rq;
+
+	/*
+	 * To change p->policy safely, we need to obtain
+	 * both the rq and the pi lock.
+	 */
+	rq = task_rq_lock(p, &rf);
+
+	queued = task_on_rq_queued(p);
+	running = task_current(rq, p);
+	if (queued) {
+		update_rq_clock(rq);
+		sched_info_dequeued(rq, p);
+		p->sched_class->dequeue_task(rq, p, 0);
+	}
+	if (running)
+		put_prev_task(rq, p);
+
+	move_to_linux_scheduler(p, p->mos.active_hints.behavior);
+
+	if (queued) {
+		update_rq_clock(rq);
+		sched_info_queued(rq, p);
+		p->sched_class->enqueue_task(rq, p, 0);
+	}
+	if (running)
+		set_curr_task(rq, p);
+
+	p->sched_class->switched_to(rq, p);
+
+	task_rq_unlock(rq, p, &rf);
+}
+
+static void push_utility_threads(struct task_struct *p)
 {
 	struct task_struct *util_thread;
 	struct mos_process_t *proc = p->mos_process;
@@ -858,38 +1187,84 @@ static void push_utility_thread(struct task_struct *p)
 	/* Are there any uncommitted CPUs remaining */
 	cpu = select_cpu_candidate(p, 0);
 	if (cpu < 0) {
+		/* There are no un-committed CPUs for the worker threads.
+		 * start pushing off utility threads until we of freed up
+		 * a CPU that can be used for a worker thread.
+		 */
+
 		/* Grab the utility list lock */
 		mutex_lock(&proc->util_list_lock);
 
-		/* Are there any moveable util threads occupying LWKCPUs */
-		util_thread = list_first_entry_or_null(&proc->util_list,
+		/*
+		 * Continue to push moveable utility threads to the share Linux
+		 * CPUs until either no more utility threads are available to
+		 * be pushed or until we we freed up an LWK CPU.
+		 */
+		while ((util_thread = list_first_entry_or_null(&proc->util_list,
 							struct task_struct,
-							mos.util_list);
-		if (util_thread) {
-			bool found;
+							mos.util_list))) {
 			int util_cpu;
 			int commit;
-			struct mos_rq *mos_rq;
-
+			enum MatchType matchtype;
+			int loc_id;
+			nodemask_t *node_mask;
 			cpumask_var_t new_mask;
+			bool placement_honored = true;
 
 			/* remove the utility thread from the list */
 			list_del(&util_thread->mos.util_list);
 
-			/* find least committed shared utility cpu */
-			for (commit = 0, found = 0; !found; commit++) {
-				for_each_cpu(util_cpu, proc->utilcpus) {
-					mos_rq = &cpu_rq(util_cpu)->mos;
-					if (atomic_read(
-					       &mos_rq->commit_level) == commit
-							) {
-						found = 1;
-						break;
-					}
-				}
+			/*
+			 * If the original request specified a domain mask,
+			 * attempt to honor that request, regardless of commit
+			 * level. Otherwise place on the CPU that has the
+			 * lowest commit level.
+			 */
+			if (util_thread->mos.active_hints.location &
+			    MOS_CLONE_ATTR_USE_NODE_SET) {
+				matchtype = InNMask;
+				node_mask = &util_thread->mos.active_hints.nodes;
 			}
+			while (1) {
 
-			/* Move util_thread to util_cpu */
+				util_cpu = select_shared_utility_cpu(util_thread,
+							     matchtype,
+							     loc_id,
+							     node_mask);
+				/* Did we a CPU matching our criteria? */
+				if (util_cpu >= 0) {
+					/*
+					 * We will now be running this thread
+					 * on a Linux CPU with other mos threads
+					 * and Linux tasks therefore we must
+					 * play by Linux rules. Give the task
+					 * back to the Linux scheduler. We will
+					 * no longer be in control of the
+					 * scheduling of this thread.
+					 */
+					push_to_linux_scheduler(util_thread);
+					break;
+				}
+				if (matchtype == FirstAvail) {
+					/*
+					 * Should never get here, indicate an
+					 * error. Do not move the thread but
+					 * keep it off the list of moveable
+					 * utility threads
+					 */
+					util_cpu = util_thread->mos.cpu_home;
+					pr_warn("mOS: unexpected condition searching for available CPU in %s.\n",
+					    __func__);
+					break;
+				}
+				/*
+				 * guarantee a CPU match on next iteration so
+				 * that we exit the loop.
+				 */
+				matchtype = FirstAvail;
+				placement_honored = false;
+			}
+			/* Move util_thread to linux cpu */
 			if (zalloc_cpumask_var(&new_mask, GFP_KERNEL)) {
 
 				int from_cpu = util_thread->mos.cpu_home;
@@ -901,17 +1276,33 @@ static void push_utility_thread(struct task_struct *p)
 				cpumask_set_cpu(util_cpu, new_mask);
 				set_cpus_allowed_ptr(util_thread, new_mask);
 
+				/* Update the count of pushed threads */
+				if (from_cpu >= 0)
+					cpu_rq(from_cpu)->mos.stats.pushed++;
+
 				/* Trace the push */
 				trace_mos_util_thread_pushed(from_cpu,
 							     util_cpu,
 							     util_thread,
-							     commit);
-
+							     commit,
+							     placement_honored);
 				free_cpumask_var(new_mask);
 			}
-	       }
-	       mutex_unlock(&proc->util_list_lock);
+			if (select_cpu_candidate(p, 0) >= 0)
+				/*
+				 * We have freed up an LWK CPU.
+				 * Our work is done.
+				 */
+				break;
+		}
+		mutex_unlock(&proc->util_list_lock);
 	}
+}
+
+static void clear_clone_hints(struct task_struct *p)
+{
+	memset(&current->mos.clone_hints, 0, sizeof(struct mos_clone_hints));
+	memset(&p->mos.clone_hints, 0, sizeof(struct mos_clone_hints));
 }
 
 /*
@@ -922,6 +1313,7 @@ static void push_utility_thread(struct task_struct *p)
 static void task_fork_mos(struct task_struct *p)
 {
 	struct mos_process_t *proc = p->mos_process;
+	struct mos_clone_hints *clone_hints = &current->mos.clone_hints;
 
 	p->prio = current->prio;
 	p->normal_prio = current->prio;
@@ -941,38 +1333,36 @@ static void task_fork_mos(struct task_struct *p)
 		int thread_count =
 			atomic_inc_return(&proc->threads_created);
 
-		/* NOTE: If clone could tell us that this is supposed to
-		 * be a utility thread, this is where we would make that
-		 * test and take the else leg to setup the utility
-		 * thread CPU
+		/*
+		 * If the clone hints are telling us this is supposed to
+		 * be a utility thread, or if the YOD option to heuristically
+		 * assign utility threads is set, then go select an appropriate
+		 * CPU for the thread.
 		 */
-		if (likely(thread_count > proc->num_util_threads)) {
+		if (likely((thread_count > proc->num_util_threads) &&
+			   !(clone_hints->flags & MOS_CLONE_ATTR_UTIL))) {
 			/*
 			 *  We are placing a thread within our LWK process. Set
 			 *  up the appropriate cpus_allowed mask
 			 */
 			set_cpus_allowed_mos(p, proc->lwkcpus);
 
-			/* Push utility thread off an lwkcpu if needed */
-			push_utility_thread(p);
+			/*
+			 * If needed, make room for this worker thread so that
+			 * it can run alone on an LWK CPU.
+			 */
+			push_utility_threads(p);
 
-		} else
-			set_utility_cpus_allowed(p, thread_count);
+		} else {
+			set_utility_cpus_allowed(p, thread_count, clone_hints);
+		}
 	} else {
 		/*
 		 * This is a fork of a full process, we will default the
 		 * scheduling policy and priority to the default Linux
 		 * values.
 		 */
-		p->policy = SCHED_NORMAL;
-		p->static_prio = NICE_TO_PRIO(0);
-		p->rt_priority = 0;
-		p->prio = p->normal_prio = p->static_prio;
-		p->se.load.weight =
-			sched_prio_to_weight[p->static_prio - MAX_RT_PRIO];
-		p->se.load.inv_weight =
-			sched_prio_to_wmult[p->static_prio - MAX_RT_PRIO];
-		p->sched_class = &fair_sched_class;
+		move_to_linux_scheduler(p, 0);
 
 		/*
 		 * We set cpus_allowed mask to be the original mask prior to
@@ -984,6 +1374,8 @@ static void task_fork_mos(struct task_struct *p)
 		cpumask_copy(&p->mos_savedmask, proc->original_cpus_allowed);
 #endif
 	}
+	/* Cleanup the clone hints */
+	clear_clone_hints(p);
 }
 
 void mos_set_task_cpu(struct task_struct *p, int new_cpu)
@@ -1220,7 +1612,7 @@ int mos_select_next_cpu(struct task_struct *p, const struct cpumask *new_mask)
 	 * has been established yet
 	 */
 	if (cpumask_subset(new_mask, p->mos_process->lwkcpus))
-		return select_cpu_candidate(p, COMMIT_NOLIMIT);
+		return select_cpu_candidate(p, COMMIT_MAX);
 	/*
 	 * All other conditions pick first cpu in the new mask
 	 */
@@ -1250,7 +1642,7 @@ int mos_select_cpu_candidate(struct task_struct *p, int cpu)
 		 */
 		if (likely(cpumask_subset(tsk_cpus_allowed(p),
 					  p->mos_process->lwkcpus)))
-			ncpu = select_cpu_candidate(p, COMMIT_NOLIMIT);
+			ncpu = select_cpu_candidate(p, COMMIT_MAX);
 	}
 	return ncpu;
 }
@@ -1297,6 +1689,8 @@ static int lwksched_process_init(struct mos_process_t *mosp)
 	mosp->sched_stats = 0;
 	INIT_LIST_HEAD(&mosp->util_list);
 	mutex_init(&mosp->util_list_lock);
+	mosp->max_cpus_for_util = -1;
+	mosp->max_util_threads_per_cpu = 1;
 
 	return 0;
 }
@@ -1328,10 +1722,11 @@ static void stats_summarize(struct mos_sched_stats *pstats,
 		pstats->timer_pop += stats->timer_pop;
 		pstats->sysc_migr += stats->sysc_migr;
 		pstats->setaffinity += stats->setaffinity;
+		pstats->pushed += stats->pushed;
 		if (((detail_level == 1) &&
 		    (stats->max_commit_level > 1)) ||
 		    (detail_level > 2)) {
-			pr_info("mOS-sched: PID=%d cpuid=%2d max_commit=%d max_running=%d guest_dispatch=%d timer_pop=%d setaffinity=%d sysc_migr= %d %s\n",
+			pr_info("mOS-sched: PID=%d cpuid=%2d max_commit=%d max_running=%d guest_dispatch=%d timer_pop=%d setaffinity=%d sysc_migr=%d pushed=%d\n",
 				tgid, cpu,
 				stats->max_commit_level,
 				stats->max_running - 1, /* remove mOS idle */
@@ -1339,7 +1734,7 @@ static void stats_summarize(struct mos_sched_stats *pstats,
 				stats->timer_pop,
 				stats->setaffinity,
 				stats->sysc_migr,
-				(util_cpu) ? "util-cpu" : "");
+				stats->pushed);
 		}
 	}
 }
@@ -1366,7 +1761,7 @@ static void sched_stats_summarize(struct mos_process_t *mosp)
 		if (((detail_level ==  1) &&
 		    (pstats.max_commit_level > 1)) ||
 		    (detail_level > 1))
-			pr_info("mOS-sched: PID=%d threads=%d cpus=%2d max_commit=%d max_running=%d guest_dispatch=%d timer_pop=%d setaffinity=%d sysc_migr=%d\n",
+			pr_info("mOS-sched: PID=%d threads=%d cpus=%2d max_commit=%d max_running=%d guest_dispatch=%d timer_pop=%d setaffinity=%d sysc_migr=%d pushed=%d\n",
 			tgid,
 			atomic_read(&mosp->threads_created)+1,
 			cpus, pstats.max_commit_level,
@@ -1374,7 +1769,8 @@ static void sched_stats_summarize(struct mos_process_t *mosp)
 			pstats.guest_dispatch,
 			pstats.timer_pop,
 			pstats.setaffinity,
-			pstats.sysc_migr);
+			pstats.sysc_migr,
+			pstats.pushed);
 	}
 }
 static void lwksched_process_exit(struct mos_process_t *mosp)
@@ -1471,21 +1867,31 @@ invalid:
 	return -EINVAL;
 }
 
-static int __init lwksched_topology_init(void)
+static int lwksched_util_threshold(const char *val, struct mos_process_t *mosp)
 {
-	int i;
+	int rc;
+	char *max_cpus_str, *max_thread_str;
 
-	for_each_present_cpu(i) {
-		struct rq *rq;
-
-		rq = cpu_rq(i);
-		init_mos_topology(rq);
-	}
+	if (!val)
+		goto invalid;
+	max_thread_str = kstrdup(val, GFP_KERNEL);
+	if (!max_thread_str)
+		goto invalid;
+	max_cpus_str = strsep(&max_thread_str, ":");
+	if (!max_thread_str || !max_cpus_str)
+		goto invalid;
+	rc = kstrtoint(max_thread_str, 0, &mosp->max_util_threads_per_cpu);
+	if (rc)
+		goto invalid;
+	rc = kstrtoint(max_cpus_str, 0, &mosp->max_cpus_for_util);
+	if (rc)
+		goto invalid;
 	return 0;
+invalid:
+	pr_err("Illegal value (%s) in %s.\n",
+		val, __func__);
+	return -EINVAL;
 }
-/* must be called after subsys init */
-late_initcall(lwksched_topology_init);
-
 
 static int __init lwksched_mod_init(void)
 {
@@ -1502,10 +1908,25 @@ static int __init lwksched_mod_init(void)
 				     lwksched_disable_setaffinity);
 	mos_register_option_callback("lwksched-stats",
 				     lwksched_stats);
+	mos_register_option_callback("util-threshold",
+				     lwksched_util_threshold);
 	return 0;
 }
 
 subsys_initcall(lwksched_mod_init);
+
+static int lwksched_topology_init(void)
+{
+	int i;
+
+	for_each_present_cpu(i) {
+		struct rq *rq;
+
+		rq = cpu_rq(i);
+		init_mos_topology(rq);
+	}
+	return 0;
+}
 
 /*
  * this_rq_lock - lock this runqueue and disable interrupts.
@@ -1536,7 +1957,7 @@ asmlinkage long lwk_sys_sched_yield(void)
 	 * Are we the only thread at this priority?
 	 * In most HPC environments this will be true
 	 */
-	if (list_is_singular(&current->mos.run_list))
+	if (this_rq()->lwkcpu && list_is_singular(&current->mos.run_list))
 		return 0;
 
 	/*
@@ -1636,7 +2057,7 @@ int mos_sched_init(void)
  */
 int mos_sched_activate(cpumask_var_t new_lwkcpus)
 {
-	return 0;
+	return lwksched_topology_init();
 }
 
 /*
@@ -1705,5 +2126,166 @@ int mos_sched_exit(void)
 	else
 		pr_warn("Failed setting unbound workqueue cpumask in %s. rc=%d\n",
 				__func__, rc);
+	return 0;
+}
+
+static int placement_conflict(unsigned int place)
+{
+	unsigned int rqst, count;
+
+	for (rqst = place & PLACEMENT_CONFLICTS, count = 0; rqst; rqst >>= 1) {
+		if (count)
+			/* Still in the loop so there is another bit on */
+			return 1;
+		count += rqst & 1;
+	}
+	return 0;
+}
+
+/* Copy a node mask from user space. */
+static int get_nodes(nodemask_t *nodes, const unsigned long __user *nmask,
+		     unsigned long maxnode)
+{
+	unsigned long k;
+	unsigned long nlongs;
+	unsigned long endmask;
+
+	--maxnode;
+	nodes_clear(*nodes);
+	if (maxnode == 0 || !nmask)
+		return 0;
+	if (maxnode > PAGE_SIZE*BITS_PER_BYTE)
+		return -EINVAL;
+
+	nlongs = BITS_TO_LONGS(maxnode);
+	if ((maxnode % BITS_PER_LONG) == 0)
+		endmask = ~0UL;
+	else
+		endmask = (1UL << (maxnode % BITS_PER_LONG)) - 1;
+
+	/*
+	 * When the user specified more nodes than supported just check
+	 * if the non supported part is all zero.
+	 */
+	if (nlongs > BITS_TO_LONGS(MAX_NUMNODES)) {
+		if (nlongs > PAGE_SIZE/sizeof(long))
+			return -EINVAL;
+		for (k = BITS_TO_LONGS(MAX_NUMNODES); k < nlongs; k++) {
+			unsigned long t;
+
+			if (get_user(t, nmask + k))
+				return -EFAULT;
+			if (k == nlongs - 1) {
+				if (t & endmask)
+					return -EINVAL;
+			} else if (t)
+				return -EINVAL;
+		}
+		nlongs = BITS_TO_LONGS(MAX_NUMNODES);
+		endmask = ~0UL;
+	}
+
+	if (copy_from_user(nodes_addr(*nodes), nmask,
+			   nlongs*sizeof(unsigned long)))
+		return -EFAULT;
+	nodes_addr(*nodes)[nlongs-1] &= endmask;
+	return 0;
+}
+
+SYSCALL_DEFINE5(mos_set_clone_attr,
+		struct mos_clone_attr __user *, attrib,
+		unsigned long, max_nodes,
+		unsigned long __user *, user_nodes,
+		struct mos_clone_result __user *, result,
+		unsigned long, location_key)
+{
+	return -EINVAL;
+}
+
+asmlinkage long lwk_sys_mos_set_clone_attr(
+				struct mos_clone_attr __user *attrib,
+				unsigned long max_nodes,
+				unsigned long __user *user_nodes,
+				struct mos_clone_result __user *result,
+				unsigned long location_key)
+{
+	int rc;
+	struct mos_clone_attr lp;
+	struct mos_clone_hints *hints = &current->mos.clone_hints;
+
+	if (unlikely(copy_from_user(&lp, attrib,
+			sizeof(struct mos_clone_attr))))
+		/* Could not read the clone attributes from user */
+		return -EFAULT;
+
+	if (unlikely(lp.size != sizeof(struct mos_clone_attr)))
+		/* Interface structure size mismatch between user and kernel */
+		return -EINVAL;
+
+	if ((rc = get_nodes(&hints->nodes, user_nodes, max_nodes)))
+		/* Error reading the user node mask */
+		return rc;
+
+	if (unlikely(lp.flags & MOS_CLONE_ATTR_CLEAR)) {
+		/* Clear all previously saved clone attributes */
+		trace_mos_clone_attr_cleared(hints->behavior, hints->location);
+		hints->flags = 0;
+		hints->behavior = 0;
+		hints->location = 0;
+		hints->key = 0;
+		nodes_clear(hints->nodes);
+		hints->result = NULL;
+		return 0;
+	}
+	if (placement_conflict(lp.placement))
+		/* Conflicting placement directives */
+		return -EINVAL;
+
+	if (lp.placement & MOS_CLONE_ATTR_USE_NODE_SET) {
+		if (nodes_empty(hints->nodes))
+			/* No nodes specified in node mask */
+			return -EINVAL;
+	}
+	if ((unlikely(lp.behavior & MOS_CLONE_ATTR_HPRIO) &&
+	    (lp.behavior & MOS_CLONE_ATTR_LPRIO)))
+		/* Conflicting behavior attributes */
+		return -EINVAL;
+	if (lp.placement & MOS_CLONE_ATTR_FABRIC_INT) {
+		/* Force placement on FWK CPUs for fabric interrupt request */
+		lp.placement |= MOS_CLONE_ATTR_FWK_CPU;
+	}
+	if ((lp.placement & MOS_CLONE_ATTR_LWK_CPU) &&
+	    (lp.placement & MOS_CLONE_ATTR_FWK_CPU)) {
+		/* Cannot be on both a FWK and LWK CPU */
+		return -EINVAL;
+	}
+	if (location_key)
+		/* Store the key for location grouping */
+		hints->key = location_key;
+
+	if (result) {
+		struct mos_clone_result result_init;
+
+		result_init.behavior = lp.behavior ?
+					MOS_CLONE_BEHAVIOR_REQUESTED : 0;
+		result_init.placement = lp.placement ?
+					MOS_CLONE_PLACEMENT_REQUESTED : 0;
+
+		if (copy_to_user(result, &result_init,
+			sizeof(struct mos_clone_result)))
+			/* Could not initialize the clone attribute results */
+			return -EFAULT;
+	}
+	/*
+	 * Pass hints to the next clone syscall. We will
+	 * process this information in task_fork_mos()
+	 */
+	hints->flags = lp.flags;
+	hints->behavior = lp.behavior;
+	hints->location = lp.placement;
+	hints->result = result;
+
+	trace_mos_clone_attr_active(hints->behavior, hints->location);
+
 	return 0;
 }
