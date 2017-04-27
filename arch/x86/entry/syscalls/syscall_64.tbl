@@ -341,6 +341,7 @@
 332	common	statx			sys_statx
 
 # mOS system calls
+511	64	mos_set_clone_attr	sys_mos_set_clone_attr
 # end of mOS system calls
 
 #

@@ -424,13 +424,10 @@ static int _lwkcpus_request_set(cpumask_var_t request)
 
 		/* Create a mask of the shared utility CPUs based on the CPUs
 		 * participating as syscall targets for all of the lwk cpus
-		 * in this process
 		 */
-		for_each_cpu(cpu, current->mos_process->lwkcpus)
-			cpumask_or(current->mos_process->utilcpus,
-				   current->mos_process->utilcpus,
-				   per_cpu_ptr(&mos_syscall_mask, cpu));
-
+		cpumask_or(current->mos_process->utilcpus,
+			   current->mos_process->utilcpus,
+			   lwkcpus_syscall_map);
 
 		_mos_debug_process(current->mos_process, __func__, __LINE__);
 	}
