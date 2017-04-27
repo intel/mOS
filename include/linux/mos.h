@@ -95,6 +95,10 @@ struct mos_process_t {
 	int disable_setaffinity;
 	/* Logging verbosity for scheduler statistics */
 	int sched_stats;
+	/* Maximum number of lwkcpus for utility thread use */
+	int max_cpus_for_util;
+	/* Maximum number of util threads per lwkcpu */
+	int max_util_threads_per_cpu;
 	/* List of utility threads on LWK CPUs */
 	struct list_head util_list;
 	/* Mutex for controlling the util_list */

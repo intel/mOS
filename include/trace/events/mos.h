@@ -203,15 +203,16 @@ TRACE_EVENT(mos_cpu_uncommit,
  */
 TRACE_EVENT(mos_cpu_select_unavail,
 
-	TP_PROTO(struct task_struct *p, int commit, int type, int id),
+	TP_PROTO(struct task_struct *p, int commit, int type, int id, int range),
 
-	TP_ARGS(p, commit, type, id),
+	TP_ARGS(p, commit, type, id, range),
 
 	TP_STRUCT__entry(
 		__field(	int,	pid			)
 		__field(	int,	commit			)
 		__field(	int,	type			)
 		__field(	int,	id			)
+		__field(	int,	range			)
 	),
 
 	TP_fast_assign(
@@ -219,10 +220,12 @@ TRACE_EVENT(mos_cpu_select_unavail,
 		__entry->commit		= commit;
 		__entry->type		= type;
 		__entry->id		= id;
+		__entry->range		= range;
 	),
 
-	TP_printk("pid=%d requested commit level=%d type=%d id=%d",
-		  __entry->pid, __entry->commit, __entry->type, __entry->id)
+	TP_printk("pid=%d requested commit level=%d type=%d id=%d range=%d",
+		  __entry->pid, __entry->commit, __entry->type, __entry->id,
+		  __entry->range)
 );
 
 /*
@@ -260,19 +263,21 @@ TRACE_EVENT(mos_cpu_select,
  */
 TRACE_EVENT(mos_util_thread_assigned,
 
-	TP_PROTO(int cpu),
+	TP_PROTO(int cpu, int placed),
 
-	TP_ARGS(cpu),
+	TP_ARGS(cpu, placed),
 
 	TP_STRUCT__entry(
 		__field(	int,	cpu			)
+		__field(	int,	placed			)
 	),
 
 	TP_fast_assign(
 		__entry->cpu		= cpu;
+		__entry->placed		= placed;
 	),
 
-	TP_printk("cpu=%d", __entry->cpu)
+	TP_printk("cpu=%d placement_honored=%d", __entry->cpu, __entry->placed)
 );
 
 /*
@@ -280,15 +285,16 @@ TRACE_EVENT(mos_util_thread_assigned,
  */
 TRACE_EVENT(mos_util_thread_pushed,
 
-	TP_PROTO(int from_cpu, int to_cpu, struct task_struct *p, int commit),
+	TP_PROTO(int from_cpu, int to_cpu, struct task_struct *p, int commit, int placed),
 
-	TP_ARGS(from_cpu, to_cpu, p, commit),
+	TP_ARGS(from_cpu, to_cpu, p, commit, placed),
 
 	TP_STRUCT__entry(
 		__field(	int,	from_cpu		)
 		__field(	int,	to_cpu			)
 		__field(	int,	pid			)
 		__field(	int,	commit			)
+		__field(	int,	placed			)
 	),
 
 	TP_fast_assign(
@@ -296,11 +302,58 @@ TRACE_EVENT(mos_util_thread_pushed,
 		__entry->to_cpu		= to_cpu;
 		__entry->pid		= p->pid;
 		__entry->commit		= commit;
+		__entry->placed		= placed;
 	),
 
-	TP_printk("pid=%d from=%d to=%d commit=%d",
+	TP_printk("pid=%d from=%d to=%d commit=%d placement_honored=%d",
 		__entry->pid, __entry->from_cpu,
-		__entry->to_cpu, __entry->commit)
+		__entry->to_cpu, __entry->commit, __entry->placed)
+);
+
+/*
+ * Clone attributes have been activated for the current task
+ */
+TRACE_EVENT(mos_clone_attr_active,
+
+	TP_PROTO(unsigned int behavior, unsigned int placement),
+
+	TP_ARGS(behavior, placement),
+
+	TP_STRUCT__entry(
+		__field(	unsigned int,	behavior	)
+		__field(	unsigned int,	placement	)
+	),
+
+	TP_fast_assign(
+		__entry->behavior	= behavior;
+		__entry->placement	= placement;
+	),
+
+	TP_printk("behavior=%d placement=%d",
+		__entry->behavior, __entry->placement)
+);
+
+/*
+ * Clone attributes have been cleared within the current task
+ */
+TRACE_EVENT(mos_clone_attr_cleared,
+
+	TP_PROTO(unsigned int behavior, unsigned int placement),
+
+	TP_ARGS(behavior, placement),
+
+	TP_STRUCT__entry(
+		__field(	unsigned int,	behavior	)
+		__field(	unsigned int,	placement	)
+	),
+
+	TP_fast_assign(
+		__entry->behavior	= behavior;
+		__entry->placement	= placement;
+	),
+
+	TP_printk("previous behavior=%d placement=%d",
+		__entry->behavior, __entry->placement)
 );
 
 #endif /* _TRACE_MOS_H */

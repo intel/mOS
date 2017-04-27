@@ -524,8 +524,16 @@ extern void mos_set_task_cpu(struct task_struct *p, int new_cpu);
 #define MOS_RQ_FAIR_INDEX (MOS_RQ_MAX_INDEX - 1)
 #define MOS_RQ_IDLE_INDEX (MOS_RQ_MAX_INDEX)
 
+#define MOS_HIGH_USER_PRIO (60)
 #define MOS_DEFAULT_USER_PRIO  (50)
-#define MOS_DEFAULT_PRIO (MAX_RT_PRIO-1-MOS_DEFAULT_USER_PRIO)
+#define MOS_LOW_USER_PRIO  (40)
+
+#define MOS_USR_TO_KERNEL_PRIO(uprio) (MAX_RT_PRIO - 1 - uprio)
+
+#define MOS_DEFAULT_PRIO MOS_USR_TO_KERNEL_PRIO(MOS_DEFAULT_USER_PRIO)
+#define MOS_HIGH_PRIO MOS_USR_TO_KERNEL_PRIO(MOS_HIGH_USER_PRIO)
+#define MOS_LOW_PRIO MOS_USR_TO_KERNEL_PRIO(MOS_HIGH_USER_PRIO)
+
 #define MOS_IDLE_PRIO (99)
 #define MOS_MAX_PRIO (99)
 
@@ -545,6 +553,16 @@ struct mos_sched_stats {
 	unsigned int timer_pop;
 	unsigned int sysc_migr;
 	unsigned int setaffinity;
+	unsigned int pushed;
+};
+
+struct mos_topology {
+	int tindex; /* hyperthread index within the core */
+	int core_id; /* first cpuid in list of CPUs in the same core */
+	int l1c_id; /* first cpuid in list of CPUs sharing l1 cache */
+	int l2c_id; /* first cpuid in list of CPUs sharing l2 cache */
+	int l3c_id; /* first cpuid in list of CPUs sharing l3 cache */
+	int numa_id; /* numa domain where this CPU is located */
 };
 
 struct mos_rq {
@@ -557,12 +575,7 @@ struct mos_rq {
 	u64 mos_runtime;
 
 	/* Topology information */
-	int tindex; /* hyperthread index within the core */
-	int core_id; /* first cpuid in list of CPUs in the same core */
-	int l1c_id; /* first cpuid in list of CPUs sharing l1 cache */
-	int l2c_id; /* first cpuid in list of CPUs sharing l2 cache */
-	int l3c_id; /* first cpuid in list of CPUs sharing l3 cache */
-	int numa_id; /* numa domain where this CPU is located */
+	struct mos_topology topology;
 
 	/* Number of mOS tasks committed to run on this CPU */
 	atomic_t commit_level;
