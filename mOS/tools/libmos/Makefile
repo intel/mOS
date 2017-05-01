@@ -10,16 +10,18 @@
 # FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
 # more details.
 
-PHONY += _toolinst_ _toolinst_libmos _toolinst_mos_h
+PHONY += _toolinst_ _toolinst_libmos _toolinst_mos_h _toolinst_uti_h
 
 major := 1
 minor := 0
 soname := libmos.so.$(major)
 libmos := libmos.so.$(major).$(minor)
 libmos_installpath := /usr/lib
-libobjs := $(obj)/mossyscalls.o
+libobjs := $(obj)/mossyscalls.o $(obj)/uti.o
 mos_h_installpath := /usr/include
+uti_h_installpath := /usr/include
 mos_h_srcpath := $(obj)/../../../include/uapi/linux/
+uti_h_srcpath := $(obj)/../../../include/uapi/linux/
 
 $(obj)/$(libmos): $(libobjs)
 	$(CC) -shared -Wl,-soname,$(soname) -o $@ $^
@@ -36,4 +38,7 @@ _toolinst_libmos: $(obj)/$(libmos)
 _toolinst_mos_h: $(mos_h_srcpath)/mos.h
 	$(call cmd,lib_install,$<,$(INSTALL_MOD_PATH)/$(mos_h_installpath),$(notdir $<),$(mos_h_installpath)/$(notdir $<))
 
-_toolinst_: _toolinst_libmos _toolinst_mos_h
+_toolinst_uti_h: $(uti_h_srcpath)/uti.h
+	$(call cmd,lib_install,$<,$(INSTALL_MOD_PATH)/$(uti_h_installpath),$(notdir $<),$(uti_h_installpath)/$(notdir $<))
+
+_toolinst_: _toolinst_libmos _toolinst_mos_h _toolinst_uti_h

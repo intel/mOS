@@ -14,9 +14,20 @@
 
 #include <unistd.h>
 #include <uapi/asm-generic/unistd.h>
+#include <uapi/linux/mos.h>
 
 /* mOS memory system calls */
 
 /* mOS scheduler system calls */
+
+long mos_set_clone_attr(struct mos_clone_attr *attr,
+			unsigned long maxnodes,
+			unsigned long *nodes,
+			struct mos_clone_result *result,
+			unsigned long location_key)
+{
+	return syscall(511, attr, maxnodes, nodes, result, location_key);
+}
+
 
 /* other mOS system calls */
