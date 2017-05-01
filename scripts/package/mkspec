@@ -182,6 +182,7 @@ echo '%defattr (-, root, root)'
 echo "/usr/bin/*"
 echo "/usr/lib/libmos*"
 echo "/usr/include/mos.h"
+echo "/usr/include/uti.h"
 echo "/usr/share/man/man1/*"
 echo "/etc/udev/rules.d/*"
 echo ""
