@@ -217,16 +217,10 @@ POSSIBLE_CPUS = cpulist(get_file('/sys/devices/system/cpu/possible'))
 ONLINE_CPUS = cpulist(get_file('/sys/devices/system/cpu/online'))
 CONFIG_NR_CPUS = int(get_file('/sys/devices/system/cpu/kernel_max')) + 1
 MAX_CPUS = max(POSSIBLE_CPUS) + 1
-
-EVANESCENCE_MAP = [CPUoffloads(o.dst & ONLINE_CPUS, o.src & ONLINE_CPUS)
-                   for o in LWKCPUS]
-
-# these CPUs offload syscalls to other CPUs
-LWK_CPUS = cpulist.OR(o.src for o in EVANESCENCE_MAP)
-if IS_MOS:
-    assert LWK_CPUS == cpulist(get_file('/sys/kernel/mOS/lwkcpus'))
 # these CPUs receive offloads from other CPUs
-SYSCALL_CPUS = cpulist.OR(o.dst for o in EVANESCENCE_MAP)
+SYSCALL_CPUS = cpulist(get_file('/sys/kernel/mOS/lwkcpus_syscall'))
+# these CPUs offload syscalls to other CPUs
+LWK_CPUS = cpulist(get_file('/sys/kernel/mOS/lwkcpus'))
 # these CPUs neither offload nor receive offloads
 NORMAL_CPUS = ONLINE_CPUS - LWK_CPUS - SYSCALL_CPUS
 
@@ -234,6 +228,7 @@ NORMAL_CPUS = ONLINE_CPUS - LWK_CPUS - SYSCALL_CPUS
 
 STAPRUN = _find_tool('staprun')
 YOD = _find_tool('yod', IS_MOS, PATH=False)
+LWKCTL = _find_tool('lwkctl', IS_MOS, PATH=False)
 
 def run(test, *command, env={}, bg=False, pipe='', assertion=True):
     # run(...) -> return code

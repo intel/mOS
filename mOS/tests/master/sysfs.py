@@ -28,6 +28,7 @@ class Basics(TestCase):
     sysfs = '/sys/kernel/mOS'
     expectations = {
         'version':                  statmode('r--r--r--'),
+        'lwk_config':               statmode('rw-r--r--'),
         'lwkcpus':                  statmode('r--r--r--'),
         'lwkcpus_mask':             statmode('r--r--r--'),
         'lwkcpus_request':          statmode('-w--w--w-'),
@@ -36,6 +37,7 @@ class Basics(TestCase):
         'lwkcpus_reserved_mask':    statmode('rw-r--r--'),
         'lwkcpus_sequence':         statmode('-w--w--w-'),
         'lwkmem':                   statmode('r--r--r--'),
+        'lwkmem_debug':             statmode('rw-r--r--'),
         'lwkmem_request':           statmode('-w--w--w-'),
         'lwkmem_reserved':          statmode('r--r--r--'),
         'lwkmem_domain_info':       statmode('-w--w--w-'),
@@ -43,13 +45,14 @@ class Basics(TestCase):
         'lwkcpus_syscall':          statmode('r--r--r--'),
         'lwkcpus_syscall_mask':     statmode('r--r--r--'),
         'lwk_util_threads':         statmode('-w--w--w-'),
+        'lwkprocesses':             statmode('r--r--r--'),
         }
 
-    @unittest.expectedFailure
     def test_permissions(self):
         # Verify sysfs permissions match expected ones.
         for path, mode in self.expectations.items():
             with self.subTest(path=path, mode=oct(mode)):
+                logger.debug('Testing permissions of {} -> {}'.format(path, oct(mode)))
                 st = os.stat(os.path.join(self.sysfs, path))
                 self.assertEqual(st.st_mode & 0o777, mode,
                                  'permissions should match: ' + path)
@@ -61,6 +64,7 @@ class Basics(TestCase):
                 with self.subTest(path=path):
                     with open(os.path.join(self.sysfs, path), 'r') as f:
                         logger.debug('contents of %s', path)
+                        n = 0
                         for n, line in enumerate(f):
                             logger.debug('%4d %s', n, line.rstrip())
                         logger.debug('%4d <EOF>', n + 1)

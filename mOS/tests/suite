@@ -71,6 +71,8 @@ def main(argv):
     p.add_argument('-v', '--verbose', action='append_const',
                    dest='verbosity', const=1,
                    help='verbose output (twice for debug output)')
+    p.add_argument('--all-tests', action='store_true',
+                   help='Run all tests, including long running production tests.')
     p.add_argument('-f', '--failfast', action='store_true',
                    help='stop on the first failure or error')
     p.add_argument('-c', '--catch', action='store_true',
@@ -79,7 +81,13 @@ def main(argv):
                    help='disable buffering test output for display only on failure')
     p.add_argument('--yod', metavar='PATH',
                    help='path of yod binary to use')
+    p.add_argument('--test-debug', action='store_true',
+                   help=argparse.SUPPRESS)
     p.add_argument('--test-ncpus', type=int,
+                   help=argparse.SUPPRESS)
+    p.add_argument('--test-yod-scalar',
+                   help=argparse.SUPPRESS)
+    p.add_argument('--test-spin', type=int, default=24,
                    help=argparse.SUPPRESS)
     p.add_argument('pattern', nargs='*',
                    help='name or glob pattern of tests to execute')
@@ -89,9 +97,13 @@ def main(argv):
     levels = {0: logging.ERROR,     # -q
               1: logging.WARNING,   # default
               2: logging.INFO,      # -v
-              3: logging.DEBUG}     # -vv
+              3: logging.DEBUG,     # -vv
+              4: logging.DEBUG}     # -vvv
     args.verbosity = min(max(sum(args.verbosity), 0), max(levels))
     logger.setLevel(levels[min(args.verbosity, max(levels))])
+
+    if args.verbosity == max(levels):
+        args.test_debug = True
 
     if args.yod and not os.access(args.yod, os.X_OK):
         logger.error('invalid path for yod: %s', args.yod)
