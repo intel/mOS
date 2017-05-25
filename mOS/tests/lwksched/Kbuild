@@ -10,7 +10,7 @@
 # FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
 # more details.
 
-hostprogs-$(CONFIG_MOS_SCHEDULER) := thread_placement fork_process aff_scan timer_preemption thread_priority
+hostprogs-$(CONFIG_MOS_SCHEDULER) := thread_placement fork_process aff_scan timer_preemption thread_priority set_clone_attr uti_placement uti_macros
 
 HOST_EXTRACFLAGS += -pthread -Wextra -g
 
@@ -28,5 +28,14 @@ HOSTLOADLIBES_timer_preemption := -pthread
 
 thread_priority-objs := thread_priority.o lwksched.o
 HOSTLOADLIBES_thread_priority := -pthread
+
+uti_placement-objs := uti_placement.o lwksched.o
+HOSTLOADLIBES_uti_placement := -pthread -lmos
+
+set_clone_attr-objs := set_clone_attr.o lwksched.o
+HOSTLOADLIBES_set_clone_attr := -pthread -lmos
+
+uti_macros-objs := uti_macros.o lwksched.o
+HOSTLOADLIBES_uti_macros := -pthread -lmos
 
 always := $(hostprogs-y)
