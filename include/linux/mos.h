@@ -208,17 +208,6 @@ extern void lwkctl_def_partition(void);
 #define _LWKPG          ((unsigned long)(0x004c574b5047))
 #define is_lwkpg(page)  ((((page)->private) & _LWKPG) == _LWKPG)
 
-static inline void lwkmem_page_init(struct page *p)
-{
-	SetPageReserved(p);
-	SetPagePrivate(p);
-	set_bit(PG_writeback, &p->flags);
-	SetPageActive(p);
-	SetPageUnevictable(p);
-	SetPageMlocked(p);
-	p->private = _LWKPG;
-}
-
 extern struct page *lwkmem_user_to_page(struct mm_struct *mm,
 					unsigned long addr,
 					unsigned int *size);
@@ -231,7 +220,6 @@ extern long elf_unmap_from_lwkmem(unsigned long addr, unsigned long size);
 #else
 #define is_lwkmem(vma) 0
 #define is_lwkpg(page) 0
-static inline void lwkmem_page_init(struct page *p) { }
 #endif /* CONFIG_MOS_LWKMEM */
 
 
@@ -269,7 +257,6 @@ static inline void lwkctl_def_partition(void) {}
 
 #define is_lwkmem(vma) 0
 #define is_lwkpg(page) 0
-static inline void lwkmem_page_init(struct page *p) { }
 
 #endif /* CONFIG_MOS_FOR_HPC */
 #endif /* _LINUX_MOS_H */

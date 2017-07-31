@@ -595,8 +595,6 @@ void prep_compound_page(struct page *page, unsigned int order)
 	__SetPageHead(page);
 	for (i = 1; i < nr_pages; i++) {
 		struct page *p = page + i;
-		if (is_lwkpg(page))
-			lwkmem_page_init(p);
 		set_page_count(p, 0);
 		p->mapping = TAIL_MAPPING;
 		set_compound_head(p, page);
@@ -6065,6 +6063,21 @@ static unsigned long __init early_calculate_totalpages(void)
 }
 
 /*
+ * Calculates the total memory in terms of pages on a specified
+ * node
+ */
+static unsigned long __init calculate_totalpages(int nid)
+{
+	unsigned long totalpages = 0;
+	unsigned long start_pfn, end_pfn;
+	int i;
+
+	for_each_mem_pfn_range(i, nid, &start_pfn, &end_pfn, NULL)
+		totalpages += end_pfn - start_pfn;
+	return totalpages;
+}
+
+/*
  * Find the PFN the Movable zone begins in each node. Kernel memory
  * is spread evenly between nodes as long as the nodes have enough
  * memory. When they don't, some nodes will have more kernelcore than
@@ -6080,20 +6093,24 @@ static void __init find_zone_movable_pfns_for_nodes(void)
 	unsigned long totalpages = early_calculate_totalpages();
 	int usable_nodes = nodes_weight(node_states[N_MEMORY]);
 	struct memblock_region *r;
+	nodemask_t hotpluggable_nodes;
+	unsigned long movable_node_pages = 0;
 
 	/* Need to find movable_zone earlier when movable_node is specified. */
 	find_usable_zone_for_movable();
 
 	/*
 	 * If movable_node is specified, ignore kernelcore and movablecore
-	 * options.
+	 * options on hotpluggable nodes.
 	 */
+	nodes_clear(hotpluggable_nodes);
 	if (movable_node_is_enabled()) {
 		for_each_memblock(memory, r) {
 			if (!memblock_is_hotpluggable(r))
 				continue;
 
 			nid = r->nid;
+			node_set(nid, hotpluggable_nodes);
 
 			usable_startpfn = PFN_DOWN(r->base);
 			zone_movable_pfn[nid] = zone_movable_pfn[nid] ?
@@ -6101,6 +6118,16 @@ static void __init find_zone_movable_pfns_for_nodes(void)
 				usable_startpfn;
 		}
 
+		if (required_kernelcore || required_movablecore) {
+			for_each_node_mask(nid, hotpluggable_nodes)
+				movable_node_pages += calculate_totalpages(nid);
+			usable_nodes -= nodes_weight(hotpluggable_nodes);
+			if (usable_nodes > 0 &&
+				totalpages > movable_node_pages) {
+				totalpages -= movable_node_pages;
+				goto core_options;
+			}
+		}
 		goto out2;
 	}
 
@@ -6134,6 +6161,7 @@ static void __init find_zone_movable_pfns_for_nodes(void)
 		goto out2;
 	}
 
+core_options:
 	/*
 	 * If movablecore=nn[KMG] was specified, calculate what size of
 	 * kernelcore that corresponds so that memory usable for
@@ -6145,6 +6173,12 @@ static void __init find_zone_movable_pfns_for_nodes(void)
 	if (required_movablecore) {
 		unsigned long corepages;
 
+		if (movable_node_is_enabled()) {
+			if (required_movablecore > movable_node_pages)
+				required_movablecore -= movable_node_pages;
+			else
+				goto out2;
+		}
 		/*
 		 * Round-up so that ZONE_MOVABLE is at least as large as what
 		 * was requested by the user
@@ -6173,6 +6207,9 @@ restart:
 	for_each_node_state(nid, N_MEMORY) {
 		unsigned long start_pfn, end_pfn;
 
+		/* Skip hotpluggable nodes if movable_node is specified */
+		if (node_isset(nid, hotpluggable_nodes))
+			continue;
 		/*
 		 * Recalculate kernelcore_node if the division per node
 		 * now exceeds what is necessary to satisfy the requested
