@@ -113,7 +113,9 @@ extern int lwkmem_set_domain_info(struct mos_process_t *mos_p,
 	       size_t n) __attribute__((weak));
 
 /* Needed by LWKCTL module to trigger the creation of default LWK partition */
-extern int lwk_config_lwkcpus(char *parm_value, char *profile);
+extern int lwk_config_lwkcpus(char *param_value, char *profile);
+extern int lwk_config_lwkmem(char *param_value);
+
 /*
  * Function exposed by LWK control to trigger the creation of default LWK part-
  * -ition as specified in Linux command line. This function is called from
@@ -143,6 +145,7 @@ extern int do_cpu_down(unsigned int cpu, enum cpuhp_state target);
 
 #else
 static inline int lwk_config_lwkcpus(char *parm_value, char *p) { return -1; }
+static inline int lwk_config_lwkmem(char *parm_value) { return -1; }
 static inline void lwkctl_def_partition(void) {}
 #endif /* CONFIG_MOS_FOR_HPC */
 #endif /* _LINUX_MOS_H */

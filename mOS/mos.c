@@ -1,6 +1,6 @@
 /*
  * Multi Operating System (mOS)
- * Copyright (c) 2016, Intel Corporation.
+ * Copyright (c) 2016-2017 Intel Corporation.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -1006,49 +1006,6 @@ static ssize_t lwkmem_domain_info_store(struct kobject *kobj,
 }
 
 /*
- * Helper function used to create or destroy an LWK partition
- *
- * @lwkcpus, LWK CPUs in the new partition or an existing partition
- *           that needs to be destroyed.
- * @create,  true for creating new partition
- *           false for destroying an existing partition
- *
- * @return,  0 on success
- *           -ve value on failure
- */
-static int lwk_partition_cpus(cpumask_var_t lwkcpus, bool create)
-{
-	struct lwkctrl_partition p;
-	int rc = -1;
-
-	if (!zalloc_cpumask_var(&p.lwkcpus, GFP_KERNEL)) {
-		pr_err("%s: (!) Failed to allocate cpu mask\n",
-			__func__);
-		goto out;
-	}
-
-	if (cpumask_weight(lwkcpus)) {
-		cpumask_copy(p.lwkcpus, lwkcpus);
-
-		if (create)
-			rc = lwkctrl_partition_create(&p);
-		else
-			rc = lwkctrl_partition_destroy(&p);
-
-		if (rc) {
-			pr_err("%s: (!) Failed to %s LWK partition\n",
-				__func__,
-				create ? "create" : "destroy");
-			goto out;
-		}
-	}
-	rc = 0;
-out:
-	free_cpumask_var(p.lwkcpus);
-	return rc;
-}
-
-/*
  * The specifed LWK CPUs should be in the Linux off-line state when called
  *
  * example input string:
@@ -1057,7 +1014,7 @@ out:
  *		for LWK CPUS 2,3,4,5,6,7,9 and CPU 10 will be the target
  *		for LWK CPUS 10,11,13,14
  */
-int lwk_config_lwkcpus(char *parm_value, char *lwkcpu_profile)
+int lwk_config_lwkcpus(char *param_value, char *lwkcpu_profile)
 {
 	cpumask_var_t to;
 	cpumask_var_t from;
@@ -1068,19 +1025,21 @@ int lwk_config_lwkcpus(char *parm_value, char *lwkcpu_profile)
 	char *s_to, *s_from;
 	int rc = -1;
 	bool return_cpus;
-	char *mutable_parm = kstrdup(parm_value, GFP_KERNEL);
+	char *mutable_param_start, *mutable_param;
 
-	if (!mutable_parm) {
-		pr_warn("Failure duplicating CPU parm_value string in %s.\n",
+	mutable_param_start = mutable_param = kstrdup(param_value, GFP_KERNEL);
+
+	if (!mutable_param) {
+		pr_warn("Failure duplicating CPU param_value string in %s.\n",
 				__func__);
 		return rc;
 	}
 
-	return_cpus = (parm_value[0] == '\0') ? 1 : 0;
+	return_cpus = (param_value[0] == '\0') ? 1 : 0;
 
 	if (!cpumask_empty(lwkcpus_map) && !return_cpus) {
 		pr_err("Attempt to modify existing LWKCPU configuration. Not supported.\n");
-		kfree(mutable_parm);
+		kfree(mutable_param_start);
 		return rc;
 	}
 
@@ -1090,7 +1049,7 @@ int lwk_config_lwkcpus(char *parm_value, char *lwkcpu_profile)
 	    !zalloc_cpumask_var(&new_lwkcpus, GFP_KERNEL)) {
 
 		pr_warn("Could not allocate cpumasks.\n");
-		kfree(mutable_parm);
+		kfree(mutable_param_start);
 		return rc;
 	}
 
@@ -1112,10 +1071,10 @@ int lwk_config_lwkcpus(char *parm_value, char *lwkcpu_profile)
 
 	} else {
 
-		while ((s_to = strsep(&mutable_parm, ":"))) {
+		while ((s_to = strsep(&mutable_param, ":"))) {
 			if (!(s_from = strchr(s_to, '.'))) {
 				pr_warn("Invalid syntax pairing lwk to syscall CPUs. Value=%s\n",
-						parm_value);
+						param_value);
 				goto out;
 			}
 			*(s_from++) = '\0';
@@ -1158,8 +1117,7 @@ int lwk_config_lwkcpus(char *parm_value, char *lwkcpu_profile)
 		cpumask_copy(per_cpu_ptr(&lwkcpus_mask, cpu), new_lwkcpus);
 
 	if (!cpumask_empty(back_to_linux)) {
-		rc = lwk_partition_cpus(back_to_linux, false);
-
+		rc = lwkcpu_partition_destroy(back_to_linux);
 		if (!rc)
 			lwkcpu_state_deinit();
 	}
@@ -1180,7 +1138,7 @@ int lwk_config_lwkcpus(char *parm_value, char *lwkcpu_profile)
 				pr_warn("Failed to set LWKCPU profile: %s\n",
 					LWKCPU_PROF_NOR);
 
-		rc = lwk_partition_cpus(new_lwkcpus, true);
+		rc = lwkcpu_partition_create(new_lwkcpus);
 	}
 
 	if (rc)
@@ -1201,7 +1159,22 @@ out:
 	free_cpumask_var(from);
 	free_cpumask_var(new_lwkcpus);
 	free_cpumask_var(back_to_linux);
-	kfree(mutable_parm);
+	kfree(mutable_param_start);
+	return rc;
+}
+
+int lwk_config_lwkmem(char *param_value)
+{
+	int rc = -EINVAL;
+
+	if (lwkmem_static_enabled)
+		goto out;
+
+	if (param_value[0] == '\0')
+		rc = lwkmem_partition_destroy();
+	else
+		rc = lwkmem_partition_create(param_value);
+out:
 	return rc;
 }
 
@@ -1210,13 +1183,15 @@ static ssize_t lwk_config_store(struct kobject *kobj,
 				const char *buff, size_t count)
 {
 	ssize_t rc = -EINVAL;
-	char *tmp, *s_keyword, *s_value;
-	char *lwkcpus, *lwkcpu_profile;
+	char *tmp, *tmp_start, *s_keyword, *s_value;
+	char *lwkcpus, *lwkcpu_profile, *lwkmem;
+	bool delete_lwkcpu, delete_lwkmem;
 
-	lwkcpus = lwkcpu_profile = NULL;
+	lwkcpus = lwkcpu_profile = lwkmem = NULL;
+	delete_lwkcpu = delete_lwkmem = false;
 	mutex_lock(&mos_sysfs_mutex);
 
-	tmp = kstrdup(buff, GFP_KERNEL);
+	tmp_start = tmp = kstrdup(buff, GFP_KERNEL);
 	if (!tmp)
 		goto out;
 
@@ -1231,35 +1206,130 @@ static ssize_t lwk_config_store(struct kobject *kobj,
 			*s_value = '\0';
 		if (strcmp(s_keyword, "lwkcpus") == 0) {
 			kfree(lwkcpus);
+			strreplace(s_value, '\n', '\0');
 			lwkcpus = kstrdup(s_value, GFP_KERNEL);
 			if (!lwkcpus)
 				goto out;
+			delete_lwkcpu = lwkcpus[0] == '\0';
 		} else if (!strcmp(s_keyword, "lwkcpu_profile")) {
 			kfree(lwkcpu_profile);
 			strreplace(s_value, '\n', '\0');
 			lwkcpu_profile = kstrdup(s_value, GFP_KERNEL);
 			if (!lwkcpu_profile)
 				goto out;
+		} else if (!strcmp(s_keyword, "lwkmem")) {
+			kfree(lwkmem);
+			strreplace(s_value, '\n', '\0');
+			lwkmem = kstrdup(s_value, GFP_KERNEL);
+			if (!lwkmem)
+				goto out;
+			delete_lwkmem = lwkmem[0] == '\0';
 		} else {
 			pr_warn("Unsupported keyword: %s was ignored.\n",
 				s_keyword);
 		}
 	}
 
-	if (lwkcpus) {
-		if (lwk_config_lwkcpus(lwkcpus, lwkcpu_profile) < 0) {
-			pr_warn("Failure processing keyword: lwkcpus=%s\n",
-				lwkcpus);
+	if (lwkcpus && lwkmem && !lwkmem_static_enabled) {
+		if (delete_lwkcpu != delete_lwkmem) {
+			pr_err("Can not create %s and delete %s partition\n",
+				delete_lwkcpu ? "LWKMEM":"LWKCPU",
+				delete_lwkcpu ? "LWKCPU":"LWKMEM");
 			goto out;
 		}
+
+		if (delete_lwkcpu) {
+			if (lwk_config_lwkcpus(lwkcpus, lwkcpu_profile) < 0) {
+				pr_warn("Failure processing: lwkcpus=%s\n",
+					lwkcpus);
+				goto out;
+			}
+			if (lwk_config_lwkmem(lwkmem) < 0) {
+				pr_warn("Failure processing: lwkmem=%s\n",
+					lwkmem);
+				goto out;
+			}
+		} else {
+			if (lwk_config_lwkmem(lwkmem) < 0) {
+				pr_warn("Failure processing: lwkmem=%s\n",
+					lwkmem);
+				goto out;
+			}
+			if (lwk_config_lwkcpus(lwkcpus, lwkcpu_profile) < 0) {
+				pr_warn("Failure processing: lwkcpus=%s\n",
+					lwkcpus);
+				goto out;
+			}
+		}
+		/* Update LWKCPU and LWKCPU profile specs */
 		snprintf(lwkctrl_cpus_spec, LWKCTRL_CPUS_SPECSZ,
 			 "%s", lwkcpus);
+
+		if (delete_lwkcpu)
+			lwkctrl_cpu_profile_spec[0] = '\0';
+		else {
+			if (lwkcpu_profile &&
+			    strcmp(lwkcpu_profile, LWKCPU_PROF_NOR) &&
+			    strcmp(lwkcpu_profile, LWKCPU_PROF_DBG)) {
+				snprintf(lwkctrl_cpu_profile_spec,
+					LWKCTRL_CPU_PROFILE_SPECSZ, "%s",
+					LWKCPU_PROF_NOR);
+			} else {
+				snprintf(lwkctrl_cpu_profile_spec,
+					LWKCTRL_CPU_PROFILE_SPECSZ, "%s",
+					lwkcpu_profile ?
+					lwkcpu_profile : LWKCPU_PROF_NOR);
+			}
+		}
+		rc = count;
+	} else {
+		if (!lwkmem_static_enabled) {
+			pr_err("Can not execute %s specification alone\n",
+				lwkcpus ? "LWKCPU":"LWKMEM");
+			goto out;
+		}
+
+		if (lwkcpus) {
+			if (lwk_config_lwkcpus(lwkcpus, lwkcpu_profile) < 0) {
+				pr_warn("Failure processing: lwkcpus=%s\n",
+					lwkcpus);
+				goto out;
+			}
+			/* Update LWKCPU and LWKCPU profile specs */
+			snprintf(lwkctrl_cpus_spec, LWKCTRL_CPUS_SPECSZ,
+				 "%s", lwkcpus);
+
+			if (delete_lwkcpu)
+				lwkctrl_cpu_profile_spec[0] = '\0';
+			else {
+				if (lwkcpu_profile &&
+				    strcmp(lwkcpu_profile, LWKCPU_PROF_NOR) &&
+				    strcmp(lwkcpu_profile, LWKCPU_PROF_DBG)) {
+					snprintf(lwkctrl_cpu_profile_spec,
+						LWKCTRL_CPU_PROFILE_SPECSZ,
+						"%s", LWKCPU_PROF_NOR);
+				} else {
+					snprintf(lwkctrl_cpu_profile_spec,
+						LWKCTRL_CPU_PROFILE_SPECSZ,
+						"%s", lwkcpu_profile ?
+						lwkcpu_profile :
+						LWKCPU_PROF_NOR);
+				}
+			}
+			rc = count;
+		}
+
+		if (lwkmem) {
+			pr_err("LWKMEM partition is static!\n");
+			pr_err("can not create lwkmem=%s\n", lwkmem);
+			rc = lwkcpus ? rc : -EINVAL;
+		}
 	}
-	rc = count;
 out:
 	kfree(lwkcpus);
 	kfree(lwkcpu_profile);
-	kfree(tmp);
+	kfree(lwkmem);
+	kfree(tmp_start);
 	mutex_unlock(&mos_sysfs_mutex);
 	return rc;
 }
@@ -1276,7 +1346,7 @@ static ssize_t lwk_config_show(struct kobject *kobj,
 	bytes_written = scnprintf(cur_buff, buffsize,
 				  "lwkcpus=%s lwkcpu_profile=%s lwkmem=%s\n",
 				  lwkctrl_cpus_spec, lwkctrl_cpu_profile_spec,
-				  lwkctrl_mem_spec);
+				  lwkmem_get_spec());
 	mutex_unlock(&mos_sysfs_mutex);
 	return bytes_written;
 }
