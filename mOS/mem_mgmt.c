@@ -26,13 +26,16 @@
 #include <linux/rmap.h>
 #include <linux/pkeys.h>
 #include <linux/hugetlb.h>
+#include <linux/memory.h>
 #include <asm/setup.h>
 #include "lwkmem.h"
+#include "lwkctrl.h"
 #include "../mm/internal.h"
 
 #undef pr_fmt
 #define pr_fmt(fmt)	"mOS-mem: " fmt
 #define STRBUF_LEN		(256)
+#define kaddr_to_pfn(va)	(__pa(va) >> PAGE_SHIFT)
 
 int lwkmem_debug;
 static size_t lwkmem_n_nodes;
@@ -71,6 +74,29 @@ static const char * const lwkmem_site_str[lwkmem_site_last] = {
 	"mmap", "brk", "static", "stack"
 };
 
+static inline void lwkmem_page_init(struct page *p)
+{
+	SetPagePrivate(p);
+	set_bit(PG_writeback, &p->flags);
+	SetPageActive(p);
+	SetPageUnevictable(p);
+	SetPageMlocked(p);
+	p->private = _LWKPG;
+	init_page_count(p);
+}
+
+static inline void lwkmem_page_deinit(struct page *p)
+{
+	ClearPagePrivate(p);
+	clear_bit(PG_writeback, &p->flags);
+	ClearPageActive(p);
+	ClearPageUnevictable(p);
+	ClearPageMlocked(p);
+	p->private = 0;
+	page_mapcount_reset(p);
+	p->mapping = NULL;
+	p->index = 0;
+}
 
 static const char *lwkmem_name(struct vm_area_struct *vma)
 {
@@ -374,6 +400,16 @@ static int __init mos_lwkmem_setup(char *s)
 	static char tmp[COMMAND_LINE_SIZE] __initdata;
 
 	total_designated = total_requested = failures = 0;
+
+	/* If the mOS memory partitioning is not static then we just record the
+	 * lwkmem specification in lwkctrl and use it later during the default
+	 * boot partition creation.
+	 *
+	 * For legacy static memory partitioning we proceed to use memblock
+	 * reserved memory for LWKMEM.
+	 */
+	if (!lwkmem_static_enabled)
+		return 0;
 
 	/* Determine the number of NUMA domains. */
 	for_each_online_node(nid)
@@ -842,6 +878,143 @@ invalid:
 	return -EINVAL;
 }
 
+void insert_granule(struct mos_lwk_mem_granule *g, struct list_head *head)
+{
+	struct mos_lwk_mem_granule *e;
+
+	list_for_each_entry(e, head, list) {
+		if ((g->base + g->length) < e->base)
+			break;
+	}
+	list_add_tail(&g->list, head);
+}
+
+static unsigned long lwkmem_get_dynamic_memory(int nid, unsigned long size,
+					       struct list_head *head)
+{
+	int rc;
+	unsigned long flags, nr_pages;
+	unsigned long total_size, block_size;
+	unsigned long start_pfn, end_pfn, pfn, pfn_next;
+
+	struct page *page;
+	struct list_head blk_list;
+	struct mos_lwk_mem_granule *curr, *next;
+	pg_data_t *pgdat = NODE_DATA(nid);
+	struct zone *zone_movable = pgdat->node_zones + ZONE_MOVABLE;
+
+	INIT_LIST_HEAD(&blk_list);
+	total_size = 0;
+
+	lock_device_hotplug();
+	mem_hotplug_begin();
+
+	if (!node_online(nid))
+		goto out;
+
+	/* Create a list of contig physical memory ranges that we can offline */
+	spin_lock_irqsave(&zone_movable->lock, flags);
+	if (zone_is_empty(zone_movable)) {
+		pr_warn("Node %d: No ZONE_MOVABLE memory! can't have LWKMEM\n",
+			nid);
+		spin_unlock_irqrestore(&zone_movable->lock, flags);
+		goto out;
+	}
+
+	/* Find the start and end of movable region on this node */
+	start_pfn = zone_movable->zone_start_pfn;
+	end_pfn = zone_end_pfn(zone_movable);
+	start_pfn = SECTION_ALIGN_UP(start_pfn);
+	end_pfn = SECTION_ALIGN_DOWN(end_pfn);
+
+	while (start_pfn < end_pfn && total_size < size) {
+		/* Get the next available contiguous region */
+		block_size = 0;
+		pfn = start_pfn = SECTION_ALIGN_UP(start_pfn);
+		while (pfn < end_pfn) {
+			page = pfn_to_page(pfn);
+			if (!pfn_present(pfn) || !pfn_valid(pfn) ||
+			     PageReserved(page)) {
+				if (pfn == start_pfn) {
+					start_pfn++;
+					start_pfn = SECTION_ALIGN_UP(start_pfn);
+					pfn = start_pfn;
+					continue;
+				}
+				break;
+			}
+			block_size += PAGE_SIZE;
+			pfn++;
+			if ((total_size + block_size) >= size)
+				break;
+		}
+		pfn_next = pfn + 1;
+
+		if (!IS_ALIGNED(pfn, PAGES_PER_SECTION)) {
+			pfn = SECTION_ALIGN_DOWN(pfn);
+			if (pfn <= start_pfn) {
+				start_pfn = pfn_next;
+				continue;
+			}
+			block_size = (pfn - start_pfn) * PAGE_SIZE;
+		}
+
+		if (likely(block_size >= MIN_CHUNK_SIZE)) {
+			curr = kmalloc(sizeof(struct mos_lwk_mem_granule),
+				       GFP_KERNEL);
+			if (!curr) {
+				spin_unlock_irqrestore(&zone_movable->lock,
+						       flags);
+				goto out;
+			}
+			curr->base = pfn_to_kaddr(start_pfn);
+			curr->owner = -1;
+			curr->length = block_size;
+			curr->nid = nid;
+			list_add_tail(&curr->list, &blk_list);
+			total_size += block_size;
+			pr_info("Node %d: va 0x%p pa 0x%lx pfn %ld-%ld : %ld\n",
+				nid, curr->base, __pa(curr->base), start_pfn,
+				pfn - 1,  pfn - start_pfn);
+		}
+		start_pfn = pfn_next;
+	}
+	spin_unlock_irqrestore(&zone_movable->lock, flags);
+
+	/* Offline pages and add the granule to the requested list_head */
+	list_for_each_entry_safe(curr, next, &blk_list, list) {
+		start_pfn = kaddr_to_pfn(curr->base);
+		nr_pages = curr->length / PAGE_SIZE;
+		pr_info("Node %d: offlining va 0x%p pa 0x%lx pfn %ld-%ld:%ld\n",
+			nid, curr->base, __pa(curr->base), start_pfn,
+			start_pfn + nr_pages - 1, nr_pages);
+		rc = offline_pages(start_pfn, nr_pages);
+		if (rc) {
+			pr_err("Node %d: offline va 0x%p pages %ld: rc %d\n",
+				nid, curr->base, nr_pages, rc);
+			total_size -= curr->length;
+		} else {
+			while (nr_pages--) {
+				lwkmem_page_init(pfn_to_page(start_pfn));
+				start_pfn++;
+			}
+			memzero_explicit(curr->base, curr->length);
+			list_del(&curr->list);
+			insert_granule(curr, head);
+		}
+	}
+out:
+	/* Free up the list entries which could not be offlined */
+	list_for_each_entry_safe(curr, next, &blk_list, list) {
+		list_del(&curr->list);
+		kfree(curr);
+	}
+
+	mem_hotplug_done();
+	unlock_device_hotplug();
+	return total_size;
+}
+
 /*
  * Later during boot, gather all of the memory granules into a
  * consolidated list.  The list meta data is migrated from the
@@ -891,7 +1064,123 @@ static int __init mos_collect_bootmem(void)
 		/* Clear the granule */
 		memzero_explicit(g->base, g->length);
 	}
+	return 0;
 
+collect_err:
+	return -ENOMEM;
+
+} /* end of mos_collect_bootmem() */
+
+int mos_mem_init(nodemask_t *nodes, resource_size_t *requests)
+{
+	int n;
+	resource_size_t sz, sz_req, sz_alloc, sz_dist;
+	nodemask_t mask;
+
+	sz_req = 0;
+	sz_alloc = 0;
+
+	if (lwkmem_static_enabled)
+		return -EINVAL;
+
+	pr_info("Initializing memory management\n");
+	lwkmem_n_nodes = 0;
+	nodes_clear(mask);
+	nodes_or(mask, mask, *nodes);
+
+	WARN(!list_empty(&mos_lwk_memory_list),
+	     "LWK memory list is not empty");
+
+	for_each_node_mask(n, *nodes) {
+		node_clear(n, mask);
+		if (!requests[n]) {
+			node_clear(n, *nodes);
+			continue;
+		}
+		if (LWKMEM_DEBUG) {
+			pr_info("Node %d: Requesting %lld MB\n",
+				n, requests[n] >> 20);
+		}
+		sz = lwkmem_get_dynamic_memory(n, requests[n],
+					       &mos_lwk_memory_list);
+		pr_info("Node %d: Requested %lld MB Allocated %lld MB\n",
+			n, requests[n] >> 20, sz >> 20);
+		if (sz != requests[n]) {
+			sz_dist = requests[n] - sz;
+			pr_info("Unallocated %lld bytes req to node(s):%*pbl\n",
+				sz_dist, nodemask_pr_args(&mask));
+			if (lwkmem_distribute_request(sz_dist, &mask,
+						      requests)) {
+				pr_err("Could not distribute req %lld bytes!\n",
+					sz_dist);
+				sz_req += sz_dist;
+			}
+			/* Update request with what is actually allocated */
+			requests[n] = sz;
+		}
+
+		if (sz && ((n + 1) > lwkmem_n_nodes))
+			lwkmem_n_nodes = n + 1;
+
+		sz_alloc += sz;
+		sz_req += requests[n];
+
+		/* Clear the node bit on which we could not allocate */
+		if (!sz)
+			node_clear(n, *nodes);
+	}
+	if (sz_alloc != sz_req)
+		pr_warn("Could not allocate all requested memory\n");
+
+	pr_warn("Requested %lld MB Allocated %lld MB\n",
+		sz_req >> 20, sz_alloc >> 20);
+
+	return sz_alloc ? 0 : -ENOMEM;
+}
+
+int mos_mem_free(void)
+{
+	struct mos_lwk_mem_granule *curr, *next;
+	unsigned long start_pfn, nr_pages, i;
+
+	if (lwkmem_static_enabled)
+		return -EINVAL;
+
+	pr_info("Returning memory back to Linux\n");
+	lock_device_hotplug();
+	mem_hotplug_begin();
+	list_for_each_entry_safe(curr, next, &mos_lwk_memory_list, list) {
+		if (curr->owner != -1) {
+			pr_warn("Freeing block in use(!):  ");
+			pr_warn("\t[%pK-%pK], 0x%llx bytes, owner %d nid %d\n",
+				curr->base, curr->base + curr->length - 1,
+				curr->length, curr->owner, curr->nid);
+		}
+		list_del(&curr->list);
+
+		nr_pages = curr->length / PAGE_SIZE;
+		start_pfn = kaddr_to_pfn(curr->base);
+
+		for (i = 0 ; i < nr_pages; i++)
+			lwkmem_page_deinit(pfn_to_page(start_pfn + i));
+
+		pr_info("Node %d: onlining va 0x%p pa 0x%lx pfn %ld-%ld :%ld\n",
+			curr->nid, curr->base, __pa(curr->base), start_pfn,
+			start_pfn + nr_pages - 1,  nr_pages);
+		if (online_pages(start_pfn, nr_pages, MMOP_ONLINE_KEEP)) {
+			pr_err("Node %d: online va 0x%p pages %lu failed!\n",
+			       curr->nid, curr->base, nr_pages);
+		}
+		kfree(curr);
+	}
+	mem_hotplug_done();
+	unlock_device_hotplug();
+	pr_info("Exiting memory management\n");
+	return 0;
+}
+
+static void mos_register_lwkmem_callbacks(void)
+{
 	mos_register_process_callbacks(&lwkmem_callbacks);
 
 	mos_register_option_callback("lwkmem-brk-disable",
@@ -916,15 +1205,16 @@ static int __init mos_collect_bootmem(void)
 				     lwkmem_interleave_cb);
 	mos_register_option_callback("lwkmem-init",
 				     lwkmem_init_cb);
+}
 
+static int __init __mos_collect_bootmem(void)
+{
+	if (lwkmem_static_enabled)
+		mos_collect_bootmem();
+	mos_register_lwkmem_callbacks();
 	return 0;
-
-collect_err:
-	return -ENOMEM;
-
-} /* end of mos_collect_bootmem() */
-
-subsys_initcall(mos_collect_bootmem);
+}
+subsys_initcall(__mos_collect_bootmem);
 
 void list_vmas(struct mm_struct *mm)
 {
@@ -1687,6 +1977,7 @@ static int build_pagetbl(enum lwkmem_kind_t knd, struct vm_area_struct *vma,
 			 unsigned long phys, unsigned long addr,
 			 unsigned long end, unsigned int stride)
 {
+	unsigned long i, nr_pages;
 	struct mm_struct *mm = current->mm;
 	int rc = 0;
 
@@ -1735,12 +2026,15 @@ static int build_pagetbl(enum lwkmem_kind_t knd, struct vm_area_struct *vma,
 
 			/* Initialize pages and add mapping. */
 			p = pud_page(entry);
-			lwkmem_page_init(p);
 			prep_compound_page(p, PUD_SHIFT-PMD_SHIFT);
 			prep_transhuge_page(p);
-			page_add_new_anon_rmap(p, vma, addr & PUD_MASK, true);
+			page_add_new_anon_rmap(p, vma, addr & PUD_MASK,
+				true);
 			ClearPageSwapBacked(p);
-			init_page_count(p);
+
+			nr_pages = 1 << (PUD_SHIFT - PMD_SHIFT);
+			for (i = 0; i < nr_pages; i++)
+				lwkmem_page_init(p + i);
 
 			spin_unlock(ptl);
 
@@ -1772,13 +2066,17 @@ static int build_pagetbl(enum lwkmem_kind_t knd, struct vm_area_struct *vma,
 
 			/* Initialize pages and add mapping. */
 			p = pmd_page(entry);
-			lwkmem_page_init(p);
+
 			prep_compound_page(p, HPAGE_PMD_ORDER);
 			prep_transhuge_page(p);
-			page_add_new_anon_rmap(p, vma, addr & HPAGE_PMD_MASK,
-					       true);
+			page_add_new_anon_rmap(p, vma,
+				addr & HPAGE_PMD_MASK,
+				true);
 			ClearPageSwapBacked(p);
-			init_page_count(p);
+
+			nr_pages = 1 << HPAGE_PMD_ORDER;
+			for (i = 0; i < nr_pages; i++)
+				lwkmem_page_init(p + i);
 
 			spin_unlock(ptl);
 		} else if (knd == kind_4k) {
@@ -1815,11 +2113,9 @@ static int build_pagetbl(enum lwkmem_kind_t knd, struct vm_area_struct *vma,
 			p = pte_page(entry);
 			ClearPageHead(p);
 			p->compound_head &= ~1; /* Ensure not a tail page */
-			lwkmem_page_init(p);
 			page_add_new_anon_rmap(p, vma, addr, false);
 			ClearPageSwapBacked(p);
-			init_page_count(p);
-
+			lwkmem_page_init(p);
 			pte_unmap_unlock(pte, ptl);
 		} else {
 			pr_err("Other page sizes not supported yet!\n");
