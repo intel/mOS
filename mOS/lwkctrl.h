@@ -1,6 +1,6 @@
 /*
  * Multi Operating System (mOS)
- * Copyright (c) 2016, Intel Corporation.
+ * Copyright (c) 2016-2017 Intel Corporation.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -17,25 +17,20 @@
 
 #include <asm/setup.h>
 #include <linux/cpumask.h>
+#include <linux/nodemask.h>
 
 #define LWKCTRL_CPUS_SPECSZ		COMMAND_LINE_SIZE
 #define LWKCTRL_MEM_SPECSZ		256
 #define LWKCTRL_CPU_PROFILE_SPECSZ	64
 
-/*
- * Describes the LWK partition
- * @lwkcpus, CPU mask of cpus that need to be taken out from Linux
- *           and allocated to LWK
- */
-struct lwkctrl_partition {
-	cpumask_var_t lwkcpus;
-};
-
-extern int lwkctrl_partition_create(struct lwkctrl_partition *p);
-extern int lwkctrl_partition_destroy(struct lwkctrl_partition *p);
+extern int lwkcpu_partition_create(cpumask_var_t lwkcpu_req);
+extern int lwkcpu_partition_destroy(cpumask_var_t lwkcpu_req);
+extern int lwkmem_partition_create(char *spec);
+extern int lwkmem_partition_destroy(void);
+extern char *lwkmem_get_spec(void);
+extern int lwkmem_distribute_request(resource_size_t req, nodemask_t *mask,
+		resource_size_t *node_size);
 extern char lwkctrl_cpus_spec[LWKCTRL_CPUS_SPECSZ];
 extern char lwkctrl_cpu_profile_spec[LWKCTRL_CPU_PROFILE_SPECSZ];
-extern char lwkctrl_mem_spec[LWKCTRL_MEM_SPECSZ];
-
+extern bool lwkmem_static_enabled;
 #endif
-
