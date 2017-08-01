@@ -364,7 +364,7 @@ static int lwkctl_delete(char *p)
 		goto out;
 	}
 
-	rc = __lwkctl_delete("lwkcpus=");
+	rc = __lwkctl_delete("lwkcpus= lwkmem=");
 	if (!rc) {
 		char *s_cpus;
 
@@ -456,9 +456,6 @@ static int lwkctl_create(char *p)
 			}
 			found_valid_lwkcpus = true;
 		}
-
-		if (!strcmp(s_key, "lwkmem"))
-			LC_NOT_IMPL("memory partitioning");
 	}
 
 	if (!found_valid_lwkcpus) {
@@ -482,6 +479,17 @@ static int lwkctl_create(char *p)
 		goto out;
 	}
 
+	/*
+	 * We only need to check if LWKCPU partition exists, because LWKMEM
+	 * partition can't exist alone when the kernel is booted with dynamic
+	 * LWKMEM partitioning support enabled. When booted with static LWKMEM
+	 * partitioning,
+	 *   - its an error to only specify 'lwkmem=' specification and in any
+	 *     case such an attempt will be caught well before we get here.
+	 *   - if 'lwkmem=' specification is provided along with 'lwkcpus='
+	 *     specification then kernel processes only 'lwkcpus=' with a
+	 *     warning that indicates 'lwkmem=' was ignored.
+	 */
 	if (!mos_cpuset_is_empty(cs)) {
 		mos_cpuset_not(tmp_cs, lwkcpus);
 		mos_cpuset_and(cs, cs, tmp_cs);
@@ -495,7 +503,7 @@ static int lwkctl_create(char *p)
 			}
 		}
 
-		rc = __lwkctl_delete("lwkcpus=");
+		rc = __lwkctl_delete("lwkcpus= lwkmem=");
 
 		if (rc) {
 			lwkctl_abort(-EINVAL,
