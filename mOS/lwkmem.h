@@ -1,6 +1,6 @@
 /*
  * Multi Operating System (mOS)
- * Copyright (c) 2016, Intel Corporation.
+ * Copyright (c) 2016 - 2017, Intel Corporation.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -85,34 +85,36 @@ struct allocate_options_t {
 	int64_t max_page_size;
 
 	int64_t (*blocks_wanted)(int64_t len, int64_t *wanted,
-			      struct allocate_options_t *opts);
+			struct allocate_options_t *opts);
 
 	struct blk_list *(*find_available)(enum lwkmem_kind_t knd,
-					   struct allocate_options_t *opts);
+			struct allocate_options_t *opts);
 
 	struct blk_list *(*divide_block)(enum lwkmem_kind_t knd,
-					 struct allocate_options_t *opts);
+			struct allocate_options_t *opts);
 
 	long (*allocate_blocks)(unsigned long addr, int64_t len,
-			     unsigned long prot, unsigned long mmap_flags,
-			     unsigned long pgoff, struct allocate_options_t *);
+			unsigned long prot, unsigned long mmap_flags,
+			unsigned long pgoff, struct allocate_options_t *);
 
 };
 
 
 struct allocate_options_t *allocate_options_factory(enum allocate_site_t,
-			    unsigned long addr, unsigned long flags,
-			    struct mos_process_t *);
+			unsigned long addr, unsigned long flags,
+			struct mos_process_t *);
 
 extern unsigned long allocate_blocks_fixed(unsigned long addr,
-			   unsigned long len, unsigned long prot,
-			   unsigned long mmap_flags, enum allocate_site_t site);
+			unsigned long len, unsigned long prot,
+			unsigned long mmap_flags, enum allocate_site_t site);
 
 extern unsigned long next_lwkmem_address(unsigned long len,
-					 struct mos_process_t *mosp);
+			struct mos_process_t *mosp);
 
 extern long deallocate_blocks(unsigned long addr, unsigned long len,
-			      struct mos_process_t *mosp,
-			      struct mm_struct *mm);
+			struct mos_process_t *mosp,
+			struct mm_struct *mm);
+
+extern unsigned long block_size_virt(struct blk_list *b, enum lwkmem_kind_t k);
 
 #endif /* _LWKMEM_H_ */
