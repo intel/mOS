@@ -340,6 +340,7 @@
 331	common	pkey_free		sys_pkey_free
 
 # mOS system calls
+510	64	mos_get_addr_info	sys_mos_get_addr_info
 511	64	mos_set_clone_attr	sys_mos_set_clone_attr
 # end of mOS system calls
 
