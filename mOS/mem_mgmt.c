@@ -1,6 +1,6 @@
 /*
  * Multi Operating System (mOS)
- * Copyright (c) 2016, Intel Corporation.
+ * Copyright (c) 2016 - 2017, Intel Corporation.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -128,7 +128,7 @@ int lwkmem_index_of(const char *s, const char * const lst[], const size_t len,
 	return -1;
 }
 
-static unsigned long block_size_virt(struct blk_list *b, enum lwkmem_kind_t k)
+unsigned long block_size_virt(struct blk_list *b, enum lwkmem_kind_t k)
 {
 	return kind_size[k] * (1 + (b->num_blks - 1) * b->stride);
 }

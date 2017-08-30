@@ -1,6 +1,6 @@
 /*
  * Multi Operating System (mOS)
- * Copyright (c) 2016, Intel Corporation.
+ * Copyright (c) 2016 - 2017, Intel Corporation.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -22,7 +22,6 @@
 #include <linux/sizes.h>
 #include <linux/slab.h>
 #include <linux/mempolicy.h>
-
 #include "lwkmem.h"
 
 #undef pr_fmt
@@ -162,7 +161,7 @@ asmlinkage long lwk_sys_mmap_pgoff(unsigned long addr, unsigned long len,
 		vma = mos_find_vma(current->mm, addr);
 		if (vma) {
 			if (LWKMEM_DEBUG_VERBOSE) {
-				pr_info("addr 0x%lx already has a vma!\n", addr);
+				pr_info("addr 0x%lx already has a vma\n", addr);
 				list_vmas(current->mm);
 			}
 
@@ -454,11 +453,11 @@ asmlinkage long lwk_sys_remap_file_pages(unsigned long start,
 }
 
 /*
-** sys_madvise() needs to be an LWK function.
-** Any Linux policy settings are not likely to be appropriate for LWK memory.
-** Also, letting Linux unmap pages after a MADV_DONTNEED can lead to page
-** faults.
-*/
+ * sys_madvise() needs to be an LWK function.
+ * Any Linux policy settings are not likely to be appropriate for LWK memory.
+ * Also, letting Linux unmap pages after a MADV_DONTNEED can lead to page
+ * faults.
+ */
 asmlinkage long lwk_sys_madvise(unsigned long start, size_t len_in,
 		int behavior)
 {
@@ -498,7 +497,7 @@ asmlinkage long lwk_sys_madvise(unsigned long start, size_t len_in,
 
 asmlinkage long lwk_sys_mbind(unsigned long start, unsigned long len,
 		unsigned long mode, const unsigned long __user *nmask,
-		unsigned long maxnode, unsigned flags)
+		unsigned long maxnode, unsigned int flags)
 {
 	struct vm_area_struct *vma;
 
@@ -939,4 +938,151 @@ asmlinkage long lwk_sys_memfd_create(const char __user *uname,
 
 	--current->mos_nesting;
 	return ret;
+}
+
+SYSCALL_DEFINE4(mos_get_addr_info,
+	unsigned long, addr,
+	unsigned long *, phys_addr,
+	int *, numa_domain,
+	int *, page_size)
+{
+	return -EINVAL;
+}
+
+static int64_t kind_size[kind_last] = {SZ_4K, SZ_2M, SZ_1G};
+
+asmlinkage long lwk_sys_mos_get_addr_info(unsigned long addr,
+		unsigned long *phys_addr, int *numa_domain, int *page_size)
+{
+	int rc = 0;
+	struct mm_struct *mm = current->mm;
+	struct vm_area_struct *vma;
+	struct page *phys_page;
+	int size, numa;
+	struct mos_process_t *mosp;
+	int nid;
+	enum lwkmem_kind_t knd;
+	struct list_head *busyl;
+	struct blk_list *bl;
+	int i;
+	unsigned long offset, left, right;
+	unsigned long virt_end;
+
+	vma = mos_find_vma(mm, addr);
+	if (!vma) {
+		if (LWKMEM_DEBUG)
+			pr_info("%s() Can't find vma\n", __func__);
+		rc = -EINVAL;
+		goto out;
+	}
+
+	if (!is_lwkmem(vma)) {
+		/* FIXME: For now. Eventually we want to return info for Linux
+		 * addresses as well.
+		 */
+		if (LWKMEM_DEBUG)
+			pr_info("%s() This probably is a Linux address\n",
+				__func__);
+		rc = -EINVAL;
+		goto out;
+	}
+
+	mosp = current->mos_process;
+	if (!mosp)   {
+		pr_warn("(!) %s() not an mOS pid %d\n", __func__, current->pid);
+		return -ENOSYS;
+	}
+
+	phys_page = lwkmem_user_to_page(mm, addr, &size);
+
+	if (phys_page == NULL)   {
+		rc = -EINVAL;
+		goto out;
+	}
+
+	if (size == SZ_1G)   {
+		knd = kind_1g;
+	} else if (size == SZ_2M)   {
+		knd = kind_2m;
+	} else if (size == SZ_4K)   {
+		knd = kind_4k;
+	} else   {
+		pr_alert("%s() Unknown page size %d\n", __func__, size);
+		rc = -EINVAL;
+		goto out;
+	}
+
+	/* Find the block list and numa domain */
+	down_read(&current->mm->mmap_sem);
+
+	numa = -1;
+	for_each_online_node(nid)   {
+		busyl = &mosp->busy_list[knd][nid];
+		list_for_each_entry(bl, busyl, list)   {
+			virt_end = bl->vma_addr + block_size_virt(bl, knd);
+			if ((addr < bl->vma_addr) || (addr >= virt_end))
+				/* Virt addr not within this block. No point in
+				 * iterrating over sub-block
+				 */
+				continue;
+
+			/* If this is a contigous block, and addr is within it
+			 * then we found it
+			 */
+			if (bl->stride == 1)   {
+				numa = bl->phys->nid;
+				goto found_it;
+			}
+
+			/* This is a strided block and addr might be within it.
+			 * Check each sub-block
+			 */
+			for (i = 0; i < bl->num_blks; i++) {
+				offset = i * bl->stride * kind_size[knd];
+				left = bl->vma_addr + offset;
+				right = left + kind_size[knd];
+
+				if ((addr >= left) && (addr < right))   {
+					numa = bl->phys->nid;
+					goto found_it;
+				}
+			}
+		}
+	}
+
+found_it:
+	up_read(&current->mm->mmap_sem);
+
+	if (numa < 0)   {
+		if (LWKMEM_DEBUG)
+			pr_info("%s() No NUMA domain for virt 0x%lx\n",
+				__func__, addr);
+		rc = -EINVAL;
+		goto out;
+	}
+
+	if (put_user(page_to_phys(phys_page), phys_addr))   {
+		pr_alert("%s() put_user(addr) failed\n", __func__);
+		rc = -EACCES;
+		goto out;
+	}
+
+	if (put_user(size, page_size))   {
+		pr_alert("%s() put_user(size) failed\n", __func__);
+		rc = -EACCES;
+		goto out;
+	}
+
+	if (put_user(numa, numa_domain))   {
+		pr_alert("%s() put_user(numa_domain) failed\n", __func__);
+		rc = -EACCES;
+		goto out;
+	}
+
+out:
+	if (LWKMEM_DEBUG)
+		pr_info("%s() v_addr 0x%lx = p_addr 0x%llx, page size %d, numa domain %d\n",
+			__func__, addr, page_to_phys(phys_page), size, numa);
+	return rc;
+
 }
