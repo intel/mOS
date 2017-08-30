@@ -10,7 +10,7 @@
 # FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
 # more details.
 
-PHONY += _toolinst_ _toolinst_libmos _toolinst_mos_h _toolinst_uti_h
+PHONY += _toolinst_ _toolinst_libmos _toolinst_mos_h _toolinst_uti_h _mos_get_addr_info_man _libmos_man_pages
 
 major := 1
 minor := 0
@@ -22,6 +22,7 @@ mos_h_installpath := /usr/include
 uti_h_installpath := /usr/include
 mos_h_srcpath := $(obj)/../../../include/uapi/linux/
 uti_h_srcpath := $(obj)/../../../include/uapi/linux/
+man_2_installpath := /usr/share/man/man2
 
 $(obj)/$(libmos): $(libobjs)
 	$(CC) -shared -Wl,-soname,$(soname) -o $@ $^
@@ -41,4 +42,9 @@ _toolinst_mos_h: $(mos_h_srcpath)/mos.h
 _toolinst_uti_h: $(uti_h_srcpath)/uti.h
 	$(call cmd,lib_install,$<,$(INSTALL_MOD_PATH)/$(uti_h_installpath),$(notdir $<),$(uti_h_installpath)/$(notdir $<))
 
-_toolinst_: _toolinst_libmos _toolinst_mos_h _toolinst_uti_h
+_mos_get_addr_info_man: $(src)/mos_get_addr_info.2
+	$(call cmd,lib_install,$<,$(INSTALL_MOD_PATH)/$(man_2_installpath),$(notdir $<),$(man_2_installpath)/$(notdir $<))
+
+_libmos_man_pages: _mos_get_addr_info_man
+
+_toolinst_: _toolinst_libmos _toolinst_mos_h _toolinst_uti_h _libmos_man_pages
