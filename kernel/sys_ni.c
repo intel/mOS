@@ -257,4 +257,5 @@ cond_syscall(sys_pkey_alloc);
 cond_syscall(sys_pkey_free);
 
 /* mOS system calls */
+cond_syscall(sys_mos_get_addr_info);
 cond_syscall(sys_mos_set_clone_attr);
