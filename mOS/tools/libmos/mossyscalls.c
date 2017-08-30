@@ -18,6 +18,12 @@
 
 /* mOS memory system calls */
 
+long mos_get_addr_info(unsigned long addr, unsigned long *phys_addr,
+			int *numa_domain, int *page_size)
+{
+	return syscall(510, addr, phys_addr, numa_domain, page_size);
+}
+
 /* mOS scheduler system calls */
 
 long mos_set_clone_attr(struct mos_clone_attr *attr,
