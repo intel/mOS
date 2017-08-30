@@ -17,6 +17,9 @@
 
 /* mOS memory system calls */
 
+long mos_get_addr_info(unsigned long addr, unsigned long *phys_addr,
+	int *numa_domain, int *page_size);
+
 /* mOS scheduler system calls */
 
 struct mos_clone_attr {
