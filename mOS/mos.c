@@ -29,7 +29,7 @@
 #undef pr_fmt
 #define pr_fmt(fmt)	"mOS: " fmt
 
-#define MOS_VERSION	"0.4"
+#define MOS_VERSION	"0.5"
 
 static char cpulist_buf[NR_CPUS + 1];
 static cpumask_var_t lwkcpus_map;
@@ -874,7 +874,8 @@ static ssize_t lwk_options_store(struct kobject *kobj,
 				 const char *buff, size_t count)
 {
 	ssize_t rc = count;
-	char *options = 0, *tok, *name, *value;
+	char *option = 0, *value;
+	const char *name = buff;
 	struct mos_process_t *mosp = current->mos_process;
 	struct mos_process_option_callback_elem_t *elem;
 	struct mos_process_callbacks_elem_t *cbs;
@@ -886,20 +887,33 @@ static ssize_t lwk_options_store(struct kobject *kobj,
 		goto out;
 	}
 
-	tok = options = kstrndup(buff, count, GFP_KERNEL);
+	/* Options are stored in the buffer as a sequence of strings,
+	 * separated by a null character.  This possibly includes a
+	 * leading null character.  The end of the sequence is identified
+	 * by two null characters.
+	 */
 
-	while ((name = strsep(&tok, ","))) {
+	if (*name == '\0')
+		name++;
 
-		if (strlen(name) == 0)
-			continue;
+	while (strlen(name)) {
 
-		value = strchr(name, '=');
+		pr_debug("(*) %s: option=\"%s\"\n", __func__, name);
+
+		option = kstrndup(name, count, GFP_KERNEL);
+
+		if (!option) {
+			rc = -ENOMEM;
+			goto out;
+		}
+
+		value = strchr(option, '=');
 		if (value)
 			*value++ = '\0';
 
 		not_found = true;
 		list_for_each_entry(elem, &mos_process_option_callbacks, list) {
-			if (strcmp(elem->name, name) == 0) {
+			if (strcmp(elem->name, option) == 0) {
 				rc = elem->callback(value, mosp);
 				if (rc) {
 					pr_warn("(!) error %ld invoking option callback for %s / %pf\n",
@@ -913,10 +927,21 @@ static ssize_t lwk_options_store(struct kobject *kobj,
 		}
 
 		if (not_found) {
-			pr_warn("(!) no option callback found for %s\n", name);
+			pr_warn("(!) no option callback found for %s\n", option);
 			rc = -EINVAL;
 			goto out;
 		}
+
+		name += strlen(name) + 1;
+
+		if (name - buff > count) {
+			pr_warn("(!) %s: overflow in options buffer\n", __func__);
+			rc = -EINVAL;
+			goto out;
+		}
+
+		kfree(option);
+		option = NULL;
 	}
 
 	list_for_each_entry(cbs, &mos_process_callbacks, list) {
@@ -931,7 +956,7 @@ static ssize_t lwk_options_store(struct kobject *kobj,
 
 	rc = count;
  out:
-	kfree(options);
+	kfree(option);
 	return rc;
 }
 
@@ -982,10 +1007,12 @@ static ssize_t lwkmem_domain_info_store(struct kobject *kobj,
 
 		*nids_str++ = '\0';
 
-		if (strcmp(typ_str, "mcdram") == 0)
-			typ = lwkmem_mcdram;
+		if (strcmp(typ_str, "hbm") == 0)
+			typ = lwkmem_hbm;
 		else if (strcmp(typ_str, "dram") == 0)
 			typ = lwkmem_dram;
+		else if (strcmp(typ_str, "nvram") == 0)
+			typ = lwkmem_nvram;
 		else {
 			rc = -EINVAL;
 			pr_warn("Unrecognized memory type: %s\n", typ_str);
@@ -1107,11 +1134,13 @@ static int __init mos_sysfs_init(void)
 		goto out;
 	}
 
-	lwkcpus_request_attr.attr.mode |= (S_IWUSR | S_IWGRP);
-	lwkcpus_request_mask_attr.attr.mode |= (S_IWUSR | S_IWGRP);
-	lwkmem_request_attr.attr.mode |= (S_IWUSR | S_IWGRP);
-	lwkcpus_sequence_attr.attr.mode |= (S_IWUSR | S_IWGRP);
-	lwk_util_threads_attr.attr.mode |= (S_IWUSR | S_IWGRP);
+	lwkcpus_request_attr.attr.mode |= S_IWGRP;
+	lwkcpus_request_mask_attr.attr.mode |= S_IWGRP;
+	lwkmem_domain_info_attr.attr.mode |= S_IWGRP;
+	lwkmem_request_attr.attr.mode |= S_IWGRP;
+	lwkcpus_sequence_attr.attr.mode |= S_IWGRP;
+	lwk_options_attr.attr.mode |= S_IWGRP;
+	lwk_util_threads_attr.attr.mode |= S_IWGRP;
 
 	ret = sysfs_create_group(mos_kobj, &mos_attr_group);
 	if (ret) {

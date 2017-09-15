@@ -39,7 +39,7 @@ extern void mos_exit_thread(pid_t pid, pid_t tgid);
 
 enum lwkmem_kind_t {kind_4k = 0, kind_2m, kind_4m, kind_1g, kind_last};
 extern unsigned long lwk_page_shift[];
-enum lwkmem_type_t {lwkmem_dram = 0, lwkmem_mcdram, lwkmem_type_last };
+enum lwkmem_type_t {lwkmem_dram = 0, lwkmem_hbm, lwkmem_nvram, lwkmem_type_last };
 
 struct mos_process_t {
 	struct list_head list;
