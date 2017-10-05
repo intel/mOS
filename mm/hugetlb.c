@@ -23,6 +23,7 @@
 #include <linux/swapops.h>
 #include <linux/page-isolation.h>
 #include <linux/jhash.h>
+#include <linux/mos.h>
 
 #include <asm/page.h>
 #include <asm/pgtable.h>
@@ -636,6 +637,14 @@ EXPORT_SYMBOL_GPL(linear_hugepage_index);
 unsigned long vma_kernel_pagesize(struct vm_area_struct *vma)
 {
 	struct hstate *hstate;
+
+#ifdef CONFIG_MOS_LWKMEM
+	if (is_lwkmem(vma)) {
+		unsigned long order = LWK_PAGE_SHIFT(vma);
+
+		return 1UL << order;
+	}
+#endif /* CONFIG_MOS_LWKMEM */
 
 	if (!is_vm_hugetlb_page(vma))
 		return PAGE_SIZE;

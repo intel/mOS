@@ -12,6 +12,7 @@
 #include <linux/vmstat.h>
 #include <linux/atomic.h>
 #include <linux/vmalloc.h>
+#include <linux/mos.h>
 #ifdef CONFIG_CMA
 #include <linux/cma.h>
 #endif
@@ -64,6 +65,21 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 		pages[lru] = global_node_page_state(NR_LRU_BASE + lru);
 
 	available = si_mem_available();
+
+#ifdef CONFIG_MOS_LWKMEM
+	/* Tell this process about the memory situation on the LWK side */
+	if (is_mostask()) {
+		lwkmem_available(&i.totalram, &i.freeram);
+		available = i.freeram;
+		i.sharedram = 0;
+		i.bufferram = 0;
+		i.totalswap = 0;
+		i.freeswap = 0;
+		i.totalhigh = i.totalram;
+		i.freehigh = i.freeram;
+		i.mem_unit = PAGE_SIZE;
+	}
+#endif
 
 	show_val_kb(m, "MemTotal:       ", i.totalram);
 	show_val_kb(m, "MemFree:        ", i.freeram);
