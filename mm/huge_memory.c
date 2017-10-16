@@ -30,6 +30,7 @@
 #include <linux/userfaultfd_k.h>
 #include <linux/page_idle.h>
 #include <linux/shmem_fs.h>
+#include <linux/mos.h>
 
 #include <asm/tlb.h>
 #include <asm/pgalloc.h>
@@ -975,7 +976,9 @@ static int do_huge_pmd_wp_page_fallback(struct fault_env *fe, pmd_t orig_pmd,
 
 	smp_wmb(); /* make pte visible before pmd */
 	pmd_populate(vma->vm_mm, fe->pmd, pgtable);
-	page_remove_rmap(page, true);
+
+	if (!is_lwkpg(page))
+		page_remove_rmap(page, true);
 	spin_unlock(fe->ptl);
 
 	mmu_notifier_invalidate_range_end(vma->vm_mm, mmun_start, mmun_end);
@@ -1106,7 +1109,8 @@ alloc:
 			add_mm_counter(vma->vm_mm, MM_ANONPAGES, HPAGE_PMD_NR);
 		} else {
 			VM_BUG_ON_PAGE(!PageHead(page), page);
-			page_remove_rmap(page, true);
+			if (!is_lwkpg(page))
+				page_remove_rmap(page, true);
 			put_page(page);
 		}
 		ret |= VM_FAULT_WRITE;

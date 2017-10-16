@@ -181,7 +181,10 @@ struct mos_process_t {
 	bool report_blks_allocated;
 
 	long brk_clear_len;
-	int lwkmem_init;
+	unsigned long trace_block_list_addr;
+	bool trace_block_list_details;
+
+	unsigned int lwkmem_zeroes_check;
 #endif
 
 #ifdef CONFIG_MOS_SCHEDULER
@@ -230,21 +233,13 @@ extern void lwkctl_def_partition(void);
 /* Memory additions go here */
 #include <linux/page-flags.h>
 
-/*
- * Upper 6 bytes are magic number ("LWKMEM") to identify a vma containing LWK
- * memory. Use lower 8 bits to store size of page - PAGE_SHIFT. Other bits
- * unused for now.
- * Storing the page size in the vma means we need page-size homogeneous vmas.
- */
-#define _LWKMEM_MASK            (0x0ffff)
-#define _LWKMEM_ORDER_MASK      (0x000ff)
-#define _LWKMEM         ((unsigned long)(0x4c574b4d454d << 16))
-#define is_lwkmem(vma)  (((unsigned long)((vma)->vm_private_data) & \
-			  ~_LWKMEM_MASK) == _LWKMEM)
-#define LWK_PAGE_SHIFT(vma)     (((long)((vma)->vm_private_data) & \
-                                  _LWKMEM_ORDER_MASK) + PAGE_SHIFT)
-#define _LWKPG          ((unsigned long)(0x004c574b5047))
-#define is_lwkpg(page)  ((((page)->private) & _LWKPG) == _LWKPG)
+#define is_lwkmem(vma)  ((vma)->vm_flags & VM_LWK)
+#define _LWKPG          (0x4c574b4dul)
+#define is_lwkpg(page)  ((((page)->private) & 0xffffffff) == _LWKPG)
+#define _LWKPG_DIRTY    (0x100000000ul)
+#define is_lwkpg_dirty(page) (((page)->private) & _LWKPG_DIRTY)
+#define set_lwkpg_dirty(page) ((page)->private |= _LWKPG_DIRTY)
+#define clear_lwkpg_dirty(page) ((page)->private &= ~_LWKPG_DIRTY)
 
 extern struct page *lwkmem_user_to_page(struct mm_struct *mm,
 					unsigned long addr,
@@ -254,10 +249,16 @@ extern void lwkmem_available(unsigned long *totalraam, unsigned long *freeraam);
 extern unsigned long elf_map_to_lwkmem(unsigned long addr, unsigned long size,
 					int prot, int type);
 extern long elf_unmap_from_lwkmem(unsigned long addr, unsigned long size);
-
+extern void unmap_lwkmem_range(struct mm_struct *mm, struct vm_area_struct *vma,
+			unsigned long start, unsigned long end);
+extern void si_meminfo_node_mos(struct sysinfo *val, int nid);
 #else
 #define is_lwkmem(vma) 0
 #define is_lwkpg(page) 0
+static inline void unmap_lwkmem_range(struct mm_struct *mm,
+			struct vm_area_struct *vma, unsigned long start,
+			unsigned long end) {}
+static void si_meminfo_node_mos(struct sysinfo *val, int nid) {}
 #endif /* CONFIG_MOS_LWKMEM */
 
 
@@ -296,7 +297,7 @@ static inline void get_mos_view_cpumask(struct cpumask *dst,
 				const struct cpumask *src) {}
 static inline ssize_t cpumap_print_mos_view_cpumask(bool list,
 			char *buf, const struct cpumask *mask) { return -1; }
-
+static void si_meminfo_node_mos(struct sysinfo *val, int nid) {}
 #define is_lwkmem(vma) 0
 #define is_lwkpg(page) 0
 

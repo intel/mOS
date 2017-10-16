@@ -1004,15 +1004,17 @@ static int load_elf_binary(struct linux_binprm *bprm)
 			error = elf_map_to_lwkmem(lwkmem_start, lwkmem_size,
 					elf_prot, elf_flags);
 			if (!BAD_ADDR(error)) {
+				loff_t pos = elf_ppnt->p_offset;
 				/*
 				 * Read data for all initialized sections from
 				 * the binary which are part of this segment to
 				 * LWKMEM pages
 				 */
-				retval = kernel_read(bprm->file,
-						elf_ppnt->p_offset,
-						(char *)(load_bias + vaddr),
-						elf_ppnt->p_filesz);
+				retval = vfs_read(bprm->file,
+						(void __user *)(load_bias +
+								vaddr),
+						elf_ppnt->p_filesz,
+						&pos);
 
 				if (retval != elf_ppnt->p_filesz) {
 					long rc;

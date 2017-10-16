@@ -619,8 +619,7 @@ static __latent_entropy int dup_mmap(struct mm_struct *mm,
 		/* Copied LWK memory areas are not LWK memory. */
 		if (is_lwkmem(tmp)) {
 			tmp->vm_ops = NULL;
-			tmp->vm_private_data = (void *) ((unsigned long)
-				tmp->vm_private_data & _LWKMEM_MASK);
+			tmp->vm_flags &= ~(VM_LWK | VM_LWK_1G);
 		}
 #endif
 		INIT_LIST_HEAD(&tmp->anon_vma_chain);
@@ -1792,6 +1791,20 @@ static __latent_entropy struct task_struct *copy_process(
 		/* A copy of an LWK process is not an LWK process. */
 		p->mos_flags = current->mos_flags & ~MOS_IS_LWK_PROCESS;
 		p->mos_process = NULL;
+
+		/* All Linux processes inherit the mOS view from its parent.
+		 * The child process can override its view later by writing to
+		 * its /proc/self/mos_view or by some other process writing to
+		 * /proc/<pid>/mos_view
+		 *
+		 * This rule is not applicable to LWK processes. The child
+		 * process starts off with the default view and does not in-
+		 * -herit view from its parent LWK process.
+		 *
+		 * No need to lock child process since it is not yet active.
+		 */
+		if (is_mostask())
+			SET_MOS_VIEW(p, MOS_VIEW_DEFAULT);
 	}
 #endif
 

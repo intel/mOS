@@ -14,7 +14,10 @@
 
 #include <linux/printk.h>
 #include <linux/mos.h>
+#include <linux/ftrace.h>
 #include "lwkmem.h"
+
+#include <trace/events/lwkmem.h>
 
 /**
  * elf_map_to_lwkmem() - maps an ELF segment to LWKMEM
@@ -35,26 +38,33 @@ unsigned long elf_map_to_lwkmem(unsigned long addr, unsigned long size,
 
 	mosp = current->mos_process;
 
-	if (unlikely(LWKMEM_DEBUG_VERBOSE))
-		pr_info("%s: addr 0x%lx size 0x%lx\n", __func__, addr, size);
-
+	if (!mosp) {
+		pr_warn("(!) %s(): %d is not an mOS process.\n",
+			__func__, current->pid);
+		map_addr = -EINVAL;
+		goto out;
+	}
 	/*
 	 * mmap() will return -EINVAL if given a zero size, but a
 	 * segment with zero filesize is perfectly valid
 	 */
-	if (!size)
-		return addr;
+	if (!size) {
+		map_addr = addr;
+		goto out;
+	}
 
-	if (down_write_killable(&current->mm->mmap_sem))
-		return -EINTR;
+	if (down_write_killable(&current->mm->mmap_sem)) {
+		map_addr = -EINTR;
+		goto out;
+	}
 
 	map_addr = allocate_blocks_fixed(addr, size, prot, type,
 					 lwkmem_static);
 
 	up_write(&current->mm->mmap_sem);
 
-	if (unlikely(LWKMEM_DEBUG_VERBOSE))
-		pr_info("%s: map_addr 0x%lx\n",  __func__, map_addr);
+ out:
+	trace_mos_elf_map(addr, size, prot, type, current->tgid);
 
 	return map_addr;
 }

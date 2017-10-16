@@ -15,30 +15,13 @@
 #ifndef _LWKMEM_H_
 #define _LWKMEM_H_
 
-/*#undef LWKMEM_DEBUG_ENABLED*/
-#define LWKMEM_DEBUG_ENABLED
-
-#ifdef LWKMEM_DEBUG_ENABLED
-
-extern int lwkmem_debug;
-#define LWKMEM_DEBUG         (lwkmem_debug > 0)
-#define LWKMEM_DEBUG_VERBOSE (lwkmem_debug > 1)
-#define LWKMEM_DEBUG_EXTREME (lwkmem_debug > 2)
-
-#else
-
-#define LWKMEM_DEBUG         0
-#define LWKMEM_DEBUG_VERBOSE 0
-#define LWKMEM_DEBUG_EXTREME 0
-#define memblock_dump_free()
-#define dump_block_lists(...)
-#endif
-
-#define LWKMEM_CLR_BEFORE	1
-#define LWKMEM_CLR_AFTER	2
-#define LWKMEM_CLR_ALL		-1
-
 #define MAX_NIDS (1 << CONFIG_NODES_SHIFT)
+
+#if defined(CONFIG_X86_64) || defined(CONFIG_X86_PAE)
+static char *kind_str[kind_last] __attribute__ ((unused)) = {"4k", "2m", "1g"};
+#else
+static char *kind_str[kind_last] __attribute__ ((unused)) = {"4k", "4m", "1g"};
+#endif
 
 /*
  * A list of this structure holds the chunks of memory we designated during
@@ -116,5 +99,9 @@ extern long deallocate_blocks(unsigned long addr, unsigned long len,
 			struct mm_struct *mm);
 
 extern unsigned long block_size_virt(struct blk_list *b, enum lwkmem_kind_t k);
+
+extern void lwkpage_add_rmap(struct page *page, struct vm_area_struct *vma,
+		unsigned long address);
+extern void lwkpage_remove_rmap(struct page *page);
 
 #endif /* _LWKMEM_H_ */

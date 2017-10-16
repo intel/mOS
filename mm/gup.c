@@ -589,6 +589,12 @@ retry:
 			page = lwkmem_user_to_page(vma->vm_mm, start,
 						  &page_mask);
 			if (page) {
+				/* We assume that LWK pages handed out via GUP
+				 * will be written to.  Mark the page as a dirty
+				 * LWK page.
+				 */
+				set_lwkpg_dirty(page);
+
 				if (page_mask == SZ_2M)
 					page_mask = HPAGE_PMD_NR - 1;
 				else if (page_mask == SZ_1G)

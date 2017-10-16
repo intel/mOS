@@ -45,6 +45,7 @@
 #include <linux/moduleparam.h>
 #include <linux/pkeys.h>
 #include <linux/mos.h>
+#include <linux/sizes.h>
 
 #include <asm/uaccess.h>
 #include <asm/cacheflush.h>
@@ -1130,12 +1131,6 @@ struct vm_area_struct *vma_merge(struct mm_struct *mm,
 	VM_WARN_ON(prev && addr <= prev->vm_start);
 	VM_WARN_ON(area && end > area->vm_end);
 	VM_WARN_ON(addr >= end);
-
-#ifdef CONFIG_MOS_LWKMEM
-	/* Do not merge LWK VMA with non-LWK VMA. */
-	if (prev && next && (is_lwkmem(prev) ^ is_lwkmem(next)))
-		return NULL;
-#endif
 
 	/*
 	 * Can it merge with the predecessor?
@@ -2559,19 +2554,34 @@ static int __split_vma(struct mm_struct *mm, struct vm_area_struct *vma,
 	struct vm_area_struct *new;
 	int err;
 
-#ifdef CONFIG_MOS_LWKMEM
-	if (is_lwkmem(vma)) {
-		pr_err("Not __split_vma() for LWK memory!\n");
-		return -EINVAL;
-	}
-#endif /* CONFIG_MOS_LWKMEM */
-
 	if (vma->vm_ops && vma->vm_ops->split) {
 		err = vma->vm_ops->split(vma, addr);
 		if (err)
 			return err;
 	}
 
+#ifdef CONFIG_MOS_LWKMEM
+	if (is_lwkmem(vma) && (vma->vm_flags & VM_HUGEPAGE)) {
+		if ((vma->vm_flags & VM_LWK_1G) && !IS_ALIGNED(addr, SZ_1G)) {
+			pr_err("ERROR: %s() failed to split 1g TLB at %lx\n",
+				__func__, addr);
+			return -EINVAL;
+		}
+#if defined(CONFIG_X86_64) || defined(CONFIG_X86_PAE)
+		if (!IS_ALIGNED(addr, SZ_2M)) {
+			pr_err("ERROR: %s() failed to split 2m TLB at %lx\n",
+				__func__, addr);
+			return -EINVAL;
+		}
+#else
+		if (!IS_ALIGNED(addr, SZ_4M)) {
+			pr_err("ERROR: %s() failed to split 4m TLB at %lx\n",
+				__func__, addr);
+			return -EINVAL;
+		}
+#endif
+	}
+#endif
 	new = kmem_cache_alloc(vm_area_cachep, GFP_KERNEL);
 	if (!new)
 		return -ENOMEM;
@@ -2661,13 +2671,6 @@ int do_munmap(struct mm_struct *mm, unsigned long start, size_t len)
 		return 0;
 	prev = vma->vm_prev;
 	/* we have  start < vma->vm_end  */
-
-#ifdef CONFIG_MOS_LWKMEM
-	if (is_lwkmem(vma)) {
-		/* FIXME: We need to do some of the stuff below */
-		return 0;
-	}
-#endif /* CONFIG_MOS_LWKMEM */
 
 	/* if it doesn't overlap, we have nothing.. */
 	end = start + len;
@@ -3010,12 +3013,6 @@ void exit_mmap(struct mm_struct *mm)
 	if (!vma)	/* Can happen if dup_mmap() received an OOM */
 		return;
 
-#ifdef CONFIG_MOS_LWKMEM
-	if (is_lwkmem(vma)) {
-		pr_err("exit_mmap() returning early\n");
-		return;
-	}
-#endif /* CONFIG_MOS_LWKMEM */
 	lru_add_drain();
 	flush_cache_mm(mm);
 	tlb_gather_mmu(&tlb, mm, 0, -1);
