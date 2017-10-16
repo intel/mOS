@@ -22,7 +22,11 @@
 #include <linux/sizes.h>
 #include <linux/slab.h>
 #include <linux/mempolicy.h>
+#include <linux/ftrace.h>
 #include "lwkmem.h"
+
+#define CREATE_TRACE_POINTS
+#include <trace/events/lwkmem.h>
 
 #undef pr_fmt
 #define pr_fmt(fmt)	"mOS-mmap: " fmt
@@ -42,52 +46,64 @@ static struct vm_area_struct *mos_find_vma(struct mm_struct *mm,
 		return NULL;
 }
 
-asmlinkage long lwk_sys_munmap(unsigned long addr, size_t len)
+/*
+ * Unmaps and frees the physical page frames from the user page table
+ * for a specified user virtual address range. The function assumes that
+ * the caller holds the mm->mmap_sem lock. We need to get mm from caller
+ * because during the process exit current->mm is set to NULL even before
+ * exit_mmap() is called.
+ *
+ * Since LWK VMA avoids page faults by pre-populating the page table there
+ * isn't a use case where one needs to unmap an LWK VMA partially. This
+ * requirement might change for example if LWK decides to respect a user
+ * madvise such MADV_DONTNEED or MADV_FREE just to free up physical memory
+ * temporarily. Currently this function supports unmaping of an entire VMA
+ * with exact overlap in the address range being requested.
+ *
+ */
+void unmap_lwkmem_range(struct mm_struct *mm, struct vm_area_struct *vma,
+			unsigned long start, unsigned long end)
 {
-	struct mos_process_t *mos_p;
-	struct vm_area_struct *vma;
-	long ret = 0;
+	struct mos_process_t *mosp = current->mos_process;
 
-	if (LWKMEM_DEBUG)
-		pr_info("%s(addr=0x%lx len=%ld) CPU=%d pid=%d nst=%d\n",
-			__func__, addr, len,
-			smp_processor_id(), current->pid, current->mos_nesting);
+	if (!mosp) {
+		pr_warn("(!) %s(): pid %d is not an mOS process.\n",
+			__func__, current->pid);
+		return;
+	}
 
-	/*
-	 * If addr is in LWK memory, we need to do something here.
-	 * Otherwise, let the Linux sys_munmap handle it.
+	if (!vma || start > end) {
+		pr_warn("(!) %s(): pid %d Invalid args.\n",
+			__func__, current->pid);
+		return;
+	}
+
+	if (start == end)
+		return;
+
+	if (unlikely(!is_lwkmem(vma))) {
+		list_vmas(mm);
+		pr_warn("(!) %s() pid %d: 0x%016lx-0x%016lx is not lwk vma\n",
+			__func__, current->pid, start, end);
+		return;
+	}
+
+	/* Currently partial unmaping of LWKMEM VMA is not supported
+	 * alert if we see an unsupported use case.
 	 */
-
-	mos_p = current->mos_process;
-
-	if (!mos_p) {
-		pr_warn("(!) %s() not an mOS pid %d\n", __func__, current->pid);
-		return -ENOSYS;
+	if (vma->vm_start != start || vma->vm_end != end) {
+		pr_warn("WARN:%s() vma %016lx-%016lx region %016lx-%016lx\n",
+			__func__, vma->vm_start, vma->vm_end, start, end);
+		return;
 	}
 
-	if (down_write_killable(&current->mm->mmap_sem))
-		return -EINTR;
-
-	vma = mos_find_vma(current->mm, addr);
-	if (!vma) {
-		pr_warn("(!)  %s() no vma for pid %d\n", __func__,
-			current->pid);
-		ret = -ENOSYS;
-		goto out;
-	}
-
-	if (is_lwkmem(vma)) {
-		/* Deallocate LWK memory blocks.  If this fails, we are going to
-		 * continue regardless; we may not have cleaned up completely
-		 * but we are no worse off than we were before.
-		 */
-		deallocate_blocks(addr, len, mos_p, current->mm);
-	}
-out:
-	up_write(&current->mm->mmap_sem);
-
-	return ret;
-} /* end of lwk_sys_munmap() */
+	/* Deallocate LWK memory blocks.  If this fails, we are going to
+	 * continue regardless; we may not have cleaned up completely
+	 * but we are no worse off than we were before.
+	 */
+	deallocate_blocks(start, end-start, mosp, mm);
+	trace_mos_munmap(start, end-start, 0, current->tgid);
+}
 
 asmlinkage long lwk_sys_mmap_pgoff(unsigned long addr, unsigned long len,
 		unsigned long prot, unsigned long flags,
@@ -97,113 +113,85 @@ asmlinkage long lwk_sys_mmap_pgoff(unsigned long addr, unsigned long len,
 	struct mos_process_t *mosp;
 	struct allocate_options_t *opts;
 	long ret;
-
-	if (LWKMEM_DEBUG)
-		pr_info("%s(addr=0x%lx len=%ld prot=%lx flags=%lx fd=%ld off=%lX) CPU=%d pid=%d nst=%d\n",
-			__func__, addr, len, prot, flags, fd, pgoff,
-			smp_processor_id(), current->pid, current->mos_nesting);
+	const unsigned long addr_in = addr, len_in = len;
 
 	mosp = current->mos_process;
-	if (!mosp) {
-		if (LWKMEM_DEBUG_VERBOSE)
-			pr_warn("CPU %3d %s() addr 0x%lx, len %lu, flags 0x%lx, pgoff %lu, not an mOS pid %d\n",
-			       smp_processor_id(), __func__, addr, len, flags,
-			       pgoff, current->pid);
+	/* Let Linux deal with this, if it is not a mOS task */
 
-		/* Let Linux deal with this, if it is not a mOS task */
-		return -ENOSYS;
-	}
-
-	if (mosp->lwkmem <= 0) {
-		if (LWKMEM_DEBUG_VERBOSE)
-			pr_info("CPU %3d %s() addr 0x%lx, len %lu, flags 0x%lx, pgoff %lu, no lwkmem yet\n",
-			       smp_processor_id(), __func__, addr, len, flags,
-			       pgoff);
-		return -ENOSYS;
-	}
-
-	/* Only anonymous mmap for now */
-	if (!(flags & MAP_ANONYMOUS)) {
-		if (LWKMEM_DEBUG_VERBOSE)
-			pr_info("CPU %3d %s() addr 0x%lx, len %lu, flags 0x%lx, pgoff %lu, not anonymous\n",
-			       smp_processor_id(), __func__, addr, len, flags,
-			       pgoff);
-		return -ENOSYS;
+	if (!mosp || (mosp->lwkmem <= 0) || !(flags & MAP_ANONYMOUS)) {
+		ret = -ENOSYS;
+		goto out;
 	}
 
 	/* Alignment test from arch/x86/kernel/sys_x86_64.c */
 	if (pgoff & ~PAGE_MASK) {
-		if (LWKMEM_DEBUG_VERBOSE)
-			pr_warn("CPU %3d %s() addr 0x%lx, len %lu, flags 0x%lx, pgoff %lu, offset not aligned\n",
-			       smp_processor_id(), __func__, addr, len, flags,
-			       pgoff);
-		return -EINVAL;
+		ret = -EINVAL;
+		goto out;
 	}
 
-	if (fd != 0x00000000ffffffff) {
-		/* This should not be with MAP_ANONYMOUS */
-		if (LWKMEM_DEBUG_VERBOSE)
-			pr_warn("CPU %3d %s() addr 0x%lx, len %lu, flags 0x%lx, pgoff %lu, fd not -1: %p\n",
-			       smp_processor_id(), __func__, addr, len, flags,
-			       pgoff, (void *)fd);
-	} else {
-		if (LWKMEM_DEBUG_VERBOSE)
-			pr_info("CPU %3d %s() addr 0x%lx, len %lu, flags 0x%lx, pgoff %lu\n",
-			       smp_processor_id(), __func__, addr, len, flags,
-			       pgoff);
+	if (down_write_killable(&current->mm->mmap_sem)) {
+		ret = -EINTR;
+		goto out;
 	}
-
-
-	if (down_write_killable(&current->mm->mmap_sem))
-		return -EINTR;
 
 	if (addr) {
 		vma = mos_find_vma(current->mm, addr);
-		if (vma) {
-			if (LWKMEM_DEBUG_VERBOSE) {
-				pr_info("addr 0x%lx already has a vma\n", addr);
-				list_vmas(current->mm);
-			}
-
-			if (!is_lwkmem(vma)) {
-				if (LWKMEM_DEBUG_VERBOSE)
-					pr_info("... and it is not one of ours. Let Linux handle it\n");
-				ret = -ENOSYS;
-				goto out;
-			}
+		if (vma && !is_lwkmem(vma)) {
+			up_write(&current->mm->mmap_sem);
+			ret = -ENOSYS;
+			goto out;
 		}
 	}
 
-	if (mosp->lwkmem_mmap_aligned_threshold > 0 &&
-	    len >= mosp->lwkmem_mmap_aligned_threshold) {
-		unsigned long fixed;
-
-		fixed = next_lwkmem_address(len, mosp);
-		ret = allocate_blocks_fixed(fixed, len, prot, flags | MAP_FIXED,
-					    lwkmem_mmap);
+	if (mosp->lwkmem_mmap_aligned_threshold > 0) {
+		if (len >= mosp->lwkmem_mmap_aligned_threshold) {
+			addr = next_lwkmem_address(len, mosp);
+			ret = allocate_blocks_fixed(addr, len, prot,
+					flags | MAP_FIXED, lwkmem_mmap);
+		} else {
+			opts = allocate_options_factory(lwkmem_mmap, len,
+					flags, mosp);
+			if (opts) {
+				ret = opts->allocate_blocks(addr, len,
+						prot, flags, pgoff, opts);
+				kfree(opts);
+			} else
+				ret = -ENOMEM;
+		}
 	} else {
-
-		opts = allocate_options_factory(lwkmem_mmap, len, flags, mosp);
-		if (opts) {
-			ret = opts->allocate_blocks(addr, len, prot, flags,
-						    pgoff, opts);
-			kfree(opts);
-		} else
-			ret = -ENOMEM;
+		/* Packed virtual memory */
+		len = round_up(len, PAGE_SIZE);
+		addr = get_unmapped_area(NULL, addr, len, pgoff,
+				flags & MAP_FIXED);
+		if (offset_in_page(addr))
+			ret = addr;
+		else
+			ret = allocate_blocks_fixed(addr, len, prot,
+					flags | MAP_FIXED, lwkmem_mmap);
 	}
-out:
+
 	up_write(&current->mm->mmap_sem);
 
-	if (ret > 0 && (mosp->lwkmem_init & LWKMEM_CLR_BEFORE))
-		memset((void *) ret, 0, len);
-	else if (unlikely(ret == 0)) {
+	if (unlikely(ret == 0)) {
 		pr_warn("%s - out of LWK memory\n", __func__);
 		ret = -ENOMEM;
 	}
 
+out:
+	trace_mos_mmap(addr_in, len_in, prot, flags, ret, current->tgid);
 	return ret;
 
 } /* end of lwk_sys_mmap_pgoff() */
+
+#ifndef CONFIG_X86_64
+
+/* NOTE: X86_64 defines the sys_mmap() entry point which then delegates to
+ *       sys_mmap_pgoff.  The syscall migration macros will "triage" both of
+ *       these entry points.   And so, if we have both a lwk_sys_mmap_pgoff()
+ *       and lwk_sys_mmap(), the above code will get invoked twice to determine
+ *       that delegation to Linux is required.  So we eliminate the outer
+ *       wrapper.
+ */
 
 asmlinkage long lwk_sys_mmap(unsigned long addr, unsigned long len,
 		unsigned long prot, unsigned long flags,
@@ -212,25 +200,15 @@ asmlinkage long lwk_sys_mmap(unsigned long addr, unsigned long len,
 	return lwk_sys_mmap_pgoff(addr, len, prot, flags, fd, pgoff);
 }
 
+#endif
+
 #ifdef __ARCH_WANT_SYS_OLD_MMAP
 asmlinkage long lwk_sys_old_mmap(struct mmap_arg_struct __user *arg)
 {
-	long ret;
+	pr_debug("%s(arg=%p) CPU=%d pid=%d\n", __func__, arg,
+		 smp_processor_id(), current->pid);
 
-	if (LWKMEM_DEBUG)
-		pr_info("%s(arg=%p) CPU=%d pid=%d nst=%d\n",
-		       __func__, arg,
-		       smp_processor_id(), current->pid, current->mos_nesting);
-
-	if (current->mos_nesting > 0)
-		return -ENOSYS;
-
-	current->mos_nesting++;
-
-	ret = sys_old_mmap(arg);
-
-	--current->mos_nesting;
-	return ret;
+	return -ENOSYS;
 }
 #endif /* __ARCH_WANT_SYS_OLD_MMAP */
 
@@ -243,31 +221,25 @@ asmlinkage long lwk_sys_brk(unsigned long brk)
 	unsigned long len;
 	unsigned long clear_len = 0;
 	void *clear_addr = 0;
-
-	if (LWKMEM_DEBUG)
-		pr_info("(pid=%4d) %s(brk=%lx) CPU=%d nst=%d\n", current->pid,
-			__func__, brk, smp_processor_id(),
-			current->mos_nesting);
+	bool first_brk = false;
 
 	mosp = current->mos_process;
 
-	if (current->mos_nesting > 0 || !mosp)
-		return -ENOSYS;
+	if (!mosp) {
+		pr_warn("(!) %s(): pid %d is not an mOS process.\n",
+			__func__, current->pid);
+		ret = -ENOSYS;
+		goto out;
+	}
 
 	if (mosp->yod_mm == mm) {
 		pr_warn("(> %4d) Yod calling %s()\n", current->pid, __func__);
-		return -ENOSYS;
+		ret = -ENOSYS;
+		goto out;
 	}
 
-	if (LWKMEM_DEBUG_VERBOSE)
-		pr_info("(> %4d) %s(%lx) mos brk=%lx end=%lx CPU=%d\n",
-			current->pid, __func__, brk, mosp->brk, mosp->brk_end,
-			smp_processor_id());
-
-	current->mos_nesting++;
-
 	if (mosp->lwkmem_brk_disable) {
-		ret = sys_brk(brk);
+		ret = -ENOSYS;
 		goto out;
 	}
 
@@ -284,26 +256,6 @@ asmlinkage long lwk_sys_brk(unsigned long brk)
 		unsigned long heap_addr;
 
 		heap_addr = roundup(mm->brk, mosp->heap_page_size);
-		if (LWKMEM_DEBUG_VERBOSE)
-			pr_info("(> %4d) Using mm->brk 0x%lx as lower bound for 0x%lx\n",
-				current->pid, mm->brk, heap_addr);
-
-		if (LWKMEM_DEBUG_VERBOSE) {
-			pr_info("(> %4d) Attempt to set our own brk at 0x%lx\n",
-				current->pid, heap_addr);
-			pr_info("(> %4d) mm->start_code 0x%lx, mm->end_code 0x%lx\n",
-				current->pid, mm->start_code, mm->end_code);
-			pr_info("(> %4d) mm->start_data 0x%lx, mm->end_data 0x%lx\n",
-				current->pid, mm->start_data, mm->end_data);
-			pr_info("(> %4d) mm->start_brk 0x%lx, mm->brk 0x%lx\n",
-				current->pid, mm->start_brk, mm->brk);
-			pr_info("(> %4d) mm->start_stack 0x%lx\n",
-				current->pid, mm->start_stack);
-			pr_info("(> %4d) mm->arg_start 0x%lx, mm->arg_end 0x%lx\n",
-				current->pid, mm->arg_start, mm->arg_end);
-			pr_info("(> %4d) mm->env_start 0x%lx, mm->env_end 0x%lx\n",
-				current->pid, mm->env_start, mm->env_end);
-		}
 
 		/* A couple of sanity checks */
 		if (brk != 0)
@@ -320,34 +272,25 @@ asmlinkage long lwk_sys_brk(unsigned long brk)
 					    flags, lwkmem_brk);
 
 		if (ret != heap_addr) {
-			pr_warn("(! %4d) Requested heap addr %ld, but allocate_blocks_fixed()\n",
-				current->pid, heap_addr);
-			pr_warn("(! %4d) returned %ld, falling back to Linux sys_brk()\n",
-				current->pid, ret);
-			ret = mosp->brk = mosp->brk_end = sys_brk(brk);
+			/* Initial heap allocation failed.  Set both brk and
+			 * brk_end to the intended heap address.  Any subsequent
+			 * attempts to extend the heap will likely fail below.
+			 */
+			pr_warn("(! %4d) No LWK memory for heap at %lx (rc=%ld)\n",
+				current->pid, heap_addr, ret);
+			ret = mosp->brk = mosp->brk_end = heap_addr;
 		} else {
-			if (mosp->lwkmem_init & LWKMEM_CLR_BEFORE) {
-				clear_addr = (void *)heap_addr;
-				clear_len = mosp->heap_page_size;
-			}
-
 			ret = mosp->brk = heap_addr;
 			mosp->brk_end = heap_addr + mosp->heap_page_size;
 			mm->start_brk = mosp->brk;
 			mm->brk = mosp->brk_end;
 		}
 
-		if (LWKMEM_DEBUG_VERBOSE)
-			pr_info("(> %4d) The mOS brk is at %lx\n", current->pid,
-				mosp->brk);
+		first_brk = true;
 
 	} else if (brk == 0) {
 		/* Just a query. */
 		ret = mosp->brk;
-		if (LWKMEM_DEBUG_VERBOSE)
-			pr_info("(> %4d) Just a query, returning brk = 0x%lx\n",
-				current->pid, ret);
-
 	} else if (brk > mosp->brk) {
 
 		/* Expanding the break line.  There are two cases:
@@ -366,10 +309,6 @@ asmlinkage long lwk_sys_brk(unsigned long brk)
 
 		if (brk <= mosp->brk_end) {
 			len = brk - mosp->brk;
-			if (LWKMEM_DEBUG_VERBOSE)
-				pr_info("(> %4d) Sufficient space old 0x%lx + %ld = brk=%lx <= brk-end=%lx\n",
-					current->pid, mosp->brk, len, brk,
-					mosp->brk_end);
 			if (mosp->brk_clear_len >= 0 &&
 			    mosp->brk_clear_len < clear_len)
 				clear_len = mosp->brk_clear_len;
@@ -377,18 +316,19 @@ asmlinkage long lwk_sys_brk(unsigned long brk)
 
 			len = roundup(brk, mosp->heap_page_size) -
 				mosp->brk_end;
-			if (LWKMEM_DEBUG_VERBOSE)
-				pr_info("(> %4d) Expanding brk by %ld bytes (brk=%lx brk_end=%lx)\n",
-					current->pid, len, brk, mosp->brk_end);
 
 			ret = allocate_blocks_fixed(mosp->brk_end, len,
 						    PROT_READ | PROT_WRITE,
 						    flags, lwkmem_brk);
 
 			if (ret != mosp->brk_end) {
-				pr_warn("(! %4d) allocate_blocks_fixed(len %ld) failed\n",
-					current->pid, len);
-				ret = -ENOMEM;
+				/* The proper way to signal an error to the
+				 * runtime is to return the existing brk address
+				 * (see man page for brk).
+				 */
+				pr_warn("(! %4d) Could not expand LWK heap to %lx (rc=%ld)\n",
+					current->pid, mosp->brk_end, ret);
+				ret = mosp->brk;
 				up_write(&mm->mmap_sem);
 				goto out;
 			}
@@ -400,33 +340,28 @@ asmlinkage long lwk_sys_brk(unsigned long brk)
 		 * time ... just move the line back.  If it grows again, we
 		 * are pre allocated.
 		 */
-		if (LWKMEM_DEBUG_VERBOSE)
-			pr_info("(> %4d) Shrinking heap brk=%lx. len=%ld\n",
-				current->pid, brk, mosp->brk_end - brk);
-
 		ret = mosp->brk = brk;
 	}
 
-	/* Release the semaphore before calling memset, which may
+	/* Release the semaphore before calling clear_user(), which may
 	 * take a while.
 	 */
 	up_write(&mm->mmap_sem);
 
 	if (clear_len && clear_addr) {
 		/* Clear only the newly requested amount */
-		memset((void *) clear_addr, 0, clear_len);
+		if (clear_user((void *) clear_addr, clear_len))
+			pr_warn("WARN:%s() failed to clear mem 0x%p [%ld]\n",
+				__func__, clear_addr, clear_len);
 	}
 
  out:
 	if (brk && ret != brk)
 		pr_warn("(! %4d) ret=%lx CPU=%d\n",
 			current->pid, ret, smp_processor_id());
-	else if (LWKMEM_DEBUG_VERBOSE)
-		pr_info("(< %4d) %s(%lx) -> %lx brk=%lx end=%lx CPU=%d\n",
-			current->pid, __func__, brk, ret, mosp->brk,
-			mosp->brk_end, smp_processor_id());
+	if (brk || first_brk)
+		trace_mos_brk(ret, clear_len, clear_addr, current->tgid);
 
-	--current->mos_nesting;
 	return ret;
 }
 
@@ -434,22 +369,11 @@ asmlinkage long lwk_sys_remap_file_pages(unsigned long start,
 		unsigned long size, unsigned long prot, unsigned long pgoff,
 		unsigned long flags)
 {
-	long ret;
+	pr_debug("%s(start=0x%lx size=%ld prot=0x%lx off=0x%lx flags=0x%lx) CPU=%d pid=%d\n",
+		 __func__, start, size, prot, pgoff, flags, smp_processor_id(),
+		 current->pid);
 
-	if (LWKMEM_DEBUG)
-		pr_info("%s(start=0x%lx size=%ld prot=0x%lx off=0x%lx flags=0x%lx) CPU=%d pid=%d nst=%d\n",
-		       __func__, start, size, prot, pgoff, flags,
-		       smp_processor_id(), current->pid, current->mos_nesting);
-
-	if (current->mos_nesting > 0)
-		return -ENOSYS;
-
-	current->mos_nesting++;
-
-	ret = sys_remap_file_pages(start, size, prot, pgoff, flags);
-
-	--current->mos_nesting;
-	return ret;
+	return -ENOSYS;
 }
 
 /*
@@ -458,39 +382,41 @@ asmlinkage long lwk_sys_remap_file_pages(unsigned long start,
  * Also, letting Linux unmap pages after a MADV_DONTNEED can lead to page
  * faults.
  */
-asmlinkage long lwk_sys_madvise(unsigned long start, size_t len_in,
+asmlinkage long lwk_sys_madvise(unsigned long addr, size_t len,
 		int behavior)
 {
 	struct mos_process_t *mos_p;
 	struct vm_area_struct *vma;
 	long ret;
 
-	if (LWKMEM_DEBUG)
-		pr_info("%s(start=0x%lx len=%ld behav=0x%x) CPU=%d pid=%d nst=%d\n",
-		       __func__, start, len_in, behavior,
-		       smp_processor_id(), current->pid, current->mos_nesting);
-
 	mos_p = current->mos_process;
 
 	if (!mos_p) {
-		pr_warn("(!) %s() not an mOS pid %d\n", __func__, current->pid);
-		return -ENOSYS;
+		pr_warn("(!) %s(): pid %d is not an mOS process.\n",
+			__func__, current->pid);
+		ret = -ENOSYS;
+		goto out;
 	}
 
 	down_read(&current->mm->mmap_sem);
-	vma = mos_find_vma(current->mm, start);
+	vma = mos_find_vma(current->mm, addr);
 	up_read(&current->mm->mmap_sem);
+
 	if (!vma) {
 		pr_warn("(!) %s() no vma for pid %d\n", __func__, current->pid);
-		return -ENOSYS;
+		ret = -ENOSYS;
+		goto out;
 	}
 
 	if (is_lwkmem(vma))
 		ret = 0;
+
 	else
 		/* Not LWK memory; let Linux handle it */
 		ret = -ENOSYS;
 
+ out:
+	trace_mos_madvise(addr, len, behavior, ret, current->tgid);
 	return ret;
 
 }
@@ -500,89 +426,56 @@ asmlinkage long lwk_sys_mbind(unsigned long start, unsigned long len,
 		unsigned long maxnode, unsigned int flags)
 {
 	struct vm_area_struct *vma;
+	struct mos_process_t *mosp = current->mos_process;
+	long ret = -ENOSYS;
 
-	if (LWKMEM_DEBUG)
-		pr_info("%s(start=0x%lx len=%ld mode=0x%lx nmask=%p maxnode=%ld flags=0x%x) CPU=%d pid=%d nst=%d\n",
-		       __func__, start, len, mode, nmask, maxnode, flags,
-		       smp_processor_id(), current->pid, current->mos_nesting);
+	if (!mosp) {
+		pr_warn("(!) %s(): pid %d is not an mOS process.\n",
+			__func__, current->pid);
+		goto out;
+	}
 
 	vma = mos_find_vma(current->mm, start);
 
-	if (vma && is_lwkmem(vma)) {
-		if (mode == MPOL_PREFERRED) {
-			if (LWKMEM_DEBUG)
-				pr_warn("(!) %s : ignoring MPOL_PREFERRED for LWK VMA\n",
-					__func__);
-			return 0;
-		}
-	}
+	if (vma && is_lwkmem(vma))
+		if (mode == MPOL_PREFERRED)
+			ret = 0;
 
-	return -ENOSYS;
+ out:
+	trace_mos_mbind(start, len, mode, flags, ret, current->tgid);
+	return ret;
 }
 
 asmlinkage long lwk_sys_set_mempolicy(int mode,
 		const unsigned long __user *nmask, unsigned long maxnode)
 {
-	long ret;
+	pr_debug("%s(mode=0x%x nmask=%p maxnode=%ld) CPU=%d pid=%d\n",
+		 __func__, mode, nmask, maxnode, smp_processor_id(),
+		 current->pid);
 
-	if (LWKMEM_DEBUG)
-		pr_info("%s(mode=0x%x nmask=%p maxnode=%ld) CPU=%d pid=%d nst=%d\n",
-		       __func__, mode, nmask, maxnode,
-		       smp_processor_id(), current->pid, current->mos_nesting);
-
-	if (current->mos_nesting > 0)
-		return -ENOSYS;
-
-	current->mos_nesting++;
-
-	ret = sys_set_mempolicy(mode, nmask, maxnode);
-
-	--current->mos_nesting;
-	return ret;
+	return -ENOSYS;
 }
 
 asmlinkage long lwk_sys_migrate_pages(pid_t pid, unsigned long maxnode,
 		const unsigned long __user *old_nodes,
 		const unsigned long __user *new_nodes)
 {
-	long ret;
+	pr_debug("%s(pid=%d maxnode=%ld old=%p new=%p) CPU=%d pid=%d\n",
+		 __func__, pid, maxnode, old_nodes, new_nodes,
+		 smp_processor_id(), current->pid);
 
-	if (LWKMEM_DEBUG)
-		pr_info("%s(pid=%d maxnode=%ld old=%p new=%p) CPU=%d pid=%d nst=%d\n",
-		       __func__, pid, maxnode, old_nodes, new_nodes,
-		       smp_processor_id(), current->pid, current->mos_nesting);
-
-	if (current->mos_nesting > 0)
-		return -ENOSYS;
-
-	current->mos_nesting++;
-
-	ret = sys_migrate_pages(pid, maxnode, old_nodes, new_nodes);
-
-	--current->mos_nesting;
-	return ret;
+	return -ENOSYS;
 }
 
 asmlinkage long lwk_sys_get_mempolicy(int __user *policy,
 		unsigned long __user *nmask, unsigned long maxnode,
 		unsigned long addr, unsigned long flags)
 {
-	long ret;
+	pr_debug("%s(policy=%p nmask=%p maxnode=%ld addr=0x%lx flags=0x%lx) CPU=%d pid=%d\n",
+		__func__, policy, nmask, maxnode, addr, flags,
+		smp_processor_id(), current->pid);
 
-	if (LWKMEM_DEBUG)
-		pr_info("%s(policy=%p nmask=%p maxnode=%ld addr=0x%lx flags=0x%lx) CPU=%d pid=%d nst=%d\n",
-		       __func__, policy, nmask, maxnode, addr, flags,
-		       smp_processor_id(), current->pid, current->mos_nesting);
-
-	if (current->mos_nesting > 0)
-		return -ENOSYS;
-
-	current->mos_nesting++;
-
-	ret = sys_get_mempolicy(policy, nmask, maxnode, addr, flags);
-
-	--current->mos_nesting;
-	return ret;
+	return -ENOSYS;
 }
 
 asmlinkage long lwk_sys_move_pages(pid_t pid, unsigned long nr_pages,
@@ -590,157 +483,79 @@ asmlinkage long lwk_sys_move_pages(pid_t pid, unsigned long nr_pages,
 		const int __user *nodes,
 		int __user *status, int flags)
 {
-	long ret;
+	pr_debug("%s(pid=%d nr_pages=%ld pages=%p nodes=%p status=%p flags=0x%x) CPU=%d pid=%d\n",
+		 __func__, pid, nr_pages, pages, nodes, status, flags,
+		 smp_processor_id(), current->pid);
 
-	if (LWKMEM_DEBUG)
-		pr_info("%s(pid=%d nr_pages=%ld pages=%p nodes=%p status=%p flags=0x%x) CPU=%d pid=%d nst=%d\n",
-		       __func__, pid, nr_pages, pages, nodes, status, flags,
-		       smp_processor_id(), current->pid, current->mos_nesting);
-
-	if (current->mos_nesting > 0)
-		return -ENOSYS;
-
-	current->mos_nesting++;
-
-	ret = sys_move_pages(pid, nr_pages, pages, nodes, status, flags);
-
-	--current->mos_nesting;
-	return ret;
+	return -ENOSYS;
 }
 
 asmlinkage long lwk_sys_mincore(unsigned long start, size_t len,
 		unsigned char __user *vec)
 {
-	long ret;
+	pr_debug("%s(start=0x%lx len=%ld vec=%p) CPU=%d pid=%d\n",
+		 __func__, start, len, vec, smp_processor_id(), current->pid);
 
-	if (LWKMEM_DEBUG)
-		pr_info("%s(start=0x%lx len=%ld vec=%p) CPU=%d pid=%d nst=%d\n",
-		       __func__, start, len, vec,
-		       smp_processor_id(), current->pid, current->mos_nesting);
-
-	if (current->mos_nesting > 0)
-		return -ENOSYS;
-
-	current->mos_nesting++;
-
-	ret = sys_mincore(start, len, vec);
-
-	--current->mos_nesting;
-	return ret;
+	return -ENOSYS;
 }
 
 asmlinkage long lwk_sys_mlock(unsigned long start, size_t len)
 {
-	long ret;
+	pr_debug("%s(start=0x%lx len=%ld) CPU=%d pid=%d\n",
+		 __func__, start, len, smp_processor_id(), current->pid);
 
-	if (LWKMEM_DEBUG)
-		pr_info("%s(start=0x%lx len=%ld) CPU=%d pid=%d nst=%d\n",
-		       __func__, start, len,
-		       smp_processor_id(), current->pid, current->mos_nesting);
-
-	if (current->mos_nesting > 0)
-		return -ENOSYS;
-
-	current->mos_nesting++;
-
-	ret = sys_mlock(start, len);
-
-	--current->mos_nesting;
-	return ret;
+	return -ENOSYS;
 }
 
 asmlinkage long lwk_sys_munlock(unsigned long start, size_t len)
 {
-	long ret;
+	pr_debug("%s(start=0x%lx len=%ld) CPU=%d pid=%d\n",
+		 __func__, start, len, smp_processor_id(), current->pid);
 
-	if (LWKMEM_DEBUG)
-		pr_info("%s(start=0x%lx len=%ld) CPU=%d pid=%d nst=%d\n",
-		       __func__, start, len,
-		       smp_processor_id(), current->pid, current->mos_nesting);
-
-	if (current->mos_nesting > 0)
-		return -ENOSYS;
-
-	current->mos_nesting++;
-
-	ret = sys_munlock(start, len);
-
-	--current->mos_nesting;
-	return ret;
+	return -ENOSYS;
 }
 
 asmlinkage long lwk_sys_mlockall(int flags)
 {
-	long ret;
+	pr_debug("%s(flags=0x%x) CPU=%d pid=%d\n",
+		 __func__, flags, smp_processor_id(), current->pid);
 
-	if (LWKMEM_DEBUG)
-		pr_info("%s(flags=0x%x) CPU=%d pid=%d nst=%d\n",
-		       __func__, flags,
-		       smp_processor_id(), current->pid, current->mos_nesting);
-
-	if (current->mos_nesting > 0)
-		return -ENOSYS;
-
-	current->mos_nesting++;
-
-	ret = sys_mlockall(flags);
-
-	--current->mos_nesting;
-	return ret;
+	return -ENOSYS;
 }
 
 asmlinkage long lwk_sys_munlockall(void)
 {
-	long ret;
+	pr_debug("%s() CPU=%d pid=%d\n",
+		 __func__, smp_processor_id(), current->pid);
 
-	if (LWKMEM_DEBUG)
-		pr_info("%s() CPU=%d pid=%d nst=%d\n",
-		       __func__,
-		       smp_processor_id(), current->pid, current->mos_nesting);
-
-	if (current->mos_nesting > 0)
-		return -ENOSYS;
-
-	current->mos_nesting++;
-
-	ret = sys_munlockall();
-
-	--current->mos_nesting;
-	return ret;
+	return -ENOSYS;
 }
 
 asmlinkage long lwk_sys_mprotect(unsigned long start, size_t len,
 		unsigned long prot)
 {
-	long ret;
 	struct vm_area_struct *vma;
+	struct mos_process_t *mosp = current->mos_process;
+	long ret = -ENOSYS;
 
-	if (LWKMEM_DEBUG) {
-		pr_info("%s(start=0x%lx len=%ld prot=0x%lx) CPU=%d",
-		       __func__, start, len, prot, smp_processor_id());
-		pr_info("pid=%d nst=%d\n", current->pid, current->mos_nesting);
+	if (!mosp) {
+		pr_warn("(!) %s(): pid %d is not an mOS process.\n",
+			__func__, current->pid);
+		goto out;
 	}
 
 	down_read(&current->mm->mmap_sem);
 	vma = mos_find_vma(current->mm, start);
 	up_read(&current->mm->mmap_sem);
-	if (vma && is_lwkmem(vma) && ((prot == PROT_NONE) ||
-	    (prot & (PROT_EXEC | PROT_READ)))) {
-		if (LWKMEM_DEBUG)
-			pr_warn("(!) LWK mprotect ignores PROT_NONE, PROT_READ, and PROT_EXEC).\n");
+	if (vma && is_lwkmem(vma)) {
+		/* We ignore PROT_NONE and also PROT_EXEC/PROT_READ bits. */
+		if ((prot == PROT_NONE) || (prot & (PROT_EXEC | PROT_READ)))
+			ret = 0;
 
-		return 0;
 	}
 
-	if (current->mos_nesting > 0)
-		return -ENOSYS;
-
-
-	current->mos_nesting++;
-
-	ret = sys_mprotect(start, len, prot);
-
-	--current->mos_nesting;
+ out:
+	trace_mos_mprotect(start, len, prot, ret, current->tgid);
 	return ret;
 }
 
@@ -760,26 +575,22 @@ asmlinkage long lwk_sys_mremap(unsigned long addr, unsigned long old_len,
 	static int vm_flags[] = { VM_MAYREAD, VM_MAYWRITE, VM_MAYEXEC };
 	static int prot_flags[] = { PROT_READ, PROT_WRITE, PROT_EXEC };
 
-	if (LWKMEM_DEBUG)
-		pr_info("%s(addr=0x%lx oldlen=%ld newlen=%ld flags=0x%lx newaddr=0x%lx) CPU=%d pid=%d nst=%d\n",
-		       __func__, addr, old_len, new_len, flags, new_addr,
-		       smp_processor_id(), current->pid, current->mos_nesting);
-
 	mos_p = current->mos_process;
 
 	if (!mos_p) {
-		pr_err("(!) %s() : not an mOS pid %d\n",
+		pr_warn("(!) %s(): pid %d is not an mOS process.\n",
 			__func__, current->pid);
-		return -EFAULT;
+		ret = -EFAULT;
+		goto trace;
 	}
 
-	if (down_write_killable(&current->mm->mmap_sem))
-		return -EINTR;
+	if (down_write_killable(&current->mm->mmap_sem)) {
+		ret = -EINTR;
+		goto trace;
+	}
 
 	vma = mos_find_vma(current->mm, addr);
 	if (!vma || !is_lwkmem(vma)) {
-		if (LWKMEM_DEBUG_VERBOSE)
-			pr_info("mremap: VMA 0x%lx is not LWK memory.\n", addr);
 		ret = -ENOSYS;
 		goto out;
 	}
@@ -795,7 +606,7 @@ asmlinkage long lwk_sys_mremap(unsigned long addr, unsigned long old_len,
 	 */
 
 	if ((flags & MREMAP_FIXED) && (addr != new_addr)) {
-		pr_info("%s() : unsupported relocation flags:%lx old:%lx new:%lx\n",
+		pr_warn("%s() : unsupported relocation flags:%lx old:%lx new:%lx\n",
 			__func__, flags, addr, new_addr);
 		ret = -EINVAL;
 		goto out;
@@ -814,7 +625,7 @@ asmlinkage long lwk_sys_mremap(unsigned long addr, unsigned long old_len,
 		clear_addr = (void *) ret;
 		ret = addr;
 	} else {
-		pr_info("%s() : unexpected remap %lx -> %lx\n",
+		pr_warn("%s() : unexpected remap %lx -> %lx\n",
 			__func__, addr + old_len, ret);
 		ret = -EFAULT;
 	}
@@ -822,35 +633,19 @@ asmlinkage long lwk_sys_mremap(unsigned long addr, unsigned long old_len,
  out:
 	up_write(&current->mm->mmap_sem);
 
-	if ((mos_p->lwkmem_init & LWKMEM_CLR_BEFORE) && clear_len && clear_addr)
-		memset(clear_addr, 0, clear_len);
+ trace:
+	trace_mos_mremap(addr, old_len, new_len, flags, new_addr, ret, current->tgid);
 
-	if (LWKMEM_DEBUG)
-		pr_info("(<) %s(addr=0x%lx oldlen=%ld newlen=%ld flags=0x%lx newaddr=0x%lx) = %lx CPU=%d pid=%d nst=%d\n",
-			__func__, addr, old_len, new_len, flags, new_addr,
-			ret, smp_processor_id(), current->pid,
-			current->mos_nesting);
+
 	return ret;
 }
 
 asmlinkage long lwk_sys_msync(unsigned long start, size_t len, int flags)
 {
-	long ret;
+	pr_debug("%s(start=0x%lx len=%ld flags=0x%x) CPU=%d pid=%d\n",
+		 __func__, start, len, flags, smp_processor_id(), current->pid);
 
-	if (LWKMEM_DEBUG)
-		pr_info("%s(start=0x%lx len=%ld flags=0x%x) CPU=%d pid=%d nst=%d\n",
-		       __func__, start, len, flags,
-		       smp_processor_id(), current->pid, current->mos_nesting);
-
-	if (current->mos_nesting > 0)
-		return -ENOSYS;
-
-	current->mos_nesting++;
-
-	ret = sys_msync(start, len, flags);
-
-	--current->mos_nesting;
-	return ret;
+	return -ENOSYS;
 }
 
 asmlinkage long lwk_sys_process_vm_readv(pid_t pid,
@@ -858,22 +653,11 @@ asmlinkage long lwk_sys_process_vm_readv(pid_t pid,
 		const struct iovec __user *rvec, unsigned long riovcnt,
 		unsigned long flags)
 {
-	long ret;
+	pr_debug("%s(pid=%d lvec=%p lcnt=%ld rvec=%p rcnt=%ld flags=0x%lx) CPU=%d pid=%d\n",
+		 __func__, pid, lvec, liovcnt, rvec, riovcnt, flags,
+		 smp_processor_id(), current->pid);
 
-	if (LWKMEM_DEBUG)
-		pr_info("%s(pid=%d lvec=%p lcnt=%ld rvec=%p rcnt=%ld flags=0x%lx) CPU=%d pid=%d nst=%d\n",
-		       __func__, pid, lvec, liovcnt, rvec, riovcnt, flags,
-		       smp_processor_id(), current->pid, current->mos_nesting);
-
-	if (current->mos_nesting > 0)
-		return -ENOSYS;
-
-	current->mos_nesting++;
-
-	ret = sys_process_vm_readv(pid, lvec, liovcnt, rvec, riovcnt, flags);
-
-	--current->mos_nesting;
-	return ret;
+	return -ENOSYS;
 }
 
 asmlinkage long lwk_sys_process_vm_writev(pid_t pid,
@@ -881,63 +665,28 @@ asmlinkage long lwk_sys_process_vm_writev(pid_t pid,
 		unsigned long liovcnt, const struct iovec __user *rvec,
 		unsigned long riovcnt, unsigned long flags)
 {
-	long ret;
+	pr_debug("%s(pid=%d lvec=%p lcnt=%ld rvec=%p rcnt=%ld flags=0x%lx) CPU=%d pid=%d\n",
+		 __func__, pid, lvec, liovcnt, rvec, riovcnt, flags,
+		 smp_processor_id(), current->pid);
 
-	if (LWKMEM_DEBUG)
-		pr_info("%s(pid=%d lvec=%p lcnt=%ld rvec=%p rcnt=%ld flags=0x%lx) CPU=%d pid=%d nst=%d\n",
-		       __func__, pid, lvec, liovcnt, rvec, riovcnt, flags,
-		       smp_processor_id(), current->pid, current->mos_nesting);
-
-	if (current->mos_nesting > 0)
-		return -ENOSYS;
-
-	current->mos_nesting++;
-
-	ret = sys_process_vm_writev(pid, lvec, liovcnt, rvec, riovcnt, flags);
-
-	--current->mos_nesting;
-	return ret;
+	return -ENOSYS;
 }
 
 asmlinkage long lwk_sys_readahead(int fd, loff_t offset, size_t count)
 {
-	long ret;
+	pr_debug("%s(fd=%d offs=0x%llx cnt=%ld) CPU=%d pid=%d\n",
+		 __func__, fd, offset, count, smp_processor_id(), current->pid);
 
-	if (LWKMEM_DEBUG)
-		pr_info("%s(fd=%d offs=0x%llx cnt=%ld) CPU=%d pid=%d nst=%d\n",
-		       __func__, fd, offset, count,
-		       smp_processor_id(), current->pid, current->mos_nesting);
-
-	if (current->mos_nesting > 0)
-		return -ENOSYS;
-
-	current->mos_nesting++;
-
-	ret = sys_readahead(fd, offset, count);
-
-	--current->mos_nesting;
-	return ret;
+	return -ENOSYS;
 }
 
 asmlinkage long lwk_sys_memfd_create(const char __user *uname,
 		unsigned int flags)
 {
-	long ret;
+	pr_debug("%s(uname=%p flags=0x%x) CPU=%d pid=%d\n",
+		 __func__, uname, flags, smp_processor_id(), current->pid);
 
-	if (LWKMEM_DEBUG)
-		pr_info("%s(uname=%p flags=0x%x) CPU=%d pid=%d nst=%d\n",
-		       __func__, uname, flags,
-		       smp_processor_id(), current->pid, current->mos_nesting);
-
-	if (current->mos_nesting > 0)
-		return -ENOSYS;
-
-	current->mos_nesting++;
-
-	ret = sys_memfd_create(uname, flags);
-
-	--current->mos_nesting;
-	return ret;
+	return -ENOSYS;
 }
 
 SYSCALL_DEFINE4(mos_get_addr_info,
@@ -957,8 +706,8 @@ asmlinkage long lwk_sys_mos_get_addr_info(unsigned long addr,
 	int rc = 0;
 	struct mm_struct *mm = current->mm;
 	struct vm_area_struct *vma;
-	struct page *phys_page;
-	int size, numa;
+	struct page *phys_page = 0;
+	int size, numa = -1;
 	struct mos_process_t *mosp;
 	int nid;
 	enum lwkmem_kind_t knd;
@@ -970,8 +719,7 @@ asmlinkage long lwk_sys_mos_get_addr_info(unsigned long addr,
 
 	vma = mos_find_vma(mm, addr);
 	if (!vma) {
-		if (LWKMEM_DEBUG)
-			pr_info("%s() Can't find vma\n", __func__);
+		pr_debug("%s() Can't find vma\n", __func__);
 		rc = -EINVAL;
 		goto out;
 	}
@@ -980,9 +728,7 @@ asmlinkage long lwk_sys_mos_get_addr_info(unsigned long addr,
 		/* FIXME: For now. Eventually we want to return info for Linux
 		 * addresses as well.
 		 */
-		if (LWKMEM_DEBUG)
-			pr_info("%s() This probably is a Linux address\n",
-				__func__);
+		pr_debug("%s() This probably is a Linux address\n", __func__);
 		rc = -EINVAL;
 		goto out;
 	}
@@ -1015,7 +761,6 @@ asmlinkage long lwk_sys_mos_get_addr_info(unsigned long addr,
 	/* Find the block list and numa domain */
 	down_read(&current->mm->mmap_sem);
 
-	numa = -1;
 	for_each_online_node(nid)   {
 		busyl = &mosp->busy_list[knd][nid];
 		list_for_each_entry(bl, busyl, list)   {
@@ -1054,9 +799,8 @@ found_it:
 	up_read(&current->mm->mmap_sem);
 
 	if (numa < 0)   {
-		if (LWKMEM_DEBUG)
-			pr_info("%s() No NUMA domain for virt 0x%lx\n",
-				__func__, addr);
+		pr_debug("%s() No NUMA domain for virt 0x%lx\n",
+			 __func__, addr);
 		rc = -EINVAL;
 		goto out;
 	}
@@ -1080,9 +824,8 @@ found_it:
 	}
 
 out:
-	if (LWKMEM_DEBUG)
-		pr_info("%s() v_addr 0x%lx = p_addr 0x%llx, page size %d, numa domain %d\n",
-			__func__, addr, page_to_phys(phys_page), size, numa);
+	pr_debug("%s() v_addr 0x%lx = p_addr 0x%llx, page size %d, numa domain %d\n",
+		 __func__, addr, phys_page ? page_to_phys(phys_page) : 0, size, numa);
 	return rc;
 
 }

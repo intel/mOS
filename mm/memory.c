@@ -630,13 +630,11 @@ void free_pgtables(struct mmu_gather *tlb, struct vm_area_struct *vma,
 		unlink_anon_vmas(vma);
 		unlink_file_vma(vma);
 
-#ifdef CONFIG_MOS_LWKMEM
 		if (is_lwkmem(vma)) {
 			free_pgd_range(tlb, addr, vma->vm_end, floor, next? next->vm_start: ceiling);
 			vma = next;
 			continue;
 		}
-#endif /* CONFIG_MOS_LWKMEM */
 
 		if (is_vm_hugetlb_page(vma)) {
 			hugetlb_free_pgd_range(tlb, addr, vma->vm_end,
@@ -1441,17 +1439,6 @@ static inline unsigned long zap_pmd_range(struct mmu_gather *tlb,
 	do {
 		next = pmd_addr_end(addr, end);
 
-#ifdef CONFIG_MOS_LWKMEM
-		if (is_lwkmem(vma)) {
-			if (LWK_PAGE_SHIFT(vma) >= PMD_SHIFT) {
-				/* FIXME: Not sure I need this */
-				tlb_remove_pmd_tlb_entry(tlb, pmd, addr);
-				/* Don't drop into the trans_huge code below */
-			}
-			goto next;
-		}
-#endif /* CONFIG_MOS_LWKMEM */
-
 		if (is_swap_pmd(*pmd) || pmd_trans_huge(*pmd) || pmd_devmap(*pmd)) {
 			if (next - addr != HPAGE_PMD_SIZE)
 				__split_huge_pmd(vma, pmd, addr, false, NULL);
@@ -1533,8 +1520,12 @@ void unmap_page_range(struct mmu_gather *tlb,
 	unsigned long next;
 
 	BUG_ON(addr >= end);
-	if (is_lwkmem(vma))
+
+	if (is_lwkmem(vma)) {
+		unmap_lwkmem_range(tlb->mm, vma, addr, end);
 		return;
+	}
+
 	tlb_start_vma(tlb, vma);
 	pgd = pgd_offset(vma->vm_mm, addr);
 	do {
@@ -2104,6 +2095,12 @@ int remap_pfn_range(struct vm_area_struct *vma, unsigned long addr,
 	unsigned long remap_pfn = pfn;
 	int err;
 
+	if (is_lwkmem(vma)) {
+		pr_err("WARN:%s() LWKMEM addr %lx pfn %ld size %ld prot %lx\n",
+			__func__, addr, pfn, size, prot.pgprot);
+		return -EINVAL;
+	}
+
 	/*
 	 * Physically remapped pages are special. Tell the
 	 * rest of the world about it:
@@ -2572,7 +2569,7 @@ static int wp_page_copy(struct vm_fault *vmf)
 		 */
 		set_pte_at_notify(mm, vmf->address, vmf->pte, entry);
 		update_mmu_cache(vma, vmf->address, vmf->pte);
-		if (old_page) {
+		if (old_page && !is_lwkpg(old_page)) {
 			/*
 			 * Only after switching the pte to the new page may
 			 * we remove the mapcount here. Otherwise another
@@ -2610,7 +2607,7 @@ static int wp_page_copy(struct vm_fault *vmf)
 
 	pte_unmap_unlock(vmf->pte, vmf->ptl);
 	mmu_notifier_invalidate_range_end(mm, mmun_start, mmun_end);
-	if (old_page) {
+	if (old_page && !is_lwkpg(old_page)) {
 		/*
 		 * Don't let another task, with possibly unlocked vma,
 		 * keep the mlocked page.
