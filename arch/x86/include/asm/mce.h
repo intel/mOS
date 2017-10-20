@@ -203,6 +203,8 @@ enum mce_notifier_prios {
 struct notifier_block;
 extern void mce_register_decode_chain(struct notifier_block *nb);
 extern void mce_unregister_decode_chain(struct notifier_block *nb);
+extern void mce_lwkprocess_begin(cpumask_t *lwkcpus);
+extern void mce_lwkprocess_end(cpumask_t *lwkcpus);
 
 #include <linux/percpu.h>
 #include <linux/atomic.h>

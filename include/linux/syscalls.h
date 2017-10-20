@@ -996,6 +996,9 @@ asmlinkage long sys_statx(int dfd, const char __user *path, unsigned flags,
 			s == sys_clock_settime ||	\
 			s == sys_futex ||	        \
 			s == sys_getitimer ||		\
+			s == sys_getpid ||		\
+			s == sys_getppid ||		\
+			s == sys_getpriority ||		\
 			s == sys_gettimeofday ||	\
 			s == sys_mbind ||		\
 			s == sys_mmap ||		\
@@ -1027,7 +1030,7 @@ static inline void __mos_linux_enter(void *sys_wrap)
 {
 #ifdef CONFIG_MOS_MOVE_SYSCALLS
 	if (!__mos_do_on_original_cpu(sys_wrap))
-		mos_linux_enter();
+		mos_linux_enter(sys_wrap);
 #endif
 }
 
