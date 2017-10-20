@@ -539,7 +539,8 @@ struct mos_prio_array {
 
 struct mos_sched_stats {
 	int pid;
-	unsigned int max_commit_level;
+	unsigned int max_compute_level;
+	unsigned int max_util_level;
 	unsigned int max_running;
 	unsigned int guest_dispatch;
 	unsigned int guests;
@@ -560,22 +561,32 @@ struct mos_topology {
 };
 
 struct mos_rq {
+	raw_spinlock_t lock;
 	struct mos_prio_array active;
 	unsigned int mos_nr_running;
 	unsigned int rr_nr_running;
 	u64 mos_time;
-	pid_t idle_pid;
+	pid_t idle_pid; /* PID of the mOS idle task */
+	pid_t owner;
 	struct task_struct *idle;
 	u64 mos_runtime;
+	atomic_t exclusive_pid; /* PID of an exclusive user */
 
 	/* Topology information */
 	struct mos_topology topology;
 
-	/* Number of mOS tasks committed to run on this CPU */
-	atomic_t commit_level;
+	/* MWAIT CSTATE information */
+	unsigned int shallow_sleep_mwait;
+	unsigned int deep_sleep_mwait;
+
+	/* Number of mOS utility threads committed to run on this CPU. */
+	unsigned int utility_commits;
+	/* Number of mOS compute threads committed to run on this CPU */
+	unsigned int compute_commits;
 
 	/* Scheduler statistics */
 	struct mos_sched_stats stats;
+
 
 };
 #endif

@@ -1420,6 +1420,7 @@ struct mos_clone_hints {
 struct mos_active_hints {
 	unsigned int behavior;
 	unsigned int location;
+	unsigned long key;
 	nodemask_t nodes;
 };
 
