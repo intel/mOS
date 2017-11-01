@@ -175,7 +175,7 @@ echo "/usr/include"
 echo ""
 if [ "$MOS_TOOLS" ]; then
 echo "%post mOS"
-echo "/usr/sbin/ldconfig && ln -fs /usr/lib/libmos.so.1 /usr/lib/libmos.so"
+echo "ldconfig && ln -fs libmos.so.1 /usr/lib/libmos.so"
 echo ""
 echo "%files mOS"
 echo '%defattr (-, root, root)'

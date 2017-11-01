@@ -13,7 +13,7 @@
 hostprogs-y := yod
 scriptprogs-y := yod.sh yod.1.man 02-mos.rules
 mos-lib-objs := ../lib/mos_cpuset.o
-yod-objs := yod.o mos_plugin.o test_plugin.o yod_cpuset.o layout.o
+yod-objs := yod.o mos_plugin.o test_plugin.o yod_cpuset.o layout.o numa.o
 yod-objs += $(mos-lib-objs)
 
 HOSTLOADLIBES_yod := -lm

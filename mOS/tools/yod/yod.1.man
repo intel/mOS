@@ -1,9 +1,22 @@
 .\"                                      Hey, EMACS: -*- nroff -*-
+.\" -------------------------------------------------------------------------
+.\" Multi Operating System (mOS)
+.\" Copyright (c) 2015-2017, Intel Corporation.
+.\"
+.\" This program is free software; you can redistribute it and/or modify it
+.\" under the terms and conditions of the GNU General Public License,
+.\" version 2, as published by the Free Software Foundation.
+.\"
+.\" This program is distributed in the hope it will be useful, but WITHOUT
+.\" ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+.\" FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+.\" more details.
+.\" -------------------------------------------------------------------------
 .\" First parameter, NAME, should be all caps
 .\" Second parameter, SECTION, should be 1-8, maybe w/ subsection
 .\" other parameters are allowed: see man(7), man(1)
-.TH YOD 1 "April 1, 2015"
 .\" Please adjust this date whenever revising the manpage.
+.TH YOD 1 "July 7, 2017"
 .\"
 .\" Some roff macros, for reference:
 .\" .nh        disable hyphenation
@@ -85,7 +98,7 @@ Other options:
 .B --util_threads, -u <\fInumber\fP>
 Specify \fInumber\fP of threads to be identified as utility threads within
 the process being launched. If a value is specified, the kernel will
-heurestically identify that number of threads as utility threads and
+heuristically identify that number of threads as utility threads and
 provide special placement and behaviors to those threads. If no value
 is specified, the kernel will make no heuristic identification of utility
 threads.
@@ -114,7 +127,7 @@ Provides a hint to lay out ranks in a prescribed order.  A compact layout will p
 adjacent ranks near each other, from a NUMA perspective.  A scatter layout will
 interleave ranks using a stride; if not specified, the stride will be the number of
 NUMA domains for CPUs.  Disabling the layout will not prescribe any specific layout
-of the ranks with respect to NUMA domains.  This option is a hint and requires addition
+of the ranks with respect to NUMA domains.  This option is a hint and requires additional
 support from the underlying MPI launch mechanism.
 .TP
 .B --aligned-mmap \fIthreshold[:alignment]\fP
@@ -133,8 +146,14 @@ the data segment.  For negative \fIsize\fP values, the entire expanded region wi
 be cleared.  The default behavior is to clear 4K.  The \fIsize\fP argument may be
 specified in integer or symbolic format (4K, 2M, 1G, etc.).
 .TP
+.B --mosview <lwk, all>
+Sets the mOS view of process being launched.  If \fBlwk\fP is specified, the 
+process will see only LWK global resources but not Linux resources.  If \fBall\fP
+is specified, the process will see both LWK and Linux resources.  The default is
+\fBall\fP.
+.TP
 .B --dry-run
-Do not actually reserved resources and launch.
+Do not actually reserve resources and launch.
 
 .TP
 .B --verbose, -v <\fInumber\fP>
@@ -227,13 +246,13 @@ divided by OMP_NUM_THREADS.
 .SH MEMORY PREFERENCES
 
 Preferences have the form \fBscope[:size]:order\fP.  The \fBscope\fP term
-identifes a general form of memory usage and is one of \fBmmap, brk, stack,
+identifies a general form of memory usage and is one of \fBmmap, brk, stack,
 static\fP or \fBall.\fP.
 
 .PP
 The \fBorder\fP term lists types of memory in order of preference.  This is
 a comma delimited list of \fBhbm, dram,\fP and \fBnvram\fP.  The default
-ordering is hbm,dram,nvram.  If not all types of memory are exlicitly
+ordering is hbm,dram,nvram.  If not all types of memory are explicitly
 stated, the list is implicitly completed with missing types from this
 default order.
 
@@ -296,12 +315,12 @@ variable.
 .SH ERRORS
 
 .PP
-It is an error to attempt to reserve a CPU or select an ad-hoc CPU that is
+It is an error to attempt to reserve a CPU that is
 not designated as an mOS CPU.  \fBYod\fP will exit with -EINVAL in this
 case.
 
 .PP
-It is an error to attempt to reserve a CPU or select an ad-hoc CPU that is
+It is an error to attempt to reserve a CPU that is
 already reserved by an existing mOS process. \fBYod\fP will exit with
 -EBUSY in this case.
 

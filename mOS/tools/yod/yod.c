@@ -39,6 +39,8 @@
 #define YOD_MEM_ALGORITHM_4KB 0
 #define YOD_MEM_ALGORITHM_LARGE 1
 
+#define YOD_MOS_VIEW_LEN 	20
+
 static const char * const YOD_MEM_ALGORITHMS[] = {
 	"4kb",
 	"large"
@@ -58,10 +60,17 @@ static const char * const SCOPES[] = {
 	"all"
 };
 
-static const char * const MEM_GROUPS[] = {
+const char * const MEM_GROUPS[] = {
 	"hbm",
 	"dram",
 	"nvram",
+};
+
+static const char * const MAP_TYPES[] = {
+	"core",
+	"tile",
+	"node",
+	"mem_group",
 };
 
 /*
@@ -76,6 +85,7 @@ static const char * const MEM_GROUPS[] = {
 #define YOD_OPT_RANK_LAYOUT (YOD_OPT_BASE | 0x0006)
 #define YOD_OPT_ALIGNED_MMAP (YOD_OPT_BASE | 0x0007)
 #define YOD_OPT_BRK_CLEAR_LEN (YOD_OPT_BASE | 0x0008)
+#define YOD_OPT_MOSVIEW (YOD_OPT_BASE | 0x0009)
 
 /*
  * yod state.
@@ -105,14 +115,13 @@ static struct lock_options_t lock_options = {
 	.stride = -1, /* To be filled in later */
 };
 
-static double yod_simple_fitness(lwk_request_t *);
-
 static lwk_request_t lwk_req = {
 	.layout_algorithm = yod_general_layout_algorithm,
-	.fitness = yod_simple_fitness,
 	.options = {'\0', '\0', }, /* two nulls indicates end of list */
 	.options_idx = 0,
 };
+
+static char view[YOD_MOS_VIEW_LEN] = { "all" };
 
 struct help_text {
 	const char *option;
@@ -147,6 +156,8 @@ struct help_text {
 	{"--brk-clear-length", "<size>", "Specifies the amount of memory to"},
 	{0, 0, "clear (zero) at the beginning of the expansion area when the"},
 	{0, 0, "data segment is expanded via brk."},
+	{"--mosview", "<view>", "Specifies the mOS view to be set for the"},
+	{0, 0, "LWK process - lwk or all (default)"},
 	{"--verbose, -v", "<level>", "Sets verbosity of yod."},
 	{0, 0, "be used for this job."}
 };
@@ -162,25 +173,6 @@ void yod_abort(int rc, const char* format, ...)
 
 	plugin->unlock(&lock_options);
 	exit(rc);
-}
-
-static lwk_request_t *yod_request_clone(lwk_request_t *req,
-					lwk_request_t *clone)
-{
-	/* Make a deep copy of the request (req) object. */
-
-	if (clone == NULL)
-		clone = malloc(sizeof(lwk_request_t));
-	else {
-		if (clone->lwkcpus_request)
-			mos_cpuset_free(clone->lwkcpus_request);
-	}
-
-	memcpy(clone, req, sizeof(lwk_request_t));
-
-	clone->lwkcpus_request = mos_cpuset_clone(req->lwkcpus_request);
-
-	return clone;
 }
 
 /**
@@ -240,7 +232,7 @@ struct map_type_t *yod_get_map(enum map_elem_t typ)
 
 	if (!yod_maps[typ]) {
 
-		int i, N;
+		size_t i, N;
 
 		yod_maps[typ] = malloc(sizeof(struct map_type_t));
 
@@ -262,12 +254,12 @@ struct map_type_t *yod_get_map(enum map_elem_t typ)
 		}
 
 		for (i = 0, N = mos_max_cpus(); i < N; i++) {
-			int elem = plugin->map_cpu(i, typ);
+			ssize_t elem = plugin->map_cpu(i, typ);
 
 			if (elem < 0)
 				continue;
 
-			if (elem >= yod_maps[typ]->capacity) {
+			if ((size_t)elem >= yod_maps[typ]->capacity) {
 
 				/* Double the size, ensuring that the newly
 				 * allocated area is cleared out (realloc does
@@ -297,12 +289,12 @@ struct map_type_t *yod_get_map(enum map_elem_t typ)
 
 			mos_cpuset_set(i, yod_maps[typ]->map[elem]);
 
-			if (yod_maps[typ]->size <= elem)
+			if (yod_maps[typ]->size <= (size_t)elem)
 				yod_maps[typ]->size = elem + 1;
 
 			YOD_LOG(YOD_GORY,
-				"mapping type %d CPU %d to %d  core-list: %s",
-				typ, i, elem,
+				"mapping type %s : %zd -> %zd  list: %s",
+				MAP_TYPES[typ], i, elem,
 				mos_cpuset_to_list_validate(yod_maps[typ]->map[elem]));
 		}
 	}
@@ -310,6 +302,10 @@ struct map_type_t *yod_get_map(enum map_elem_t typ)
 	return yod_maps[typ];
 }
 
+bool yod_null_map(struct map_type_t *m, int i)
+{
+	return !m->map[i] ||  !mos_cpuset_cardinality(m->map[i]);
+}
 
 /**
  * Counts the number of (entire) elements in the given set.
@@ -317,9 +313,9 @@ struct map_type_t *yod_get_map(enum map_elem_t typ)
  * of complete cores in the set s.
  */
 
-int yod_count_by(mos_cpuset_t *set, enum map_elem_t typ)
+ssize_t yod_count_by(mos_cpuset_t *set, enum map_elem_t typ)
 {
-	int i, count = 0;
+	size_t i, count = 0;
 	mos_cpuset_t *tmp;
 	struct map_type_t *m;
 
@@ -355,7 +351,7 @@ int yod_count_by(mos_cpuset_t *set, enum map_elem_t typ)
 static int yod_filter_by(mos_cpuset_t *out, mos_cpuset_t *in,
 			 enum map_elem_t typ)
 {
-	int i, count = 0;
+	size_t i, count = 0;
 	mos_cpuset_t *tmp, *tmpin = NULL;
 	struct map_type_t *m;
 
@@ -408,10 +404,11 @@ static int yod_filter_by(mos_cpuset_t *out, mos_cpuset_t *in,
  *   m is the number of elements that could be selected.
  */
 
-int yod_select_by(int n, enum map_elem_t typ, bool ascending, bool partial,
+ssize_t yod_select_by(int n, enum map_elem_t typ, bool ascending, bool partial,
 		  mos_cpuset_t *from, mos_cpuset_t *selected)
 {
-	int i, rc = 0;
+	ssize_t i;
+	int rc = 0;
 
 	mos_cpuset_t *tmp, *tmpin = NULL;
 	struct map_type_t *map;
@@ -430,7 +427,7 @@ int yod_select_by(int n, enum map_elem_t typ, bool ascending, bool partial,
 
 	mos_cpuset_xor(selected, selected, selected);
 
-	for (i = ascending ? 0 : map->size - 1; i >= 0 && i < map->size && n > 0; ascending ? i++ : i--) {
+	for (i = ascending ? 0 : map->size - 1; i >= 0 && i < (ssize_t)map->size && n > 0; ascending ? i++ : i--) {
 
 		if (!map->map[i])
 			continue;
@@ -455,22 +452,61 @@ int yod_select_by(int n, enum map_elem_t typ, bool ascending, bool partial,
 	return rc;
 }
 
-static int yod_nid_to_mem_group(int nid)
+/**
+ * Inserts a value into an ordered set of elements.
+ *
+ * @param[in/out] set The ordered set of elements.
+ * @param[in] value The value to be inserted.
+ * @param[in/out] length The number of elements in the set.
+ * @param[in] capacity The maximum number of elements (array length) of the set.
+ * @return One (1) if the value was added to the set.  Zero (0) if the value
+ *   was already present.  Negative one (-1) if an error occurred (typically
+ *   out of space in the array).
+ */
+int yod_ordered_set_insert(size_t *set, size_t value, size_t *length,
+			   size_t capacity)
 {
-	int g;
+	ssize_t i, j;
+
+	for (i = 0; i < (ssize_t)*length; i++) {
+
+		if (set[i] == value)
+			return 0;
+
+		if (set[i] > value)
+			goto insert;
+	}
+
+ insert:
+	if ((*length + 1) > capacity)
+		return -1;
+
+	for (j = *length - 1; j >= i; j--)
+		set[j+1] = set[j];
+
+	(*length)++;
+	set[i] = value;
+
+	return 1;
+}
+
+enum mem_group_t yod_nid_to_mem_group(int nid)
+{
+	size_t g;
 	struct map_type_t *map = yod_get_map(YOD_MEM_GROUP);
+
 	for (g = 0; g < map->size; g++) {
 		if (!map->map[g])
 			continue;
 		if (mos_cpuset_is_set(nid, map->map[g]))
 			return g;
 	}
-	return -1;
+	return YOD_MEM_GROUP_UNKNOWN;
 }
 
-static void yod_append_memory_nid(int grp, int nid, lwk_request_t *req)
+void yod_append_memory_nid(int grp, size_t nid, lwk_request_t *req)
 {
-	int i;
+	size_t i;
 
 	for (i = 0; i < req->lwkmem_domain_info_len[grp]; i++)
 		if (req->lwkmem_domain_info[grp][i] == nid)
@@ -486,16 +522,17 @@ static void yod_append_memory_nid(int grp, int nid, lwk_request_t *req)
  * cores, but rather only identifies the set of cores to be allocated.
  */
 static int yod_simple_compute_core_algorithm(struct lwk_request_t *this,
-					     int num_cores,
+					     size_t num_cores,
 					     mos_cpuset_t *available)
 {
-	return yod_select_by(num_cores, YOD_CORE, true, false, available, this->lwkcpus_request) == num_cores ? 0 : -1;
+	return yod_select_by(num_cores, YOD_CORE, true, false, available,
+		     this->lwkcpus_request) == (ssize_t)num_cores ? 0 : -1;
 }
 
 static int yod_simple_memory_selection_algorithm(lwk_request_t *this)
 {
-	int i, g;
-	size_t remainder;
+	size_t i, remainder;
+	enum mem_group_t g;
 
 	/* First fit grouped memory into specific NIDs:
 	 */
@@ -509,17 +546,17 @@ static int yod_simple_memory_selection_algorithm(lwk_request_t *this)
 			this->lwkmem_size_by_group[g] -= remainder;
 			yod_append_memory_nid(g, i, this);
 			YOD_LOG(YOD_DEBUG,
-				"Selecting %'ld bytes from nid %d / group %d ; remaining: %'ld",
-				remainder, i, g, this->lwkmem_size_by_group[g]);
+				"Selecting %'zd bytes from nid %zd / group %s ; remaining: %'zd",
+				remainder, i, MEM_GROUPS[g], this->lwkmem_size_by_group[g]);
 		}
-		YOD_LOG(YOD_DEBUG, "lwkmem_request[%d] = %'ld (group:%d)",
-			i, this->lwkmem_request[i], g);
+		YOD_LOG(YOD_DEBUG, "lwkmem_request[%zd] = %'zd (group:%s)",
+			i, this->lwkmem_request[i], MEM_GROUPS[g]);
 	}
 
-	for (g = 0; g < this->n_groups; g++)
+	for (g = 0; g < (int)this->n_groups; g++)
 		if (this->lwkmem_size_by_group[g]) {
-			YOD_ERR("Unfulfilled %'ld bytes from group %d",
-				this->lwkmem_size_by_group[g], g);
+			YOD_ERR("Unfulfilled %'ld bytes from group %s",
+				this->lwkmem_size_by_group[g], MEM_GROUPS[g]);
 			return -EBUSY;
 		}
 
@@ -541,7 +578,7 @@ static int yod_select_cores_randomly(int num_cores,
 	struct map_type_t *cmap;
 	int *core_available;
 	mos_cpuset_t *tmp;
-	int i;
+	size_t i;
 
 	YOD_LOG(YOD_GORY, "(>) %s num_cores=%d from=%s",
 		__func__, num_cores, mos_cpuset_to_list_validate(from));
@@ -582,376 +619,11 @@ static int yod_select_cores_randomly(int num_cores,
 	return 0;
 }
 
-static int yod_random_compute_core_algorithm(lwk_request_t *this, int num_cores,
-					     mos_cpuset_t *available)
+static int yod_random_compute_core_algorithm(lwk_request_t *this,
+				     size_t num_cores, mos_cpuset_t *available)
 {
 	return yod_select_cores_randomly(num_cores, available, this->lwkcpus_request);
 }
-
-/**
- * Find the node(s) in the specified group that are nearest to the specified
- * domain.
- *
- * @param[in] nid The specified domain.
- * @param[in] grp The specified group.
- * @param[in/out] nrst The node(s) from the specified group that are nearest
- *   to nid.
- * @param[in/out] len As input, the capacity of the "nrst" array. As output,
- *   the actual number of nearest nodes.
- */
-
-static void yod_numa_nearest_nodes(int nid, int grp, size_t *nrst, size_t *len)
-{
-
-	size_t min_distance, dmap[YOD_MAX_NIDS];
-	int dmap_len, n;
-
-	*len = 0;
-	min_distance = SIZE_MAX;
-	dmap_len = ARRAY_SIZE(dmap);
-
-	plugin->get_distance_map(nid, dmap, &dmap_len);
-
-	for (n = 0; n < dmap_len; n++) {
-		if (yod_nid_to_mem_group(n) == grp) {
-			if (dmap[n] < min_distance) {
-				nrst[0] = n;
-				*len = 1;
-				min_distance = dmap[n];
-			} else if (dmap[n] == min_distance) {
-				nrst[(*len)++] = n;
-			}
-		}
-	}
-}
-
-/**
- * Request memory for a given CPU node and memory group.
- * @param[in] wanted The amount of memory being requested.
- * @param[in] nid The CPU domain.
- * @param[in] grp The memory group being requested.
- * @param[in/out] req The request object.
- * @param[out] total_available The total amount of memory
- *  that is available from this domain/group.  This includes
- *  any memory that is used to fulfill the request.
- * @return The amount of memory reserved (resolved).
- */
-static size_t yod_numa_request_for_group_and_nid(size_t wanted, int nid,
-		 int grp, lwk_request_t *req, size_t *total_available)
-{
-	size_t nearest[YOD_MAX_NIDS], n_nearest, n, allocated;
-
-	*total_available = allocated  = 0;
-	n_nearest = ARRAY_SIZE(nearest);
-	yod_numa_nearest_nodes(nid, grp, nearest, &n_nearest);
-
-	for (n = 0; n < n_nearest; n++) {
-
-		size_t available, delta = 0;
-
-		available = req->lwkmem_designated[nearest[n]] -
-			req->lwkmem_reserved[nearest[n]] -
-			req->lwkmem_request[nearest[n]];
-
-		*total_available += available;
-
-		/* First, resolve any request for this memory group. */
-
-		if (req->lwkmem_size_by_group[grp] > 0) {
-			delta = MIN(wanted, available);
-
-			req->lwkmem_request[nearest[n]] += delta;
-			req->lwkmem_size_by_group[grp] -= delta;
-			allocated += delta;
-
-			if (wanted > 0)
-				yod_append_memory_nid(grp, nearest[n], req);
-
-			wanted -= delta;
-
-			YOD_LOG(YOD_DEBUG,
-				"nearest=%ld desig=%'ld avail=%'ld delta=%'ld remaining=%'ld",
-				nearest[n], req->lwkmem_designated[nearest[n]],
-				available, delta, wanted);
-		}
-
-		/* Next, resolve any ungrouped memory request. */
-		if (req->lwkmem_size > 0 && available > delta) {
-			delta = MIN(available - delta, req->lwkmem_size);
-			req->lwkmem_request[nearest[n]] += delta;
-			req->lwkmem_size -= delta;
-			yod_append_memory_nid(yod_nid_to_mem_group(nearest[n]),
-					      nearest[n], req);
-			YOD_LOG(YOD_DEBUG,
-				"slack-used=%'ld slack-remaining=%'ld",
-				delta, req->lwkmem_size);
-		}
-	}
-
-	return allocated;
-}
-
-/**
- * Attempts to fit the given request into the specified domain.
- * @param[in] ncores The number of cores being requested.
- * @param[in] nid The CPU domain being requested.
- * @param[in/out] req The request object.
- * @pre The req object likley contains amounts of memory being requested
- *   by group (lwkmem_size_by_group[g]); this needs to be resolved by
- *   assigning available memory from specific memory domains.
- * @post The req object contains CPUs (lwkcpus_request) and memory
- *   (lwkmem_request) that fulfill the request or exhaust the available
- *   resources for the given CPU domain.  The fits array of the request
- *   object describes the portion of the request that can be fulfilled
- *   an therefore may be used later on to select requests that are better
- *   fits than others.
- * @return True if the request fits, i.e. there are sufficienltly
- *   available cores and nearest memory to fulfill the request. Return
- *   False otherwize
- */
-static bool yod_numa_request_from_node(int ncores, int nid, lwk_request_t *req)
-{
-	mos_cpuset_t *this_node;
-	struct map_type_t *node_map;
-	int ncores_this_node;
-	bool fits; /* Overall status */
-	int g, rc;
-
-	YOD_LOG(YOD_DEBUG, "(>) %s ncores=%d nid=%d", __func__, ncores, nid);
-
-	node_map = yod_get_map(YOD_NODE);
-
-	/* Determine how many nodes are available on this node and the ratio
-	 * of this to the number of cores being requested. */
-
-	this_node = mos_cpuset_alloc_validate();
-	yod_get_available_lwkcpus(this_node);
-	mos_cpuset_and(this_node, this_node, node_map->map[nid]);
-	ncores_this_node = yod_filter_by(this_node, this_node, YOD_CORE);
-	req->fit[YOD_MAX_GROUPS] = MIN((double)ncores_this_node/ncores, 1.0);
-
-	/* Select the requested number of cores or whatever is available and
-	 * set the overall status accordingly.  Note that the status may
-	 * be downgraded below based on memory availability. */
-
-	rc = yod_select_by(MIN(ncores_this_node, ncores), YOD_CORE, true,
-			   false, this_node, this_node);
-	mos_cpuset_or(req->lwkcpus_request, req->lwkcpus_request, this_node);
-	fits = req->fit[YOD_MAX_GROUPS] == 1.0;
-
-	YOD_LOG(YOD_DEBUG, "n-avail-cores=%d n-selected=%d fit=%f",
-		ncores_this_node, rc, req->fit[YOD_MAX_GROUPS]);
-	YOD_LOG(YOD_GORY, "lwkcpus_request=%s [%d]",
-		mos_cpuset_to_list_validate(req->lwkcpus_request),
-		yod_count_by(req->lwkcpus_request, YOD_CORE));
-
-	/* For each memory group (kind), either fulfill the request with
-	 * near memory or take whatever is available.  Set the overall
-	 * status accordingly. */
-
-	for (g = 0; g < req->n_groups; g++) {
-
-		size_t want_this_grp, got_this_grp, avail_this_grp;
-
-		want_this_grp =	req->lwkmem_size_by_group[g];
-		avail_this_grp = 0;
-
-		got_this_grp = yod_numa_request_for_group_and_nid(want_this_grp,
-				  nid, g, req, &avail_this_grp);
-
-		req->fit[g] = MIN((double)avail_this_grp / want_this_grp, 1.0);
-		if (want_this_grp - got_this_grp > 0)
-			fits = false;
-
-		YOD_LOG(YOD_DEBUG,
-			"group=%d total-avail=%'ld wanted=%'ld fit=%f",
-			g, avail_this_grp, want_this_grp,
-			req->fit[g]);
-
-	}
-
-	YOD_LOG(YOD_DEBUG, "(<) %s ncores=%d nid=%d -> fits=%d", __func__,
-		ncores, nid, fits);
-	return fits;
-}
-
-/**
- * A simple measure of fitness.  The CPU availability (fitness) is added to the average
- * of the memory group fitnesses.
- */
-static double yod_simple_fitness(lwk_request_t *this)
-{
-	double total_mem = 0.0;
-	int i;
-
-	if (this == NULL)
-		return 0.0;
-
-	for (i = 0; i < this->n_groups; i++)
-		total_mem += this->fit[i];
-
-	return total_mem / this->n_groups + this->fit[YOD_MAX_GROUPS];
-}
-
-/**
- * The core and memory selection algorithm for NUMA.
- */
-
-static int yod_numa_compute_core_algorithm(struct lwk_request_t *this,
-					   int n_cores, mos_cpuset_t *available)
-{
-
-	lwk_request_t **reqs;
-	int n_reqs;
-	struct map_type_t *node_map;
-	int nid, rc;
-
-	YOD_LOG(YOD_DEBUG, "(>) %s n_cores=%d avail=%d", __func__, n_cores,
-		yod_count_by(available, YOD_CORE));
-
-	node_map = yod_get_map(YOD_NODE);
-
-	reqs = calloc(node_map->size, sizeof(lwk_request_t *));
-	n_reqs = 0;
-
-	/* Walk the CPU domains in order; if the request fits wholly in a
-	 * domain, then use that domain (we're done!). */
-
-	for (nid = 0; nid < node_map->size; nid++) {
-		reqs[n_reqs++] = yod_request_clone(this, NULL);
-		if (yod_numa_request_from_node(n_cores, nid, reqs[n_reqs-1])) {
-			yod_request_clone(reqs[n_reqs-1], this);
-			rc = 0;
-			goto free_reqs;
-		}
-	}
-
-	/* Otherwise, multiple domains are necessary to fulfill the request.
-	 * Iteratively select the best fitting of the previous requests and
-	 * apply it until the entire overall request has been fulfilled. */
-	do {
-		double best_fit = 0.0, fit;
-		int n;
-
-		nid = -1;
-		for (n = 0; n < n_reqs; n++) {
-			fit = reqs[n] ? reqs[n]->fitness(reqs[n]) : 0.0;
-			YOD_LOG(YOD_DEBUG, "fit[%d] = %f", n, fit);
-			if (fit > best_fit) {
-				nid = n;
-				best_fit = fit;
-			}
-		}
-
-		if (nid >= 0) {
-			int remaining = n_cores -
-				yod_count_by(this->lwkcpus_request, YOD_CORE);
-			YOD_LOG(YOD_DEBUG, "best fit => nid=%d", nid);
-			free(reqs[nid]);
-			reqs[nid] = 0;
-			if (yod_numa_request_from_node(remaining, nid, this)) {
-				rc = 0;
-				goto free_reqs;
-			}
-		}
-	} while (nid >= 0);
-
-	rc = -1;
-
- free_reqs:
-	for (nid = 0; nid < n_reqs; nid++)
-		free(reqs[nid]);
-
-	YOD_LOG(YOD_DEBUG, "(<) %s n_cores=%d selected=%d -> %s", __func__,
-		n_cores, yod_count_by(this->lwkcpus_request, YOD_CORE),
-		mos_cpuset_to_list_validate(this->lwkcpus_request));
-
-	return rc;
-}
-
-static int yod_numa_memory_selection_algorithm(lwk_request_t *this)
-{
-
-	int g, n;
-	double cpu_ratios[YOD_MAX_NIDS];
-	struct map_type_t *nodes;
-
-	if (this->lwkmem_size > 0) {
-		/* @todo -  The path here involves an explicit memory size
-		 *          request.  This is not yet supported.
-		 */
-		yod_abort(-EINVAL, "Not yet supported: NUMA and -M option.");
-	}
-
-	cpu_ratios[0] = -1.0;
-	nodes = yod_get_map(YOD_NODE);
-
-	for (g = 0; g < this->n_groups; g++) {
-
-		if (this->lwkmem_size_by_group[g] > 0 &&
-		    cpu_ratios[0] == -1.0) {
-			mos_cpuset_t *tmp;
-			unsigned count, total = 0;
-
-			tmp = mos_cpuset_alloc_validate();
-			for (n = 0; n < nodes->size; n++) {
-				mos_cpuset_and(tmp, this->lwkcpus_request,
-					       nodes->map[n]);
-				count = mos_cpuset_cardinality(tmp);
-				cpu_ratios[n] = (double)count;
-				total += count;
-			}
-
-			for (n = 0; n < nodes->size; n++) {
-				cpu_ratios[n] /= total;
-				YOD_LOG(YOD_DEBUG, "ratio[nid=%d]=%f",
-					n, cpu_ratios[n]);
-			}
-
-			mos_cpuset_free(tmp);
-		}
-
-		/* Resolve group memory via the CPU ratios.  Do this in two
-		 * passes.  The first pass attempts to find memory that
-		 * matches the current nid & group.  The second pass, if
-		 * necessary, grabs whatever is available.
-		 */
-		if (this->lwkmem_size_by_group[g] > 0) {
-
-			int pass;
-			size_t sz_this_grp = this->lwkmem_size_by_group[g];
-
-			for (pass = 1; pass <= 2; pass++) {
-				for (n = 0; n < nodes->size; n++) {
-					size_t requested, obtained, available;
-
-					available = 0;
-					requested = pass == 1 ?
-						(size_t)(cpu_ratios[n] * sz_this_grp) :
-						this->lwkmem_size_by_group[g];
-					obtained =
-						yod_numa_request_for_group_and_nid(
-						   requested, n, g, this,
-						   &available);
-
-					YOD_LOG(YOD_DEBUG,
-						"requested %'ld (nid=%d group=%d) -> %'ld pass=%d",
-						requested, n, g, obtained,
-						pass);
-				}
-
-				if (this->lwkmem_size_by_group[g] == 0)
-					break;
-			}
-
-			if (this->lwkmem_size_by_group[g] > 0)
-				return -EBUSY;
-		}
-	}
-
-	return 0;
-}
-
 
 enum resource_type_t {
 	YOD_DESIGNATED,
@@ -960,8 +632,7 @@ enum resource_type_t {
 
 static size_t yod_get_lwkmem(enum resource_type_t typ)
 {
-	size_t mem[YOD_MAX_NIDS], result;
-	int i, n = ARRAY_SIZE(mem);
+	size_t mem[YOD_MAX_NIDS], result, i, n = ARRAY_SIZE(mem);
 
 	switch (typ) {
 	case YOD_DESIGNATED:
@@ -1044,9 +715,14 @@ static int yod_index_of(const int value, const int *array, size_t len)
 	return -1;
 }
 
+static int null_memory_selection_algorithm(_unused_ lwk_request_t *req)
+{
+	return 0;
+}
+
 static void all_available_memsize_resolver(lwk_request_t *this)
 {
-	int i;
+	size_t i;
 
 	for (i = 0; i < this->n_nids; i++) {
 		this->lwkmem_request[i] = this->lwkmem_designated[i] - this->lwkmem_reserved[i];
@@ -1055,17 +731,20 @@ static void all_available_memsize_resolver(lwk_request_t *this)
 
 	this->lwkmem_size = 0; /* resolved */
 	memset(this->lwkmem_size_by_group, 0, sizeof(this->lwkmem_size_by_group));
+
+	this->memory_selection_algorithm = null_memory_selection_algorithm;
 }
 
 static void resolve_by_ratio(lwk_request_t *this, double ratio)
 {
-	int i, g;
+	size_t i;
+	enum mem_group_t g;
 
 	memset(this->lwkmem_size_by_group, 0, sizeof(this->lwkmem_size_by_group));
 
 	for (i = 0; i < YOD_MAX_NIDS; i++) {
 		g = yod_nid_to_mem_group(i);
-		if (g == -1)
+		if (g == YOD_MEM_GROUP_UNKNOWN)
 			break;
 		this->lwkmem_size_by_group[g] += this->lwkmem_designated[i];
 	}
@@ -1083,7 +762,8 @@ static void memsize_by_ratio_resolver(lwk_request_t *this)
 
 static void explicit_memsize_resolver(lwk_request_t *this)
 {
-	int i, g;
+	int i;
+	enum mem_group_t g;
 	double total = 0.0, per_group[YOD_MAX_GROUPS] = {0.0, };
 	size_t delta, available[YOD_MAX_GROUPS] = {0, };
 
@@ -1104,7 +784,7 @@ static void explicit_memsize_resolver(lwk_request_t *this)
 
 	for (i = 0; i < YOD_MAX_NIDS; i++) {
 		g = yod_nid_to_mem_group(i);
-		if (g == -1)
+		if (g == YOD_MEM_GROUP_UNKNOWN)
 			break;
 		per_group[g] += this->lwkmem_designated[i];
 		available[g] += this->lwkmem_designated[i] -
@@ -1112,7 +792,7 @@ static void explicit_memsize_resolver(lwk_request_t *this)
 		total += this->lwkmem_designated[i];
 	}
 
-	for (g = 0; g < this->n_groups; g++) {
+	for (g = 0; g < (int)this->n_groups; g++) {
 		delta = requested_lwk_mem * (per_group[g] / total);
 		delta = MIN(delta, available[g]);
 		this->lwkmem_size_by_group[g] += delta;
@@ -1124,7 +804,7 @@ static void explicit_memsize_resolver(lwk_request_t *this)
 	 * to a group, borrow from whatever is available:
 	 */
 
-	for (g = 0; g < this->n_groups && this->lwkmem_size > 0; g++) {
+	for (g = 0; g < (int)this->n_groups && this->lwkmem_size > 0; g++) {
 		delta = MIN(this->lwkmem_size, available[g]);
 		if (delta > 0) {
 			this->lwkmem_size_by_group[g] += delta;
@@ -1392,17 +1072,17 @@ static int yodopt_parse_memsize(const char *opt, long *size)
 	case 'p':
 		*size <<= 10;
 		symbolic = true;
-
+		/* fallthrough */
 	case 'G':
 	case 'g':
 		*size <<= 10;
 		symbolic = true;
-
+		/* fallthrough */
 	case 'm':
 	case 'M':
 		*size <<= 10;
 		symbolic = true;
-
+		/* fallthrough */
 	case 'k':
 	case 'K':
 		*size <<= 10;
@@ -1540,13 +1220,13 @@ static int yodopt_mem(const char *opt)
 				break;
 			case 'P':
 			case 'p':
-				size <<= 10;
+				size <<= 10; /* fallthrough */
 			case 'G':
 			case 'g':
-				size <<= 10;
+				size <<= 10; /* fallthrough */
 			case 'm':
 			case 'M':
-				size <<= 10;
+				size <<= 10; /* fallthrough */
 			case 'k':
 			case 'K':
 				size <<= 10;
@@ -1728,7 +1408,7 @@ static void yodopt_option(const char *opt)
 		lwk_req.options_idx;
 	this_opt_len = strlen(opt);
 
-	YOD_LOG(YOD_DEBUG, "(>) %s opt=%s offs=%ld first=%s idx=%d last=%s",
+	YOD_LOG(YOD_DEBUG, "(>) %s opt=%s offs=%zd first=%s idx=%zd last=%s",
 		__func__, opt, offset, lwk_req.options+1, lwk_req.options_idx,
 		lwk_req.options + lwk_req.options_idx);
 
@@ -1843,7 +1523,7 @@ static void yodopt_memory_preference(const char *opt)
 			memcpy(pref->upper_order, DEFAULT_MEMORY_ORDER, sizeof(DEFAULT_MEMORY_ORDER));
 		}
 
-		lwk_req.memory_preferences_present = 1;
+		lwk_req.memory_preferences_present = true;
 	}
 
 	arg = strdup(opt);
@@ -1940,6 +1620,14 @@ static void yodopt_memory_preference(const char *opt)
 	free(arg);
 }
 
+static void yodopt_mosview(const char *opt)
+{
+	if (strcmp(opt, "lwk") && strcmp(opt, "lwk-local") &&
+	    strcmp(opt, "all"))
+		yod_abort(-EINVAL, "Invalid mOS view specified: %s", opt);
+	strncpy(view, opt, sizeof(view));
+}
+
 /*
  * Dump the internal state of yod (useful in debugging)
  */
@@ -2016,7 +1704,9 @@ static void show_mos_state(int level)
  */
 static void resolve_options(lwk_request_t *req)
 {
-	int rc, i, g;
+	int rc;
+	size_t i;
+	enum mem_group_t g;
 
 	/* --cores/-C requires that --mem/-M is also specified. */
 
@@ -2041,6 +1731,7 @@ static void resolve_options(lwk_request_t *req)
 		req->lwkcpus_resolver = all_available_lwkcpus_resolver;
 
 	req->lwkcpus_request = mos_cpuset_alloc_validate();
+	req->plugin = plugin;
 
 	/* -----------------------------------------------------------------
 	 * Step 1: determine the overall amount of LWK memory to be
@@ -2053,9 +1744,9 @@ static void resolve_options(lwk_request_t *req)
 
 	for (i = 0; i < YOD_MAX_NIDS; i++) {
 		g = yod_nid_to_mem_group(i);
-		if (g == -1)
+		if (g == YOD_MEM_GROUP_UNKNOWN)
 			break;
-		req->n_groups = g < req->n_groups ? req->n_groups : g + 1;
+		req->n_groups = g < (int)req->n_groups ? req->n_groups : (size_t)g + 1;
 	}
 
 	req->memsize_resolver(req);
@@ -2089,7 +1780,7 @@ static void resolve_options(lwk_request_t *req)
 
 	req->lwkmem_domain_info_str[0] = '\0';
 
-	for (g = 0; g < req->n_groups; g++) {
+	for (g = 0; g < (int)req->n_groups; g++) {
 
 		if (req->lwkmem_domain_info_len[g] <= 0)
 			continue;
@@ -2105,7 +1796,7 @@ static void resolve_options(lwk_request_t *req)
 		for (i = 0; i < req->lwkmem_domain_info_len[g]; i++)
 			STR_APPEND(req->lwkmem_domain_info_str,
 				   sizeof(req->lwkmem_domain_info_str),
-				   i > 0 ? ",%d" : "%d",
+				   i > 0 ? ",%zd" : "%zd",
 				   req->lwkmem_domain_info[g][i]);
 	}
 
@@ -2167,6 +1858,7 @@ static void parse_options(int argc, char **argv)
 		{"aligned-mmap", required_argument, 0, YOD_OPT_ALIGNED_MMAP},
 		{"brk-clear-length", required_argument, 0,
 		 YOD_OPT_BRK_CLEAR_LEN},
+		{"mosview", required_argument, 0, YOD_OPT_MOSVIEW},
 		{"opt", required_argument, 0, 'o'},
 		{"help", no_argument, 0, 'h'},
 		{"verbose", required_argument, 0, 'v'},
@@ -2231,6 +1923,10 @@ static void parse_options(int argc, char **argv)
 			yodopt_brk_clear_length(optarg);
 			break;
 
+		case YOD_OPT_MOSVIEW:
+			yodopt_mosview(optarg);
+			break;
+
 		case 'l':
 			yodopt_layout(optarg);
 			break;
@@ -2270,17 +1966,31 @@ static void parse_options(int argc, char **argv)
 	}
 }
 
+static void set_mos_view(char *view_requested)
+{
+	char curr_view[YOD_MOS_VIEW_LEN] = { 0 };
+
+	if (view_requested && plugin->get_mos_view && plugin->set_mos_view) {
+		if (plugin->set_mos_view(view_requested) &&
+		    plugin->get_mos_view(curr_view, YOD_MOS_VIEW_LEN)) {
+			if (strcmp(curr_view, view_requested)) {
+				yod_abort(-EINVAL, "Invalid mOS view set [%s]",
+					  curr_view);
+			}
+		} else {
+			yod_abort(-1, "Failed to set yod's mOS view to [%s]",
+				view_requested);
+		}
+	}
+}
+
 int main(int argc, char **argv)
 {
 
 	char *verbose_env, *tst_plugin, *options;
-	char *yod_chrt;
 	int rc;
-	struct sched_param sp;
-	int sched_policy;
 	char *timeout_str;
-	int i;
-	size_t total_mem;
+	size_t i, total_mem;
 	char build_str[PATH_MAX];
 	char mem_str[PATH_MAX];
 
@@ -2292,6 +2002,13 @@ int main(int argc, char **argv)
 	if (tst_plugin) {
 		plugin = init_tst_plugin(tst_plugin);
 	}
+
+	/*
+	 * Until it becomes an LWK process yod needs to have full system
+	 * view. i.e. its view need to be mOS view: all. Override the
+	 * inherited mos_view from the parent and set it to 'all'
+	 */
+	set_mos_view("all");
 
 	options = getenv("YOD_OPTIONS");
 	if (options) {
@@ -2343,11 +2060,9 @@ int main(int argc, char **argv)
 			  mos_cpuset_to_mask(lwk_req.lwkcpus_request),
 					     strerror(-rc));
 
-	YOD_LOG(YOD_INFO, "LWK CPUs reserved:  %s, total: %d",
+	YOD_LOG(YOD_INFO, "LWK CPUs requested:  %s, total: %d",
 		mos_cpuset_to_list_validate(lwk_req.lwkcpus_request),
 		mos_cpuset_cardinality(lwk_req.lwkcpus_request));
-
-	YOD_LOG(YOD_INFO, "utility_threads=%d", num_util_threads);
 
 	rc = plugin->lwkcpus_sequence_request(lwk_req.layout_request);
 	if (rc)
@@ -2359,29 +2074,32 @@ int main(int argc, char **argv)
 	if (rc != 0)
 		yod_abort(rc, "Could not set number of utility threads. (%s)",
 			  strerror(-rc));
+	YOD_LOG(YOD_INFO, "Utility thread count: %d", num_util_threads);
 
 	rc = plugin->request_lwk_memory(lwk_req.lwkmem_request, lwk_req.n_nids);
 
 	if (rc != 0)
-		yod_abort(rc, "Could not acquire %ld bytes of LWK memory. (%s)",
+		yod_abort(rc, "Could not acquire %zd bytes of LWK memory. (%s)",
 			  lwk_req.lwkmem_size, strerror(-rc));
 
 	total_mem = 0;
 	mem_str[0] = '\0';
 
 	for (i = 0; i < lwk_req.n_nids; i++)   {
-		snprintf(build_str, PATH_MAX, "nid[%d] %ld MiB, ", i,
+		snprintf(build_str, PATH_MAX, "nid[%zd] %zd MiB, ", i,
 			 lwk_req.lwkmem_request[i] >> 20);
 		strncat(mem_str, build_str, PATH_MAX);
 		total_mem += lwk_req.lwkmem_request[i];
 	}
 
-	YOD_LOG(YOD_INFO, "memory reserved: %s total %ld MiB",
+	YOD_LOG(YOD_INFO, "LWK memory requested: %s total %zd MiB",
 		mem_str, total_mem >> 20);
 
 	rc = plugin->set_lwkmem_domain_info(lwk_req.lwkmem_domain_info_str);
+
 	if (rc)
 		yod_abort(rc, "Could not write memory domain information.");
+
 	YOD_LOG(YOD_INFO, "Domain info: %s", lwk_req.lwkmem_domain_info_str);
 
 	if (!yodopt_is_set("lwkmem-interleave")) {
@@ -2416,46 +2134,24 @@ int main(int argc, char **argv)
 	YOD_LOG(YOD_DEBUG, "Setting affinity to %s",
 		mos_cpuset_to_list_validate(lwk_req.lwkcpus_request));
 
-	if (sched_setaffinity(0, mos_setsize(),
-			      lwk_req.lwkcpus_request->cpuset)) {
-		YOD_ERR("Could not set affinity: %s", strerror(errno));
+	if (tst_plugin) {
+		/* Many of the unit tests are designed to run outside of a
+		 * complete mOS system and may also be running in environments
+		 * that simulate other processor topologies.  Therefore we
+		 * do not affinitize the launched process to the reserved
+		 * LWK CPUs ... they might not exist.
+		 */
+		YOD_LOG(YOD_INFO, "sched_setaffinity inhibited.");
+	} else if (sched_setaffinity(0, mos_setsize(),
+				     lwk_req.lwkcpus_request->cpuset)) {
+		YOD_ERR("Could not set affinity to %s: %s",
+			mos_cpuset_to_list_validate(lwk_req.lwkcpus_request),
+			strerror(errno));
 		exit(-1);
 	}
 
-
-	yod_chrt = getenv("YOD_CHRT"); /* @deprecated */
-
-	if (yod_chrt != 0) {
-
-		/* Support setting the scheduler policy.  The nominal
-		 * path is to enable the old K-scheduler.  But other
-		 * overrides are available (for experimental reasons)
-		 * as well as a bypass.
-		 */
-
-		if (strcmp(yod_chrt, "fifo") == 0)
-			sched_policy = SCHED_FIFO;
-		else if (strcmp(yod_chrt, "batch") == 0)
-			sched_policy = SCHED_BATCH;
-		else if (strcmp(yod_chrt, "normal") == 0)
-			sched_policy = SCHED_OTHER;
-		else if (strcmp(yod_chrt, "none") == 0)
-			sched_policy = INT_MAX;
-		else
-			sched_policy = 7; /* aka SCHED_mOS */
-
-		if (sched_policy != INT_MAX) {
-			YOD_LOG(YOD_WARN,
-				"Deprecated: Setting sched policy to %d (%s)",
-				sched_policy, yod_chrt);
-			sp.sched_priority = 1;
-			if (sched_setscheduler(0, sched_policy, &sp)) {
-				YOD_ERR("Could not set scheduler: %s",
-					strerror(errno));
-				exit(-1);
-			}
-		}
-	}
+	/* Set mOS view of this process to user specified or default all view */
+	set_mos_view(view);
 
 	plugin->unlock(&lock_options);
 

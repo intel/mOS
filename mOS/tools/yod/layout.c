@@ -178,7 +178,7 @@ void _map_system_layout(void)
 {
 	struct map_type_t *nodes, *tiles, *cores;
 	mos_cpuset_t *tmp;
-	int i, N, t, T, c, C;
+	size_t i, N, t, T, c, C;
 
 	nodes = yod_get_map(YOD_NODE);
 	tiles = yod_get_map(YOD_TILE);
@@ -253,7 +253,7 @@ void _map_system_layout(void)
 			}
 		}
 
-		YOD_LOG(YOD_GORY, "SYSMAP: %s -> (%d,%d,%d)",
+		YOD_LOG(YOD_GORY, "SYSMAP: %s -> (%zd,%zd,%zd)",
 			mos_cpuset_to_list_validate(core), N, T, C);
 
 		assert(_system_map[COORD(N, T, C)] == NULL);
