@@ -54,7 +54,8 @@ char outbuf[PR_BUF_LEN];
 static char *mask2hex_readable(cpu_set_t *mask, unsigned int nbits,
 			       char *outbuf, unsigned int outlen)
 {
-	int i, j;
+	int i;
+	unsigned int j;
 
 	if (nbits == 0 || outlen < 4)
 		return NULL;
@@ -72,7 +73,7 @@ static char *mask2hex_readable(cpu_set_t *mask, unsigned int nbits,
  * calling cpu before returning to user space.
  * Returns 0 for succesfull syscall, -1 if the call failed.
  */
-int do_migrated_syscall(void)
+static int do_migrated_syscall(void)
 {
 	sigset_t sigset;
 
@@ -91,7 +92,7 @@ int do_migrated_syscall(void)
 
 /* Set affinity to a single target cpu.  Returns new cpu id.
  */
-int set_cpu(int dest_cpu)
+static int set_cpu(int dest_cpu)
 {
 	cpu_set_t dest_set;
 
@@ -121,7 +122,7 @@ struct {
 	int check_nostart_migrate;
 } affinity_tests = {0, 0};
 
-int migration_tests(int test_cpu, int start_cpu, cpu_set_t *start_set)
+static int migration_tests(int test_cpu, int start_cpu, cpu_set_t *start_set)
 {
 	cpu_set_t test_set;
 
@@ -184,7 +185,7 @@ int migration_tests(int test_cpu, int start_cpu, cpu_set_t *start_set)
 	return sched_getcpu();
 }
 
-void usage(char *arg0)
+static void usage(char *arg0)
 {
 	fprintf(stderr,
 		"Single thread affinitizes across all cpus in starting mask and checks location.\n");

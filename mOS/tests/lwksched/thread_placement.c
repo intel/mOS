@@ -33,6 +33,7 @@
 static unsigned int n_threads, n_lwkcpus, n_util_threads;
 static int max_util_cpus = -1; /* default mOS behavior */
 static int  max_utils_per_cpu = 1; /* default mOS behavior */
+static int  one_cpu_per_util_thread;
 static unsigned long long spin_amount = 1ull << 30;
 static size_t setsize;
 static cpu_set_t *lwkcpus, *lwkcpus_reserved, *linuxcpus;
@@ -117,11 +118,11 @@ static void *worker(void *arg)
 			check_cpu = spin_amount >> 8;
 			/*
 			 * If a thread has unexpectedly moved to a new CPU
-			 * log the error. A non-utility thread should never
-			 * move. A utility thread should not move if there are
-			 * enough lwkcpus to host all of the threads.
-			 * We could also validate utility thread movement
-			 * however this test is not necessary because
+			 * log the error. A non-utility thread on an LWK CPU
+			 * should never move. A utility thread should not move
+			 * if there are enough lwkcpus to host all of the
+			 * threads. We could also validate utility thread
+			 * movement however this test is not necessary because
 			 * if it did not move, the registration test to detect
 			 * an overcommitted LWKCPU will fire and log the error.
 			 */
@@ -132,13 +133,20 @@ static void *worker(void *arg)
 				if ((tid > n_util_threads) ||
 				    ((tid <= n_util_threads) &&
 				     (n_threads < n_lwkcpus))) {
-					log_msg(LOG_ERR,
-						CPUFMT
-						" CPU violation: was %d but expected %d.",
-						tid, cpu_now,
-						work_area[tid].my_cpu);
-					rc--;
-					goto out;
+					if ((one_cpu_per_util_thread) ||
+					    (!CPU_ISSET_S(work_area[tid].my_cpu,
+							setsize,
+							lwkcpus_util_shared) ||
+					    !CPU_ISSET_S(cpu_now, setsize,
+							lwkcpus_util_shared))) {
+						log_msg(LOG_ERR,
+						    CPUFMT
+						    " CPU violation: was %d but expected %d.",
+						    tid, cpu_now,
+						    work_area[tid].my_cpu);
+						rc--;
+						goto out;
+					}
 				}
 				/* Test we moved to a shared utility CPU */
 				if (!CPU_ISSET_S(cpu_now, setsize,
@@ -172,7 +180,21 @@ static void *worker(void *arg)
 						setsize, util_threads);
 				CPU_SET_S(cpu_now, setsize, util_threads);
 				work_area[tid].my_cpu = cpu_now;
-				++pushed_utilities;
+				if (CPU_ISSET_S(cpu_old, setsize, lwkcpus)) {
+					++pushed_utilities;
+				} else if (!one_cpu_per_util_thread) {
+					log_msg(LOG_INFO, CPUFMT
+						" Linux scheduler moved thread from CPU %d to %d (allowed)",
+						tid, cpu_old, cpu_now);
+
+				}  else {
+					log_msg(LOG_ERR, CPUFMT
+					    " Linux scheduler moved thread from CPU %d to %d",
+					    tid, cpu_old, cpu_now);
+					rc--;
+					pthread_mutex_unlock(&lock);
+					goto out;
+				}
 				pthread_mutex_unlock(&lock);
 				log_msg(LOG_INFO, CPUFMT
 					" Allowed thread move from CPU %d to %d",
@@ -225,6 +247,8 @@ int main(int argc, char **argv)
 		/* Max util threads per LWK CPUs. Same value provided to YOD */
 		{ "maxutilspercpu", required_argument, 0, 'y' },
 		/* Enable additional debug output */
+		{ "one_cpu_per_util", no_argument, 0, 'm' },
+		/* Enable additional debug output */
 		{ "debug", no_argument, 0, 'd' },
 		{ "help", no_argument, 0, 'h' },
 	};
@@ -258,7 +282,8 @@ int main(int argc, char **argv)
 		int c;
 		int opt_index;
 
-		c = getopt_long(argc, argv, "t:c:s:u:x:y:dh", options, &opt_index);
+		c = getopt_long(argc, argv, "t:c:s:u:x:y:mdh", options,
+				&opt_index);
 
 		if (c == -1)
 			break;
@@ -281,6 +306,9 @@ int main(int argc, char **argv)
 			break;
 		case 'y':
 			max_utils_per_cpu = atoi(optarg);
+			break;
+		case 'm':
+			one_cpu_per_util_thread = 1;
 			break;
 		case 'd':
 			logging_level++;

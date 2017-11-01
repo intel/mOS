@@ -1,3 +1,17 @@
+/*
+ * Multi Operating System (mOS)
+ * Copyright (c) 2017, Intel Corporation.
+ *
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms and conditions of the GNU General Public License,
+ * version 2, as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+ * more details.
+ */
+
 #include <stdio.h>
 #include <linux/kernel.h>
 #include <sys/syscall.h>
@@ -73,7 +87,7 @@ static void expect(int expectrc, long int expectval,
 			"Test=%d failed. behavior result expected=%u actual=%u\n",
 			numtests, result_behavior, result.behavior);
 		numfails += 1;
-	} else if (result.placement != result.placement) {
+	} else if (result.placement != result_placement) {
 		log_msg(LOG_ERR,
 			"Test=%d failed. placement result expected=%u actual=%u\n",
 			numtests, result_placement, result.placement);

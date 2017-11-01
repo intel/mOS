@@ -38,7 +38,7 @@ static int isPolicy(int policy);
 int main(int argc, char **argv)
 {
 	int status, rc = 0;
-	pid_t pid;
+	pid_t pid = 0;
 
 	struct option options[] = {
 	 { "debug", no_argument, 0, 'd' },
