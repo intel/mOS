@@ -341,15 +341,9 @@ int mos_cpuset_equal(mos_cpuset_t *a, mos_cpuset_t *b)
 
 int mos_cpuset_is_empty(mos_cpuset_t *set)
 {
-	int i, N;
-
 	assert(set != NULL && set->cpuset != NULL);
 
-	for (i = 0, N = mos_nbits(); i < N; i++) {
-		if (CPU_ISSET_S(i, mos_setsize(), set->cpuset))
-			return 0;
-	}
-	return 1;
+	return CPU_COUNT_S(mos_setsize(), set->cpuset) == 0;
 }
 
 int mos_cpuset_is_set(int cpu, mos_cpuset_t *set)

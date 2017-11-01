@@ -24,7 +24,9 @@
 
 #include "lwkctl.h"
 
-#define HELPSTR(s) (s ? s : "")
+#define HELPSTR(s)		(s ? s : "")
+#define PROC_MOS_VIEW		"/proc/self/mos_view"
+#define PROC_MOS_VIEW_LEN 	20
 
 struct help_text {
 	const char *option;
@@ -701,6 +703,49 @@ static int lwkctl_show_raw(void)
 	return 0;
 }
 
+static bool set_mos_view(char *view)
+{
+	FILE *fp;
+	size_t len, ret = -1;
+
+	if (!view || !(len = strlen(view)))
+		goto out;
+
+	fp = fopen(PROC_MOS_VIEW, "w");
+	if (!fp)
+		goto out;
+	ret = fwrite(view, 1, len, fp);
+	fclose(fp);
+out:
+	return ret == len;
+}
+
+static bool get_mos_view(char *view)
+{
+	FILE *fp;
+	char *c;
+	size_t ret = 0;
+	bool rc = false;
+
+	if (!view)
+		goto out;
+
+	fp = fopen(PROC_MOS_VIEW, "r");
+	if (!fp)
+		goto out;
+
+	ret = fread(view, 1, PROC_MOS_VIEW_LEN, fp);
+	if (ret && ret <= PROC_MOS_VIEW_LEN) {
+		c = strchr(view, '\n');
+		if (c)
+			*c = '\0';
+		rc = true;
+	}
+	fclose(fp);
+out:
+	return rc;
+}
+
 /*
  * Entry point to lwkctl command
  *
@@ -712,6 +757,22 @@ static int lwkctl_show_raw(void)
 int main(int argc, char **argv)
 {
 	int rc = 0;
+	char view[PROC_MOS_VIEW_LEN] = { "all" };
+
+	/*
+	 * lwkctl needs to have full system view i.e. its mOS view
+	 * need to be set to 'all'. Override the inherited mos_view
+	 * from the parent and set it to 'all'
+	 */
+	if (set_mos_view(view) && get_mos_view(view)) {
+		if (strcmp(view, "all")) {
+			LC_ERR("Invalid mOS view set: %s", view);
+			return -1;
+		}
+	} else {
+		LC_ERR("Failed to set mOS view: %s", view);
+		return -1;
+	}
 
 	/* Reset LWKCTL options */
 	memset(&lc_opts, 0, sizeof(lc_opts));

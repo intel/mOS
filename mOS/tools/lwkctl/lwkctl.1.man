@@ -1,9 +1,22 @@
 .\"                                      Hey, EMACS: -*- nroff -*-
+.\" -------------------------------------------------------------------------
+.\" Multi Operating System (mOS)
+.\" Copyright (c) 2017, Intel Corporation.
+.\"
+.\" This program is free software; you can redistribute it and/or modify it
+.\" under the terms and conditions of the GNU General Public License,
+.\" version 2, as published by the Free Software Foundation.
+.\"
+.\" This program is distributed in the hope it will be useful, but WITHOUT
+.\" ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+.\" FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+.\" more details.
+.\" -------------------------------------------------------------------------
 .\" First parameter, NAME, should be all caps
 .\" Second parameter, SECTION, should be 1-8, maybe w/ subsection
 .\" other parameters are allowed: see man(7), man(1)
-.TH LWKCTL 1 "April 26, 2017"
 .\" Please adjust this date whenever revising the manpage.
+.TH LWKCTL 1 "July 31, 2017"
 .\"
 .\" Some roff macros, for reference:
 .\" .nh        disable hyphenation

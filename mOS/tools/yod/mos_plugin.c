@@ -39,9 +39,10 @@
 #define THREAD_SIBLINGS "/sys/devices/system/cpu/cpu%d/topology/thread_siblings_list"
 #define CACHE_LEVEL "/sys/devices/system/cpu/cpu%d/cache/index%d/level"
 #define L2_SIBLINGS "/sys/devices/system/cpu/cpu%d/cache/index%d/shared_cpu_list"
-#define DISTANCE_MAP "/sys/devices/system/node/node%d/distance"
-#define NODE_CPUS "/sys/devices/system/node/node%d/cpulist"
+#define DISTANCE_MAP "/sys/devices/system/node/node%zd/distance"
+#define NODE_CPUS "/sys/devices/system/node/node%zd/cpulist"
 #define MOS_LOCAL_RANK_SEQUENCE_FILE "/tmp/yod.local.lock.%s"
+#define PROC_MOS_VIEW "/proc/self/mos_view"
 
 #define STARTS_WITH(s, prefix) (strncmp(s, prefix, strlen(prefix)) == 0)
 
@@ -50,10 +51,10 @@ struct cpu_map_t {
 	int elems[YOD_NUM_MAP_ELEMS];
 };
 
-static int cpu_map_size = -1;
+static size_t cpu_map_size;
 static struct cpu_map_t *cpu_map;
 static size_t **distance_map;
-static int distance_map_size = -1;
+static size_t distance_map_size;
 
 static int mos_sysfs_read(const char *file, char *buff, int len)
 {
@@ -166,11 +167,11 @@ static int mos_request_lwk_cpus(mos_cpuset_t *set)
 	return mos_sysfs_put_cpulist(MOS_SYSFS_LWKCPUS_REQUEST, set);
 }
 
-static int mos_set_util_threads(int num_util_threads)
+static int mos_set_util_threads(size_t num_util_threads)
 {
 	char buff[16];
 
-	snprintf(buff, sizeof(buff), "%d", num_util_threads);
+	snprintf(buff, sizeof(buff), "%zd", num_util_threads);
 	return mos_sysfs_write(MOS_SYSFS_UTILTHREADS_SET, buff, sizeof(buff));
 }
 
@@ -186,7 +187,8 @@ static int mos_set_util_threads(int num_util_threads)
  */
 static void mos_read_and_populate(enum map_elem_t typ, const char *pathspec, int idx1, int idx2, int val)
 {
-	int i, rc;
+	size_t i;
+	int rc;
 	char path[4096];
 	char buffer[4096];
 	mos_cpuset_t *set;
@@ -222,7 +224,8 @@ static void mos_init_cpu_map(void)
 	char buffer[4096], path[4096];
 	FILE *f;
 	int family = -1, model = -1;
-	int cpu, core, tile, node, nr, nc, n_nodes;
+	size_t cpu, core, tile, node;
+	size_t nc, nr, n_nodes;
 	mos_cpuset_t *set;
 	int l2_index, rc;
 
@@ -329,7 +332,7 @@ static void mos_init_cpu_map(void)
 	 * we only process node distance files for nids that have CPUs,
 	 * which, after the above code, is [0..node].
 	 */
-	if (distance_map_size == -1)
+	if (distance_map_size == 0)
 		mos_init_distance_map();
 
 	/* Linux exports node distance information derived from the
@@ -377,21 +380,21 @@ static void mos_init_cpu_map(void)
 	mos_cpuset_free(set);
 }
 
-static int mos_map_cpu(int cpu, enum map_elem_t typ)
+static ssize_t mos_map_cpu(size_t cpu, enum map_elem_t typ)
 {
-	if (cpu_map_size == -1)
+	if (cpu_map_size == 0)
 		mos_init_cpu_map();
 
-	return (cpu >= 0 && cpu < cpu_map_size) ? cpu_map[cpu].elems[typ] : -1;
+	return (cpu < cpu_map_size) ? cpu_map[cpu].elems[typ] : -1;
 }
 
-static int _mos_read_vector(size_t *vec, int *n, const char *filen)
+static int _mos_read_vector(size_t *vec, size_t *n, const char *filen)
 {
 	char buffer[4096];
 	char *tok, *buff, *save, *remainder, *copy;
-	int rc, N;
+	int rc;
+	size_t N = *n;  /* max size */
 
-	N = *n;  /* max size */
 	copy = NULL;
 
 	*n = mos_sysfs_read(filen, buffer, sizeof(buffer));
@@ -407,7 +410,9 @@ static int _mos_read_vector(size_t *vec, int *n, const char *filen)
 	while ((tok = strtok_r(buff, " \n", &save)) != 0) {
 
 		if (*n == N) {
-			YOD_LOG(YOD_WARN, "Buffer overrun parsing %s ->\"%s\"", filen, buffer);
+			YOD_LOG(YOD_WARN,
+				"Buffer overrun parsing %s ->\"%s\"",
+				filen, buffer);
 			rc = -1;
 			goto out;
 		}
@@ -415,7 +420,9 @@ static int _mos_read_vector(size_t *vec, int *n, const char *filen)
 		vec[(*n)++] = strtoul(tok, &remainder, 0);
 
 		if (*remainder != '\0') {
-			YOD_LOG(YOD_WARN, "Garbage detected in %s ->\"%s\" at offset %ld", filen, buffer, remainder - copy);
+			YOD_LOG(YOD_WARN,
+				"Garbage detected in %s ->\"%s\" at offset %zd",
+				filen, buffer, remainder - copy);
 			rc = -1;
 			goto out;
 		}
@@ -432,9 +439,8 @@ static int _mos_read_vector(size_t *vec, int *n, const char *filen)
 static void mos_init_distance_map(void)
 {
 	char path[256];
-	size_t distances[256], *dptr;
-	int len;
-	int i, j, rc;
+	size_t distances[256], *dptr, len, i, j;
+	int rc;
 
 	/* Force at least one iteration.  Note that distance_map_size
 	 * will be adjusted after the first file is processed.
@@ -470,23 +476,26 @@ static void mos_init_distance_map(void)
 		}
 
 		if (len != distance_map_size)
-			yod_abort(-1, "Unexpected change in distance map width in %s (actual width %ld vs. %ld expected)", path, len, distance_map_size);
+			yod_abort(-1,
+				  "Unexpected change in distance map width in %s (actual width %zd vs. %zd expected)",
+				  path, len, distance_map_size);
 	}
 }
 
-static void mos_get_distance_map(int nid, size_t *dist, int *n)
+static void mos_get_distance_map(size_t nid, size_t *dist, size_t *n)
 {
-	if (distance_map_size == -1)
+	if (distance_map_size == 0)
 		mos_init_distance_map();
 
-	if (nid >= distance_map_size) {
-		YOD_ERR("NID %d exceeds distance map length (%d).", nid, distance_map_size);
+	if ((size_t)nid >= distance_map_size) {
+		YOD_ERR("NID %zd exceeds distance map length (%zd).",
+			nid, distance_map_size);
 		*n = 0;
 		return;
 	}
 
 	if (*n < distance_map_size) {
-		YOD_ERR("Distance map length (%d) exceeds buffer size (%d).",
+		YOD_ERR("Distance map length (%zd) exceeds buffer size (%zd).",
 			distance_map_size, *n);
 		*n = 0;
 		return;
@@ -496,23 +505,24 @@ static void mos_get_distance_map(int nid, size_t *dist, int *n)
 	*n = distance_map_size;
 }
 
-static void mos_get_designated_lwkmem(size_t *mem, int *n)
+static void mos_get_designated_lwkmem(size_t *mem, size_t *n)
 {
 	if (_mos_read_vector(mem, n, MOS_SYSFS_LWKMEM))
 		yod_abort(-EINVAL, "Error reading %s", MOS_SYSFS_LWKMEM);
 }
 
-static void mos_get_reserved_lwkmem(size_t *mem, int *n)
+static void mos_get_reserved_lwkmem(size_t *mem, size_t *n)
 {
 	if (_mos_read_vector(mem, n, MOS_SYSFS_LWKMEM_RESERVED))
 		yod_abort(-EINVAL, "Error reading %s", MOS_SYSFS_LWKMEM_RESERVED);
 }
 
-static int mos_request_lwk_memory(size_t *mem, int n)
+static int mos_request_lwk_memory(size_t *mem, size_t n)
 {
 	char buffer[4096];
 	char *bypass;
-	int i, rc, len;
+	size_t i, len;
+	int rc;
 
 	bypass = getenv("YOD_LWKMEM");
 	if (bypass) {
@@ -523,7 +533,7 @@ static int mos_request_lwk_memory(size_t *mem, int n)
 		for (i = 0; i < n; i++) {
 			len = strlen(buffer);
 			rc = snprintf(buffer + len, sizeof(buffer) - len, "%s%lu", i > 0 ? " " : "", mem[i]);
-			if (rc >= ((int)sizeof(buffer) - len))
+			if (rc >= ((int)(sizeof(buffer) - len)))
 				yod_abort(-1, "Buffer overflow when writing to %s", MOS_SYSFS_LWKMEM_REQUEST);
 		}
 		return mos_sysfs_write(MOS_SYSFS_LWKMEM_REQUEST, buffer, strlen(buffer) + 1);
@@ -709,7 +719,7 @@ static int mos_combo_lock(struct lock_options_t *opts)
 					if (rc < 0 && errno != EINTR) {
 						skip_combo_unlock = 1;
 						yod_abort(-EBUSY,
-							  "Could not read local lock file %s (rc=%ld, errno=%d).",
+							  "Could not read local lock file %s (rc=%zd, errno=%d).",
 							  seq_file, rc, errno);
 					} else {
 						next = -1; /* retry */
@@ -857,6 +867,25 @@ static int mos_set_options(char *options, size_t len)
 	return mos_sysfs_write(MOS_SYSFS_LWK_OPTIONS, options, len);
 }
 
+static bool mos_get_mos_view(char *mos_view, size_t len)
+{
+	int nread = mos_sysfs_read(PROC_MOS_VIEW, mos_view, len);
+
+	if (nread > 0 && nread <= (int) len) {
+		char *c = strchr(mos_view, '\n');
+
+		if (c)
+			*c = '\0';
+		return true;
+	}
+	return false;
+}
+
+static bool mos_set_mos_view(char *mos_view)
+{
+	return mos_sysfs_write(PROC_MOS_VIEW, mos_view, strlen(mos_view)) == 0;
+}
+
 struct yod_plugin mos_plugin = {
 	.get_designated_lwkcpus = mos_get_designated_lwkcpus,
 	.get_reserved_lwk_cpus = mos_get_reserved_lwk_cpus,
@@ -872,6 +901,8 @@ struct yod_plugin mos_plugin = {
 	.lwkcpus_sequence_request = mos_lwkcpus_sequence_request,
 	.set_options = mos_set_options,
 	.set_lwkmem_domain_info = mos_set_lwkmem_domain_info,
+	.get_mos_view = mos_get_mos_view,
+	.set_mos_view = mos_set_mos_view,
 };
 
 

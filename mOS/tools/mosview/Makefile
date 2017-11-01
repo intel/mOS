@@ -1,5 +1,5 @@
 # Multi Operating System (mOS)
-# Copyright (c) 2016, Intel Corporation.
+# Copyright (c) 2018, Intel Corporation.
 #
 # This program is free software; you can redistribute it and/or modify it
 # under the terms and conditions of the GNU General Public License,
@@ -10,14 +10,10 @@
 # FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
 # more details.
 
-.NOTPARALLEL:
 
-subdir-y += lwkreset yod lwkctl libmos mosview
+scriptprogs-y := mosview.sh
 
-_toolinst_: $(subdir-y:%=%_toolinst_)
+mosview.sh_installname := mosview
+mosview.sh_installpath := /usr/bin
 
-$(subdir-y:%=%_toolinst_): %_toolinst_:
-	$(Q)$(MAKE) $(build)=$(src)/$* _toolinst_
-
-
-PHONY += _toolinst_ $(subdir-y:%=%_toolinst_)
+include $(src)/../Makefile.tool
