@@ -71,9 +71,20 @@ class Basics(TestCase):
         rng = range(10)
         for n in rng:
             with self.subTest(utils=n, threads=len(LWK_CPUS) + n//2):
-                yod(self, '-u', n, './thread_placement', '--lwkcpus', len(LWK_CPUS),
-                        '--threads', len(LWK_CPUS) + n//2,
-                        '--spin', ARGS.test_spin, '--uthreads', n, *v)
+                yod(self, '-u', n,
+                    './thread_placement',
+                    '--lwkcpus', len(LWK_CPUS),
+                    '--threads', len(LWK_CPUS) + n//2,
+                    '--spin', ARGS.test_spin, '--uthreads', n, *v)
+        for n in rng:
+            with self.subTest(utils=n, threads=len(LWK_CPUS) + n//2):
+                yod(self, '-u', n, '-o', 'one-cpu-per-util',
+                    './thread_placement',
+                    '--lwkcpus', len(LWK_CPUS),
+                    '--threads', len(LWK_CPUS) + n//2,
+                    '--spin', ARGS.test_spin,
+                    '--one_cpu_per_util',
+                    '--uthreads', n, *v)
 
     def test_util_max_cpus_enforced(self):
         # Create number of utility threads greater than the max number of
@@ -96,6 +107,24 @@ class Basics(TestCase):
                     '--maxutilcpus', maxutilcpus,
                     '--maxutilspercpu', 1,
                     *v)
+        for maxutilcpus in rng:
+            with self.subTest(utils=2*maxutilcpus, threads=2*maxutilcpus + maxutilcpus):
+                yod(self,
+                    '-u', 2*maxutilcpus,
+                    '-o',
+                    'util-threshold=' + str(maxutilcpus) + ":1",
+                    '-o', 'one-cpu-per-util',
+                    './thread_placement',
+                    '--lwkcpus', len(LWK_CPUS),
+                    '--threads', 2*maxutilcpus + maxutilcpus,
+                    '--spin', ARGS.test_spin,
+                    '--uthreads', 2*maxutilcpus,
+                    '--maxutilcpus', maxutilcpus,
+                    '--maxutilspercpu', 1,
+                    '--one_cpu_per_util',
+                    *v)
+
+
 
     def test_util_overcommit_honored(self):
         # Place worker and utility threads on LWK CPUs allowing overcommit of
@@ -116,6 +145,23 @@ class Basics(TestCase):
                     '--maxutilcpus', maxutilcpus,
                     '--maxutilspercpu', 2,
                     *v)
+        for maxutilcpus in rng:
+            with self.subTest(utils=2*maxutilcpus, threads=2*maxutilcpus + maxutilcpus):
+                yod(self,
+                    '-u', 2*maxutilcpus,
+                    '-o',
+                    'util-threshold=' + str(maxutilcpus) + ":2",
+                    '-o', 'one-cpu-per-util',
+                    './thread_placement',
+                    '--lwkcpus', len(LWK_CPUS),
+                    '--threads', 2*maxutilcpus + maxutilcpus,
+                    '--spin', ARGS.test_spin,
+                    '--uthreads', 2*maxutilcpus,
+                    '--maxutilcpus', maxutilcpus,
+                    '--maxutilspercpu', 2,
+                    '--one_cpu_per_util',
+                    *v)
+
 
     def test_util_overcommit_push(self):
         # Place worker and utility threads on LWK CPUs allowing overcommit of
@@ -139,6 +185,25 @@ class Basics(TestCase):
                     '--maxutilspercpu', 3,
                     *v)
 
+        for maxutilcpus in rng:
+            with self.subTest(utils=3*maxutilcpus, threads=len(LWK_CPUS) + 3*maxutilcpus):
+                yod(self,
+                    '-u', 3*maxutilcpus,
+                    '-o',
+                    'util-threshold=' + str(maxutilcpus) + ":3",
+                    '-o', 'one-cpu-per-util',
+                    './thread_placement',
+                    '--lwkcpus', len(LWK_CPUS),
+                    '--threads', len(LWK_CPUS) + 3*maxutilcpus,
+                    '--spin', ARGS.test_spin,
+                    '--uthreads', 3*maxutilcpus,
+                    '--maxutilcpus', maxutilcpus,
+                    '--maxutilspercpu', 3,
+                    '--one_cpu_per_util',
+                    *v)
+
+
+
     def test_util_force_all_shared(self):
         # Set the maxutilcpus value to zero and verify that
         # no utility threads end up on an LWK CPU
@@ -159,6 +224,24 @@ class Basics(TestCase):
                         '--uthreads', n,
                         '--maxutilcpus', 0,
                         '--maxutilspercpu', x,
+                        *v)
+        for n in rng:
+            rng2 = range(-1,3)
+            for x in rng2:
+                with self.subTest(utils=n, threads=len(LWK_CPUS) - 2 + n):
+                    yod(self,
+                        '-u', n,
+                        '-o',
+                        'util-threshold=' + "0:" + str(x),
+                        '-o', 'one-cpu-per-util',
+                        './thread_placement',
+                        '--lwkcpus', len(LWK_CPUS),
+                        '--threads', len(LWK_CPUS) - 2 + n,
+                        '--spin', ARGS.test_spin,
+                        '--uthreads', n,
+                        '--maxutilcpus', 0,
+                        '--maxutilspercpu', x,
+                        '--one_cpu_per_util',
                         *v)
 
     def test_preemption(self):
@@ -185,6 +268,12 @@ class Basics(TestCase):
         v = ['--debug'] if ARGS.test_debug else []
         yod(self, '-u', 0, '-C', '2', '-M', 'all', './timer_preemption', '-t', 4, '-w', 6,
             '-y', 10000, *v)
+    def test_concurrent_thread_creates(self):
+        v = ['--debug'] if ARGS.test_debug else []
+        # Test creating threads in parallel
+        yod(self, './concurrent_placement', *v)
+
+
 
 class Syscalls(TestCase):
     require = [
@@ -204,9 +293,29 @@ class APIs(TestCase):
             YOD,
             'uti_placement',
             ]
-    def test_uti_api(self):
+    def test_uti_api_1(self):
         v = ['--debug'] if ARGS.test_debug else []
         # UTI API validation
-        yod(self, './uti_placement', *v)
         yod(self, './uti_macros', *v)
+        yod(self, './uti_placement', *v)
 
+    def test_uti_api_2(self):
+        v = ['--debug'] if ARGS.test_debug else []
+        # UTI API validation specifying overcommit behavior = 0
+        yod(self, '-o', 'overcommit-behavior=0', './uti_placement', '-b', 0, *v)
+        yod(self, '-o', 'overcommit-behavior=0', '-o', 'one-cpu-per-util',
+            './uti_placement', '-b', 0, *v)
+
+    def test_uti_api_3(self):
+        v = ['--debug'] if ARGS.test_debug else []
+        # UTI API validation specifying overcommit behavior = 1
+        yod(self, '-o', 'overcommit-behavior=1', './uti_placement', '-b', 1, *v)
+        yod(self, '-o', 'overcommit-behavior=1', '-o', 'one-cpu-per-util',
+            './uti_placement', '-b', 1, *v)
+
+    def test_uti_api_4(self):
+        v = ['--debug'] if ARGS.test_debug else []
+        # UTI API validation specifying overcommit behavior = 2
+        yod(self, '-o', 'overcommit-behavior=2', './uti_placement', '-b', 2, *v)
+        yod(self, '-o', 'overcommit-behavior=2', '-o', 'one-cpu-per-util',
+            './uti_placement', '-b', 2, *v)

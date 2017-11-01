@@ -33,7 +33,7 @@ enum log_level {
 	LOG_GORY_DETAIL = 5,
 };
 
-extern int logging_level;
+extern enum log_level logging_level;
 
 extern void log_msg(enum log_level level, const char *format, ...);
 extern char *get_affinity(char *buff, size_t buffsize);

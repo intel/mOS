@@ -26,7 +26,7 @@
 #include <errno.h>
 #include "lwksched.h"
 
-int logging_level = LOG_INFO;
+enum log_level logging_level = LOG_INFO;
 
 static int hex_char_to_int(const char c)
 {

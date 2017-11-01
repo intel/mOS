@@ -36,12 +36,14 @@
 #define BITS_IN_LONG (sizeof(unsigned long) * 8)
 #define MAX_NUMNODES (NDSZ * BITS_IN_LONG)
 #define NUMNODES 8
-#define MAXUTILS 8
+#define MAXUTILS (MAX_CPUS * 2)
+#define MAXCOMPUTES MAX_CPUS
 #define CPUTYPE_LWK 1
 #define CPUTYPE_FWK 2
 #define NOT_ENABLED (-1)
 #define ALL_UTILS_SAME (-2)
 #define ALL_UTILS_DIFF (-3)
+#define CPUSHARE_TEST_ENABLE 1
 
 static unsigned long nodes[NDSZ];
 static pthread_mutex_t lock;
@@ -49,17 +51,28 @@ static unsigned long nodes[NDSZ];
 static void usage(void);
 static pthread_mutex_t count_lock;
 static pthread_cond_t count_cv;
-static int threads_finished;
+static int uthreads_finished;
+static int cthreads_finished;
 static int numtests;
 static int numutils_created;
+static int numcomputes_created;
 static int numfails;
 static int numsuccess;
 static int num_uthreads;
+static int num_cthreads;
 static size_t setsize;
 static cpu_set_t *lwkcpus;
 static cpu_set_t *linuxutilcpus;
 static cpu_set_t *nodecpus[NUMNODES];
 static unsigned long location_key;
+static int subtest;
+static int subtest_loop_count;
+
+enum OverrideBehavior {
+	AllCommits = 0,
+	OnlyComputeCommits,
+	OnlyUtilityCommits,
+};
 
 static struct {
 	pthread_t pthread;
@@ -78,21 +91,48 @@ static struct {
 	int numa_id_not_expected;
 	int numa_id_actual;
 	int created;
+	int enable_compute_cpu_share_test;
+	int enable_util_cpu_share_test;
+	int share_level_computes;
+	int share_level_utils;
+	int mycpu;
 } uthread[MAXUTILS];
 
+static struct {
+	pthread_t pthread;
+	pthread_attr_t pthread_attr;
+	void *pthread_arg;
+	int api_retval_expected;
+	int api_retval_actual;
+	long int cputype_expected;
+	long int cputype_actual;
+	int created;
+	int enable_compute_cpu_share_test;
+	int enable_util_cpu_share_test;
+	int share_level_computes;
+	int share_level_utils;
+	int mycpu;
+} cthread[MAXCOMPUTES];
+
+static int num_lwkcpus;
 static int lwkcpus_in_node[NUMNODES];
 static int linuxcpus_in_node[NUMNODES];
+static int util_thread_count[MAX_CPUS];
+static int compute_thread_count[MAX_CPUS];
 static int num_nodes_containing_lwkcpus;
 static int num_nodes_containing_linuxcpus;
+static int overcommit_behavior = OnlyUtilityCommits;
 
-static void *mythread(void *arg)
+static void *myuthread(void *arg)
 {
 	int i;
 	long int uindex = (long int)arg;
 	long int rc = 0;
 	int mycpu = sched_getcpu();
+	int threads_finished;
 
-	log_msg(LOG_DEBUG, "Util thread created. uindex=%d", uindex);
+	log_msg(LOG_DEBUG, "Util thread created. uindex=%d cpu=%d", uindex,
+		mycpu);
 	/* Indicate that a utility thread has been created */
 
 	if (pthread_mutex_lock(&lock)) {
@@ -102,6 +142,9 @@ static void *mythread(void *arg)
 		goto out;
 	}
 	numutils_created++;
+	uthread[uindex].mycpu = mycpu;
+	/* Bump count of compute threads on a given CPU */
+	++util_thread_count[mycpu];
 
 	if (pthread_mutex_unlock(&lock)) {
 		log_msg(LOG_ERR, "Could not unlock mutex for uthread index=%d",
@@ -109,7 +152,7 @@ static void *mythread(void *arg)
 		rc = -1;
 		goto out;
 	}
-	/* Record the numa domain this CPU is in */
+	/* Record the numa domain this thread is currently running in */
 	for (i = 0; i < NUMNODES; i++) {
 		if (CPU_ISSET_S(mycpu, setsize, nodecpus[i])) {
 			log_msg(LOG_DEBUG,
@@ -125,18 +168,20 @@ static void *mythread(void *arg)
 		rc = -1;
 		goto out;
 	}
-	/* Do not allow a util thread to exit until they all are recreated */
+	/* Do not allow a util thread  to exit until all util
+	 * and compute threads are created
+	 */
 	pthread_mutex_lock(&count_lock);
-	threads_finished++;
-	if (threads_finished == num_uthreads) {
+	threads_finished = ++uthreads_finished + cthreads_finished;
+	if (threads_finished == (num_uthreads + num_cthreads)) {
 		log_msg(LOG_DEBUG, "All threads finished.");
 		pthread_cond_broadcast(&count_cv);
 	}
 	pthread_mutex_unlock(&count_lock);
 
 	pthread_mutex_lock(&count_lock);
-	while (threads_finished < num_uthreads) {
-		log_msg(LOG_DEBUG, "Waiting.");
+	while ((uthreads_finished + cthreads_finished) <
+	       (num_uthreads + num_cthreads)) {
 		pthread_cond_wait(&count_cv, &count_lock);
 	}
 	pthread_mutex_unlock(&count_lock);
@@ -146,8 +191,62 @@ static void *mythread(void *arg)
 	else
 		rc = CPUTYPE_FWK;
 out:
+
 	return (void *)rc;
 }
+
+static void *mycthread(void *arg)
+{
+	long int cindex = (long int)arg;
+	long int rc = 0;
+	int mycpu = sched_getcpu();
+	int threads_finished;
+
+	if (pthread_mutex_lock(&lock)) {
+		log_msg(LOG_ERR, "Mutex acquisition failed for cthread=%d.",
+				cindex);
+		rc = -1;
+		goto out;
+	}
+	/* Indicate that a compute thread has been created */
+	numcomputes_created++;
+	/* Bump count of compute threads on a given CPU */
+	++compute_thread_count[mycpu];
+	cthread[cindex].mycpu = mycpu;
+
+	if (pthread_mutex_unlock(&lock)) {
+		log_msg(LOG_ERR, "Could not unlock mutex for cthread index=%d",
+				cindex);
+		rc = -1;
+		goto out;
+	}
+	/* Do not allow a compute thread  to exit until all utility
+	 * and compute threads are created
+	 */
+	pthread_mutex_lock(&count_lock);
+	threads_finished = ++cthreads_finished + uthreads_finished;
+	if (threads_finished == (num_uthreads + num_cthreads)) {
+		log_msg(LOG_DEBUG, "All threads finished.");
+		pthread_cond_broadcast(&count_cv);
+	}
+	pthread_mutex_unlock(&count_lock);
+
+	pthread_mutex_lock(&count_lock);
+	while ((uthreads_finished + cthreads_finished) <
+	       (num_uthreads + num_cthreads)) {
+		pthread_cond_wait(&count_cv, &count_lock);
+	}
+	pthread_mutex_unlock(&count_lock);
+
+	if (CPU_ISSET_S(mycpu, setsize, lwkcpus))
+		rc = CPUTYPE_LWK;
+	else
+		rc = CPUTYPE_FWK;
+out:
+
+	return (void *)rc;
+}
+
 static void init_nodes(void)
 {
        int i;
@@ -161,7 +260,7 @@ static void init_uthreads(void)
 	int i;
 
 	numutils_created = 0;
-	threads_finished = 0;
+	uthreads_finished = 0;
 	for (i = 0; i < MAXUTILS; i++) {
 		uti_attr_init(&(uthread[i].attr));
 		pthread_attr_init(&(uthread[i].pthread_attr));
@@ -178,13 +277,55 @@ static void init_uthreads(void)
 		uthread[i].numa_id_expected = NOT_ENABLED;
 		uthread[i].numa_id_not_expected = NOT_ENABLED;
 		uthread[i].numa_id_actual = NOT_ENABLED;
+		uthread[i].enable_util_cpu_share_test = 0;
+		uthread[i].enable_compute_cpu_share_test = 0;
+		uthread[i].share_level_computes = 0;
+		uthread[i].share_level_utils = 0;
 	}
+	for (i = 0; i < MAX_CPUS; i++)
+		util_thread_count[i] = 0;
 }
-static void begintest(void)
+
+static void init_cthreads(void)
 {
-	numtests++;
+	int i;
+
+	numcomputes_created = 0;
+	cthreads_finished = 0;
+	for (i = 0; i < MAXCOMPUTES; i++) {
+		pthread_attr_init(&(cthread[i].pthread_attr));
+		cthread[i].pthread_arg = NULL;
+		cthread[i].api_retval_expected = 0;
+		cthread[i].api_retval_actual = 0;
+		cthread[i].cputype_expected = 0;
+		cthread[i].cputype_actual = 0;
+		cthread[i].created = 0;
+		cthread[i].enable_util_cpu_share_test = 0;
+		cthread[i].enable_compute_cpu_share_test = 0;
+		cthread[i].share_level_utils = 0;
+		cthread[i].share_level_computes = 0;
+	}
+	for (i = 0; i < MAX_CPUS; i++)
+		compute_thread_count[i] = 0;
+	compute_thread_count[sched_getcpu()] = 1;
+
+}
+
+static int begintest(int testnum)
+{
+	if (subtest && (testnum != subtest))
+		/* Subtesting active, but not this test */
+		return 0;
+	if ((subtest == testnum) && (subtest_loop_count-- < 0))
+		/* Subtesting active. completed iterating over loop count */
+		return 0;
+	if (!subtest && (numtests == testnum))
+		/* Subtesting not active. Already ran our test once */
+		return 0;
+	numtests = testnum;
 	init_nodes();
 	init_uthreads();
+	init_cthreads();
 	pthread_cond_init(&count_cv, NULL);
 	pthread_mutex_init(&count_lock, NULL);
 	pthread_mutex_init(&lock, NULL);
@@ -193,6 +334,7 @@ static void begintest(void)
 				numtests);
 	else
 		log_msg(LOG_INFO, "Beginning test=%d...", numtests);
+	return 1;
 }
 
 static void behavior_results(int uindex)
@@ -216,7 +358,7 @@ static int placement_failure(void)
 	int i;
 	int numfails;
 
-	for (i = 0, numfails = 0; i < MAXUTILS; i++) {
+	for (i = 0, numfails = 0; i < num_uthreads; i++) {
 		if (uthread[i].placement_failed) {
 			numfails++;
 			log_msg(LOG_ERR,
@@ -232,7 +374,7 @@ static int behavior_failure(void)
 	int i;
 	int numfails;
 
-	for (i = 0, numfails = 0; i < MAXUTILS; i++) {
+	for (i = 0, numfails = 0; i < num_uthreads; i++) {
 		if (uthread[i].behavior_failed) {
 			numfails++;
 			log_msg(LOG_ERR,
@@ -248,7 +390,7 @@ static int api_failure(void)
 	int i;
 	int numfails;
 
-	for (i = 0, numfails = 0; i < MAXUTILS; i++) {
+	for (i = 0, numfails = 0; i < num_uthreads; i++) {
 		if (uthread[i].api_retval_actual !=
 				uthread[i].api_retval_expected) {
 			numfails++;
@@ -258,6 +400,17 @@ static int api_failure(void)
 				uthread[i].api_retval_expected);
 		}
 	}
+	for (i = 0; i < num_cthreads; i++) {
+		if (cthread[i].api_retval_actual !=
+				cthread[i].api_retval_expected) {
+			numfails++;
+			log_msg(LOG_ERR,
+				"Test=%d cthread=%d detected api return code failure. Actual/Expected=%d/%d",
+				numtests, i, cthread[i].api_retval_actual,
+				cthread[i].api_retval_expected);
+		}
+	}
+
 	return numfails;
 }
 
@@ -266,7 +419,7 @@ static int cputype_failure(void)
 	int i;
 	int numfails;
 
-	for (i = 0, numfails = 0; i < MAXUTILS; i++) {
+	for (i = 0, numfails = 0; i < num_uthreads; i++) {
 		if (uthread[i].cputype_actual !=
 				uthread[i].cputype_expected) {
 			numfails++;
@@ -276,6 +429,17 @@ static int cputype_failure(void)
 				uthread[i].cputype_expected);
 		}
 	}
+	for (i = 0; i < num_cthreads; i++) {
+		if (cthread[i].cputype_actual !=
+				cthread[i].cputype_expected) {
+			numfails++;
+			log_msg(LOG_ERR,
+				"Test=%d cthread=%d detected cpu type failure. Actual/Expected=%d/%d",
+				numtests, i, cthread[i].cputype_actual,
+				cthread[i].cputype_expected);
+		}
+	}
+
 	return numfails;
 }
 
@@ -288,7 +452,7 @@ static int numa_id_failure(void)
 	for (i = 0; i < NUMNODES; i++)
 		node_count[i] = 0;
 
-	for (i = 0, numfails = 0; i < MAXUTILS; i++) {
+	for (i = 0, numfails = 0; i < num_uthreads; i++) {
 		if ((uthread[i].numa_id_expected >= 0) &&
 		   (uthread[i].numa_id_actual != uthread[i].numa_id_expected)) {
 			numfails++;
@@ -308,7 +472,7 @@ static int numa_id_failure(void)
 		    uthread[i].numa_id_actual < NUMNODES)
 			node_count[uthread[i].numa_id_actual]++;
 	}
-	for (i = 0; i < MAXUTILS; i++) {
+	for (i = 0; i < num_uthreads; i++) {
 		if (uthread[i].numa_id_expected == ALL_UTILS_DIFF) {
 			/* Verify that no counts are greater than one */
 			for (j = 0; j < NUMNODES; j++) {
@@ -316,7 +480,7 @@ static int numa_id_failure(void)
 					numfails++;
 					log_msg(LOG_ERR,
 					"TEST=%d uthread=%d expected all util threads in different domains. Domain=%d",
-					numtests, uthread[i].numa_id_actual);
+					numtests, i, uthread[i].numa_id_actual);
 				}
 			}
 		} else if (uthread[i].numa_id_expected == ALL_UTILS_SAME) {
@@ -331,19 +495,78 @@ static int numa_id_failure(void)
 				numfails++;
 				log_msg(LOG_ERR,
 				"TEST=%d uthread=%d expected all util threads in same domain. Domain=%d",
-				numtests, uthread[i].numa_id_actual);
+				numtests, i, uthread[i].numa_id_actual);
 			}
 		}
 	}
 	return numfails;
 }
 
-static void end_test(int expected_utils)
+static int cpushare_failure(void)
+{
+	int i;
+	int numfails;
+
+	for (i = 0, numfails = 0; i < num_uthreads; i++) {
+		if (uthread[i].enable_compute_cpu_share_test) {
+			if (compute_thread_count[uthread[i].mycpu] !=
+			    uthread[i].share_level_computes) {
+				numfails++;
+				log_msg(LOG_ERR,
+				    "Test=%d uthread=%d detected cpu=%d share failure with a compute thread. Actual=%d Expected=%d",
+				    numtests, i, uthread[i].mycpu,
+				    compute_thread_count[uthread[i].mycpu],
+				    uthread[i].share_level_computes);
+			}
+		}
+		if (uthread[i].enable_util_cpu_share_test) {
+			if (util_thread_count[uthread[i].mycpu] !=
+			    uthread[i].share_level_utils) {
+				numfails++;
+				log_msg(LOG_ERR,
+				    "Test=%d uthread=%d detected cpu=%d share failure with a util thread. Actual=%d Expected=%d",
+				    numtests, i, uthread[i].mycpu,
+				    util_thread_count[uthread[i].mycpu],
+				    uthread[i].share_level_utils);
+			}
+		}
+	}
+	for (i = 0; i < num_cthreads; i++) {
+		if (cthread[i].enable_compute_cpu_share_test) {
+			if (compute_thread_count[cthread[i].mycpu] !=
+			    cthread[i].share_level_computes) {
+				numfails++;
+				log_msg(LOG_ERR,
+				    "Test=%d cthread=%d detected cpu=%d share failure with a compute thread. Actual=%d Expected=%d",
+				    numtests, i, cthread[i].mycpu,
+				    compute_thread_count[cthread[i].mycpu],
+				    cthread[i].share_level_computes);
+			}
+		}
+		if (cthread[i].enable_util_cpu_share_test) {
+			if (util_thread_count[cthread[i].mycpu] !=
+			    cthread[i].share_level_utils) {
+				numfails++;
+				log_msg(LOG_ERR,
+				    "Test=%d cthread=%d detected cpu=%d share failure with a util thread. Actual=%d Expected=%d",
+				    numtests, i, cthread[i].mycpu,
+				    util_thread_count[cthread[i].mycpu],
+				    cthread[i].share_level_utils);
+			}
+		}
+	}
+
+	return numfails;
+}
+
+static void end_test(int expected_utils, int expected_computes)
 {
 	int num_thread_fails;
 	int uindex;
+	int cindex;
 	void *retval;
 
+	log_msg(LOG_DEBUG, "max cpus=%d", MAX_CPUS);
 	for (uindex = 0; uindex < num_uthreads; uindex++) {
 		if (uthread[uindex].created) {
 			/* Created utility threads should reach pthread_join */
@@ -352,35 +575,57 @@ static void end_test(int expected_utils)
 		}
 	}
 
+
+	for (cindex = 0; cindex < num_cthreads; cindex++) {
+		if (cthread[cindex].created) {
+			/* Created utility threads should reach pthread_join */
+			pthread_join(cthread[cindex].pthread, &retval);
+			cthread[cindex].cputype_actual = (long int)retval;
+		}
+	}
+
 	if (numutils_created != expected_utils) {
 		log_msg(LOG_ERR,
 			"Test=%d failed. Expected/actual uthreads=%d/%d",
 			numtests, expected_utils, numutils_created);
 		numfails += 1;
+	}
+	if (numcomputes_created != expected_computes) {
+		log_msg(LOG_ERR,
+		    "Test=%d failed. Expected/actual cthreads=%d/%d",
+		    numtests, expected_computes, numcomputes_created);
+	  numfails += 1;
+
 	} else if ((num_thread_fails = api_failure())) {
 		log_msg(LOG_ERR,
 			"Test=%d UTI API return code(s) for %d utility threads.",
 			numtests, num_thread_fails);
 	} else if ((num_thread_fails = placement_failure())) {
 		log_msg(LOG_ERR,
-			"Test=%d placement failed for %d utility threads.",
+			"Test=%d placement failed for %d threads.",
 			numtests, num_thread_fails);
 		numfails += 1;
 	} else if ((num_thread_fails = behavior_failure())) {
 		log_msg(LOG_ERR,
-			"Test=%d behavior failed for %d utility threads.",
+			"Test=%d behavior failed for %d threads.",
 			numtests, num_thread_fails);
 		numfails += 1;
 	} else if ((num_thread_fails = cputype_failure())) {
 		log_msg(LOG_ERR,
-			"Test=%d cpu type failed for %d utility threads.",
+			"Test=%d cpu type failed for %d threads.",
 			numtests, num_thread_fails);
 		numfails += 1;
 	} else if ((num_thread_fails = numa_id_failure())) {
 		log_msg(LOG_ERR,
-			"Test=%d unexpected numa id for %d utility threads.",
+			"Test=%d unexpected numa id for %d threads.",
 			numtests, num_thread_fails);
 		numfails += 1;
+	} else if ((num_thread_fails = cpushare_failure())) {
+		log_msg(LOG_ERR,
+			"Test=%d cpu sharing failed for %d threads.",
+			numtests, num_thread_fails);
+		numfails += 1;
+
 	} else {
 		log_msg(LOG_INFO,
 			"Test=%d passed.\n", numtests);
@@ -399,7 +644,7 @@ static int summarize(void)
 	return 0;
 }
 
-static void record_api_results(int uindex)
+static void record_uti_api_results(int uindex)
 {
 	if (!uthread[uindex].api_retval_actual) {
 		uthread[uindex].created = 1;
@@ -409,10 +654,18 @@ static void record_api_results(int uindex)
 	}
 }
 
+static void record_pthread_api_results(int cindex)
+{
+	if (!cthread[cindex].api_retval_actual) {
+		cthread[cindex].created = 1;
+	}
+}
+
 int main(int argc, char **argv)
 {
 	long int rc;
 	long int uindex;
+	long int cindex;
 	int i, j;
 	int valid_environment;
 	unsigned long node_mask;
@@ -422,6 +675,9 @@ int main(int argc, char **argv)
 
 	struct option options[] = {
 		{ "debug", no_argument, 0, 'd' },
+		{ "behavior", required_argument, 0, 'b' },
+		{ "subtest", required_argument, 0, 's' },
+		{ "loopcount", required_argument, 0, 'l' },
 		{ "help", no_argument, 0, 'h' },
 	};
 
@@ -471,7 +727,7 @@ int main(int argc, char **argv)
 		int c;
 		int opt_index;
 
-		c = getopt_long(argc, argv, "dh", options, &opt_index);
+		c = getopt_long(argc, argv, "db:s:l:h", options, &opt_index);
 
 		if (c == -1)
 			break;
@@ -483,6 +739,15 @@ int main(int argc, char **argv)
 		case 'h':
 			usage();
 			return 0;
+		case 'b':
+			overcommit_behavior = atoi(optarg);
+			break;
+		case 's':
+			subtest = atoi(optarg);
+			break;
+		case 'l':
+			subtest_loop_count = atoi(optarg);
+			break;
 		}
 	}
 
@@ -545,38 +810,38 @@ int main(int argc, char **argv)
 	}
 	/* Seed the random number generator */
 	srandom(time(NULL));
+
+	num_lwkcpus = CPU_COUNT_S(setsize, lwkcpus);
 	/*
 	 *****************************************************
 	 * Test 1: Create two util threads on same numa domain
 	 ****************************************************
 	 */
-
 	/* Prep environment for starting testcase */
 	num_uthreads = 2;
-	begintest();
+	while (begintest(1)) {
+		for (uindex = 0; uindex < num_uthreads; uindex++) {
 
-	for (uindex = 0; uindex < num_uthreads; uindex++) {
+			/* Set test expectations for each utility thread */
+			uthread[uindex].api_retval_expected = 0;
+			uthread[uindex].placement_expected = 1;
+			uthread[uindex].behavior_expected = 1;
+			uthread[uindex].cputype_expected = CPUTYPE_LWK;
+			uthread[uindex].numa_id_expected = my_nodeid;
 
-		/* Set test expectations for each utility thread */
-		uthread[uindex].api_retval_expected = 0;
-		uthread[uindex].placement_expected = 1;
-		uthread[uindex].behavior_expected = 1;
-		uthread[uindex].cputype_expected = CPUTYPE_LWK;
-		uthread[uindex].numa_id_expected = my_nodeid;
-
-		/* Setup and call the uti api */
-		uti_attr_same_numa_domain(&(uthread[uindex].attr));
-		uthread[uindex].api_retval_actual = uti_pthread_create(
-			&(uthread[uindex].pthread),
-			&(uthread[uindex].pthread_attr),
-			mythread,
-			(void *)uindex,
-			&(uthread[uindex].attr));
-		/* Record the API result */
-		record_api_results(uindex);
+			/* Setup and call the uti api */
+			uti_attr_same_numa_domain(&(uthread[uindex].attr));
+			uthread[uindex].api_retval_actual = uti_pthread_create(
+				&(uthread[uindex].pthread),
+				&(uthread[uindex].pthread_attr),
+				myuthread,
+				(void *)uindex,
+				&(uthread[uindex].attr));
+			/* Record the API result */
+			record_uti_api_results(uindex);
+		}
+		end_test(num_uthreads, 0);
 	}
-	end_test(num_uthreads);
-
 	/*
 	 *********************************************************
 	 * Test 2: Create two util threads on different numa domain
@@ -591,30 +856,29 @@ int main(int argc, char **argv)
 		num_uthreads = 2;
 
 	/* Prep environment for starting testcase */
-	begintest();
+	while (begintest(2)) {
+		for (uindex = 0; uindex < num_uthreads; uindex++) {
 
-	for (uindex = 0; uindex < num_uthreads; uindex++) {
+			/* Set test expectations for each utility thread */
+			uthread[uindex].api_retval_expected = 0;
+			uthread[uindex].placement_expected = 1;
+			uthread[uindex].behavior_expected = 1;
+			uthread[uindex].cputype_expected = CPUTYPE_LWK;
+			uthread[uindex].numa_id_not_expected = my_nodeid;
 
-		/* Set test expectations for each utility thread */
-		uthread[uindex].api_retval_expected = 0;
-		uthread[uindex].placement_expected = 1;
-		uthread[uindex].behavior_expected = 1;
-		uthread[uindex].cputype_expected = CPUTYPE_LWK;
-		uthread[uindex].numa_id_not_expected = my_nodeid;
-
-		/* Setup and call the uti api */
-		uti_attr_different_numa_domain(&(uthread[uindex].attr));
-		uthread[uindex].api_retval_actual = uti_pthread_create(
-			&(uthread[uindex].pthread),
-			&(uthread[uindex].pthread_attr),
-			mythread,
-			(void *)uindex,
-			&(uthread[uindex].attr));
-		/* Record the API result */
-		record_api_results(uindex);
+			/* Setup and call the uti api */
+			uti_attr_different_numa_domain(&(uthread[uindex].attr));
+			uthread[uindex].api_retval_actual = uti_pthread_create(
+				&(uthread[uindex].pthread),
+				&(uthread[uindex].pthread_attr),
+				myuthread,
+				(void *)uindex,
+				&(uthread[uindex].attr));
+			/* Record the API result */
+			record_uti_api_results(uindex);
+		}
+		end_test(num_uthreads, 0);
 	}
-	end_test(num_uthreads);
-
 	/*
 	 *****************************************************
 	 * Test 3: Create a util thread in same L2 cache
@@ -623,29 +887,28 @@ int main(int argc, char **argv)
 
 	/* Prep environment for starting testcase */
 	num_uthreads = 1;
-	begintest();
+	while (begintest(3)) {
+		for (uindex = 0; uindex < num_uthreads; uindex++) {
 
-	for (uindex = 0; uindex < num_uthreads; uindex++) {
+			/* Set test expectations for each utility thread */
+			uthread[uindex].api_retval_expected = 0;
+			uthread[uindex].placement_expected = 1;
+			uthread[uindex].behavior_expected = 1;
+			uthread[uindex].cputype_expected = CPUTYPE_LWK;
 
-		/* Set test expectations for each utility thread */
-		uthread[uindex].api_retval_expected = 0;
-		uthread[uindex].placement_expected = 1;
-		uthread[uindex].behavior_expected = 1;
-		uthread[uindex].cputype_expected = CPUTYPE_LWK;
-
-		/* Setup and call the uti api */
-		uti_attr_same_l2(&(uthread[uindex].attr));
-		uthread[uindex].api_retval_actual = uti_pthread_create(
-			&(uthread[uindex].pthread),
-			&(uthread[uindex].pthread_attr),
-			mythread,
-			(void *)uindex,
-			&(uthread[uindex].attr));
-		/* Record the API result */
-		record_api_results(uindex);
+			/* Setup and call the uti api */
+			uti_attr_same_l2(&(uthread[uindex].attr));
+			uthread[uindex].api_retval_actual = uti_pthread_create(
+				&(uthread[uindex].pthread),
+				&(uthread[uindex].pthread_attr),
+				myuthread,
+				(void *)uindex,
+				&(uthread[uindex].attr));
+			/* Record the API result */
+			record_uti_api_results(uindex);
+		}
+		end_test(num_uthreads, 0);
 	}
-	end_test(num_uthreads);
-
 	/*
 	 *********************************************************
 	 * Test 4: Create two util threads on different L2 caches
@@ -654,29 +917,28 @@ int main(int argc, char **argv)
 
 	/* Prep environment for starting testcase */
 	num_uthreads = 2;
-	begintest();
+	while (begintest(4)) {
+		for (uindex = 0; uindex < num_uthreads; uindex++) {
 
-	for (uindex = 0; uindex < num_uthreads; uindex++) {
+			/* Set test expectations for each utility thread */
+			uthread[uindex].api_retval_expected = 0;
+			uthread[uindex].placement_expected = 1;
+			uthread[uindex].behavior_expected = 1;
+			uthread[uindex].cputype_expected = CPUTYPE_LWK;
 
-		/* Set test expectations for each utility thread */
-		uthread[uindex].api_retval_expected = 0;
-		uthread[uindex].placement_expected = 1;
-		uthread[uindex].behavior_expected = 1;
-		uthread[uindex].cputype_expected = CPUTYPE_LWK;
-
-		/* Setup and call the uti api */
-		uti_attr_different_l2(&(uthread[uindex].attr));
-		uthread[uindex].api_retval_actual = uti_pthread_create(
-			&(uthread[uindex].pthread),
-			&(uthread[uindex].pthread_attr),
-			mythread,
-			(void *)uindex,
-			&(uthread[uindex].attr));
-		/* Record the API result */
-		record_api_results(uindex);
+			/* Setup and call the uti api */
+			uti_attr_different_l2(&(uthread[uindex].attr));
+			uthread[uindex].api_retval_actual = uti_pthread_create(
+				&(uthread[uindex].pthread),
+				&(uthread[uindex].pthread_attr),
+				myuthread,
+				(void *)uindex,
+				&(uthread[uindex].attr));
+			/* Record the API result */
+			record_uti_api_results(uindex);
+		}
+		end_test(num_uthreads, 0);
 	}
-	end_test(num_uthreads);
-
 	/*
 	 *********************************************************
 	 * Test 5: Create two util threads explicitly on LWK CPUs
@@ -686,34 +948,33 @@ int main(int argc, char **argv)
 
 	/* Prep environment for starting testcase */
 	num_uthreads = 4;
-	begintest();
+	while (begintest(5)) {
+		for (uindex = 0; uindex < num_uthreads; uindex++) {
 
-	for (uindex = 0; uindex < num_uthreads; uindex++) {
+			/* Set test expectations for each utility thread */
+			uthread[uindex].api_retval_expected = 0;
+			uthread[uindex].placement_expected = 1;
+			uthread[uindex].behavior_expected = 1;
 
-		/* Set test expectations for each utility thread */
-		uthread[uindex].api_retval_expected = 0;
-		uthread[uindex].placement_expected = 1;
-		uthread[uindex].behavior_expected = 1;
-
-		/* Setup and call the uti api */
-		if (uindex < 2) {
-			uthread[uindex].cputype_expected = CPUTYPE_FWK;
-			uti_attr_prefer_fwk(&(uthread[uindex].attr));
-		} else {
-			uthread[uindex].cputype_expected = CPUTYPE_LWK;
-			uti_attr_prefer_lwk(&(uthread[uindex].attr));
+			/* Setup and call the uti api */
+			if (uindex < 2) {
+				uthread[uindex].cputype_expected = CPUTYPE_FWK;
+				uti_attr_prefer_fwk(&(uthread[uindex].attr));
+			} else {
+				uthread[uindex].cputype_expected = CPUTYPE_LWK;
+				uti_attr_prefer_lwk(&(uthread[uindex].attr));
+			}
+			uthread[uindex].api_retval_actual = uti_pthread_create(
+				&(uthread[uindex].pthread),
+				&(uthread[uindex].pthread_attr),
+				myuthread,
+				(void *)uindex,
+				&(uthread[uindex].attr));
+			/* Record the API result */
+			record_uti_api_results(uindex);
 		}
-		uthread[uindex].api_retval_actual = uti_pthread_create(
-			&(uthread[uindex].pthread),
-			&(uthread[uindex].pthread_attr),
-			mythread,
-			(void *)uindex,
-			&(uthread[uindex].attr));
-		/* Record the API result */
-		record_api_results(uindex);
+		end_test(num_uthreads, 0);
 	}
-	end_test(num_uthreads);
-
 	/*
 	 *********************************************************
 	 * Test 6: Create four util threads explicitly on Linux CPUs
@@ -739,31 +1000,30 @@ int main(int argc, char **argv)
 			"Test requires Linux CPU in a different numa domain.");
 	}
 	/* Prep environment for starting testcase */
-	begintest();
+	while (begintest(6)) {
+		for (uindex = 0; uindex < num_uthreads; uindex++) {
 
-	for (uindex = 0; uindex < num_uthreads; uindex++) {
+			/* Set test expectations for each utility thread */
+			uthread[uindex].api_retval_expected = 0;
+			uthread[uindex].placement_expected = 1;
+			uthread[uindex].behavior_expected = 1;
+			uthread[uindex].cputype_expected = CPUTYPE_FWK;
+			uthread[uindex].numa_id_not_expected = my_nodeid;
 
-		/* Set test expectations for each utility thread */
-		uthread[uindex].api_retval_expected = 0;
-		uthread[uindex].placement_expected = 1;
-		uthread[uindex].behavior_expected = 1;
-		uthread[uindex].cputype_expected = CPUTYPE_FWK;
-		uthread[uindex].numa_id_not_expected = my_nodeid;
-
-		/* Setup and call the uti api */
-		uti_attr_prefer_fwk(&(uthread[uindex].attr));
-		uti_attr_different_numa_domain(&(uthread[uindex].attr));
-		uthread[uindex].api_retval_actual = uti_pthread_create(
-			&(uthread[uindex].pthread),
-			&(uthread[uindex].pthread_attr),
-			mythread,
-			(void *)uindex,
-			&(uthread[uindex].attr));
-		/* Record the API result */
-		record_api_results(uindex);
+			/* Setup and call the uti api */
+			uti_attr_prefer_fwk(&(uthread[uindex].attr));
+			uti_attr_different_numa_domain(&(uthread[uindex].attr));
+			uthread[uindex].api_retval_actual = uti_pthread_create(
+				&(uthread[uindex].pthread),
+				&(uthread[uindex].pthread_attr),
+				myuthread,
+				(void *)uindex,
+				&(uthread[uindex].attr));
+			/* Record the API result */
+			record_uti_api_results(uindex);
+		}
+		end_test(num_uthreads, 0);
 	}
-	end_test(num_uthreads);
-
 	/*
 	 *********************************************************
 	 * Test 7: Create util threads explicitly on LWK CPUs
@@ -778,35 +1038,37 @@ int main(int argc, char **argv)
 			numa_list[j++] = i;
 	}
 	node_mask = 1;
-	begintest();
-	log_msg(LOG_DEBUG, "Explicitly setting threads on %d numa domains.",
-			num_uthreads);
+	while (begintest(7)) {
+		log_msg(LOG_DEBUG,
+		    "Explicitly setting threads on %d numa domains.",
+				num_uthreads);
 
-	for (uindex = 0; uindex < num_uthreads; uindex++) {
+		for (uindex = 0; uindex < num_uthreads; uindex++) {
 
-		/* Set test expectations for each utility thread */
-		uthread[uindex].api_retval_expected = 0;
-		uthread[uindex].placement_expected = 1;
-		uthread[uindex].behavior_expected = 1;
-		uthread[uindex].cputype_expected = CPUTYPE_LWK;
-		uthread[uindex].numa_id_expected = uindex;
+			/* Set test expectations for each utility thread */
+			uthread[uindex].api_retval_expected = 0;
+			uthread[uindex].placement_expected = 1;
+			uthread[uindex].behavior_expected = 1;
+			uthread[uindex].cputype_expected = CPUTYPE_LWK;
+			uthread[uindex].numa_id_expected = uindex;
 
-		/* Setup and call the uti api */
-		nodes[0] = (node_mask << numa_list[uindex]);
-		uti_attr_prefer_lwk(&(uthread[uindex].attr));
-		uti_attr_numa_set(&(uthread[uindex].attr), nodes, NUMNODES);
-		log_msg(LOG_DEBUG, "Node mask=%lx\n", nodes[0]);
-		uthread[uindex].api_retval_actual = uti_pthread_create(
-			&(uthread[uindex].pthread),
-			&(uthread[uindex].pthread_attr),
-			mythread,
-			(void *)uindex,
-			&(uthread[uindex].attr));
-		/* Record the API result */
-		record_api_results(uindex);
+			/* Setup and call the uti api */
+			nodes[0] = (node_mask << numa_list[uindex]);
+			uti_attr_prefer_lwk(&(uthread[uindex].attr));
+			uti_attr_numa_set(&(uthread[uindex].attr), nodes,
+			    NUMNODES);
+			log_msg(LOG_DEBUG, "Node mask=%lx\n", nodes[0]);
+			uthread[uindex].api_retval_actual = uti_pthread_create(
+				&(uthread[uindex].pthread),
+				&(uthread[uindex].pthread_attr),
+				myuthread,
+				(void *)uindex,
+				&(uthread[uindex].attr));
+			/* Record the API result */
+			record_uti_api_results(uindex);
+		}
+		end_test(num_uthreads, 0);
 	}
-	end_test(num_uthreads);
-
 	/*
 	 *********************************************************
 	 * Test 8: Create two util threads explicitly on LWK CPUs
@@ -817,33 +1079,33 @@ int main(int argc, char **argv)
 	/* Prep environment for starting testcase */
 	num_uthreads = 2;
 	node_mask = 0x10;
-	begintest();
+	while (begintest(8)) {
+		for (uindex = 0; uindex < num_uthreads; uindex++) {
 
-	for (uindex = 0; uindex < num_uthreads; uindex++) {
+			/* Set test expectations for each utility thread */
+			uthread[uindex].api_retval_expected = 0;
+			uthread[uindex].placement_expected = 0;
+			uthread[uindex].behavior_expected = 1;
+			uthread[uindex].cputype_expected = CPUTYPE_LWK;
 
-		/* Set test expectations for each utility thread */
-		uthread[uindex].api_retval_expected = 0;
-		uthread[uindex].placement_expected = 0;
-		uthread[uindex].behavior_expected = 1;
-		uthread[uindex].cputype_expected = CPUTYPE_LWK;
-
-		/* Setup and call the uti api */
-		nodes[0] = node_mask;
-		node_mask *=  2; /* adjust to next node in bit map */
-		uti_attr_prefer_lwk(&(uthread[uindex].attr));
-		uti_attr_numa_set(&(uthread[uindex].attr), nodes, NUMNODES);
-		log_msg(LOG_DEBUG, "Node mask=%lx\n", nodes[0]);
-		uthread[uindex].api_retval_actual = uti_pthread_create(
-			&(uthread[uindex].pthread),
-			&(uthread[uindex].pthread_attr),
-			mythread,
-			(void *)uindex,
-			&(uthread[uindex].attr));
-		/* Record the API result */
-		record_api_results(uindex);
+			/* Setup and call the uti api */
+			nodes[0] = node_mask;
+			node_mask *=  2; /* adjust to next node in bit map */
+			uti_attr_prefer_lwk(&(uthread[uindex].attr));
+			uti_attr_numa_set(&(uthread[uindex].attr), nodes,
+								NUMNODES);
+			log_msg(LOG_DEBUG, "Node mask=%lx\n", nodes[0]);
+			uthread[uindex].api_retval_actual = uti_pthread_create(
+				&(uthread[uindex].pthread),
+				&(uthread[uindex].pthread_attr),
+				myuthread,
+				(void *)uindex,
+				&(uthread[uindex].attr));
+			/* Record the API result */
+			record_uti_api_results(uindex);
+		}
+		end_test(num_uthreads, 0);
 	}
-	end_test(num_uthreads);
-
 	/*
 	 *********************************************************
 	 * Test 9: Create two util threads explicitly on FWK
@@ -862,33 +1124,33 @@ int main(int argc, char **argv)
 	/* Set the node mask to this domain */
 	node_mask <<= i;
 
-	begintest();
+	while (begintest(9)) {
+		for (uindex = 0; uindex < num_uthreads; uindex++) {
 
-	for (uindex = 0; uindex < num_uthreads; uindex++) {
+			/* Set test expectations for each utility thread */
+			uthread[uindex].api_retval_expected = 0;
+			uthread[uindex].placement_expected = 1;
+			uthread[uindex].behavior_expected = 1;
+			uthread[uindex].cputype_expected = CPUTYPE_FWK;
+			uthread[uindex].numa_id_expected = i;
 
-		/* Set test expectations for each utility thread */
-		uthread[uindex].api_retval_expected = 0;
-		uthread[uindex].placement_expected = 1;
-		uthread[uindex].behavior_expected = 1;
-		uthread[uindex].cputype_expected = CPUTYPE_FWK;
-		uthread[uindex].numa_id_expected = i;
-
-		/* Setup and call the uti api */
-		nodes[0] = node_mask;
-		uti_attr_prefer_fwk(&(uthread[uindex].attr));
-		uti_attr_numa_set(&(uthread[uindex].attr), nodes, NUMNODES);
-		log_msg(LOG_DEBUG, "Node mask=%lx\n", nodes[0]);
-		uthread[uindex].api_retval_actual = uti_pthread_create(
-			&(uthread[uindex].pthread),
-			&(uthread[uindex].pthread_attr),
-			mythread,
-			(void *)uindex,
-			&(uthread[uindex].attr));
-		/* Record the API result */
-		record_api_results(uindex);
+			/* Setup and call the uti api */
+			nodes[0] = node_mask;
+			uti_attr_prefer_fwk(&(uthread[uindex].attr));
+			uti_attr_numa_set(&(uthread[uindex].attr), nodes,
+								NUMNODES);
+			log_msg(LOG_DEBUG, "Node mask=%lx\n", nodes[0]);
+			uthread[uindex].api_retval_actual = uti_pthread_create(
+				&(uthread[uindex].pthread),
+				&(uthread[uindex].pthread_attr),
+				myuthread,
+				(void *)uindex,
+				&(uthread[uindex].attr));
+			/* Record the API result */
+			record_uti_api_results(uindex);
+		}
+		end_test(num_uthreads, 0);
 	}
-	end_test(num_uthreads);
-
 	/*
 	 ***************************************************************
 	 * Test 10:  Testing conflicting domain placement requests
@@ -897,25 +1159,24 @@ int main(int argc, char **argv)
 
 	/* Prep environment for starting testcase */
 	num_uthreads = 1;
-	begintest();
+	while (begintest(10)) {
+		/* Set test expectations */
+		uthread[0].api_retval_expected = EINVAL;
 
-	/* Set test expectations */
-	uthread[uindex].api_retval_expected = EINVAL;
-
-	/* Setup and call the uti api */
-	uti_attr_same_numa_domain(&(uthread[uindex].attr));
-	uti_attr_different_numa_domain(&(uthread[uindex].attr));
-	log_msg(LOG_DEBUG, "Node mask=%lx\n", nodes[0]);
-	uthread[uindex].api_retval_actual = uti_pthread_create(
-		&(uthread[uindex].pthread),
-		&(uthread[uindex].pthread_attr),
-		mythread,
-		(void *)uindex,
-		&(uthread[uindex].attr));
-	/* Record the API result */
-	record_api_results(uindex);
-	end_test(0);
-
+		/* Setup and call the uti api */
+		uti_attr_same_numa_domain(&(uthread[0].attr));
+		uti_attr_different_numa_domain(&(uthread[0].attr));
+		log_msg(LOG_DEBUG, "Node mask=%lx\n", nodes[0]);
+		uthread[0].api_retval_actual = uti_pthread_create(
+			&(uthread[0].pthread),
+			&(uthread[0].pthread_attr),
+			myuthread,
+			(void *)0,
+			&(uthread[0].attr));
+		/* Record the API result */
+		record_uti_api_results(0);
+		end_test(0, 0);
+	}
 	/*
 	 ***************************************************************
 	 * Test 11:  Testing conflicting cache placement requests
@@ -924,25 +1185,24 @@ int main(int argc, char **argv)
 
 	/* Prep environment for starting testcase */
 	num_uthreads = 1;
-	begintest();
+	while (begintest(11)) {
+		/* Set test expectations */
+		uthread[0].api_retval_expected = EINVAL;
 
-	/* Set test expectations */
-	uthread[uindex].api_retval_expected = EINVAL;
-
-	/* Setup and call the uti api */
-	uti_attr_same_l1(&(uthread[uindex].attr));
-	uti_attr_different_l1(&(uthread[uindex].attr));
-	log_msg(LOG_DEBUG, "Node mask=%lx\n", nodes[0]);
-	uthread[uindex].api_retval_actual = uti_pthread_create(
-		&(uthread[uindex].pthread),
-		&(uthread[uindex].pthread_attr),
-		mythread,
-		(void *)uindex,
-		&(uthread[uindex].attr));
-	/* Record the API result */
-	record_api_results(uindex);
-	end_test(0);
-
+		/* Setup and call the uti api */
+		uti_attr_same_l1(&(uthread[0].attr));
+		uti_attr_different_l1(&(uthread[0].attr));
+		log_msg(LOG_DEBUG, "Node mask=%lx\n", nodes[0]);
+		uthread[0].api_retval_actual = uti_pthread_create(
+			&(uthread[0].pthread),
+			&(uthread[0].pthread_attr),
+			myuthread,
+			(void *)0,
+			&(uthread[0].attr));
+		/* Record the API result */
+		record_uti_api_results(0);
+		end_test(0, 0);
+	}
 	/*
 	 ***************************************************************
 	 * Test 12:  Testing conflicting cache placement requests
@@ -951,25 +1211,24 @@ int main(int argc, char **argv)
 
 	/* Prep environment for starting testcase */
 	num_uthreads = 1;
-	begintest();
+	while (begintest(12)) {
+		/* Set test expectations */
+		uthread[0].api_retval_expected = EINVAL;
 
-	/* Set test expectations */
-	uthread[uindex].api_retval_expected = EINVAL;
-
-	/* Setup and call the uti api */
-	uti_attr_same_l2(&(uthread[uindex].attr));
-	uti_attr_different_l2(&(uthread[uindex].attr));
-	log_msg(LOG_DEBUG, "Node mask=%lx\n", nodes[0]);
-	uthread[uindex].api_retval_actual = uti_pthread_create(
-		&(uthread[uindex].pthread),
-		&(uthread[uindex].pthread_attr),
-		mythread,
-		(void *)uindex,
-		&(uthread[uindex].attr));
-	/* Record the API result */
-	record_api_results(uindex);
-	end_test(0);
-
+		/* Setup and call the uti api */
+		uti_attr_same_l2(&(uthread[0].attr));
+		uti_attr_different_l2(&(uthread[0].attr));
+		log_msg(LOG_DEBUG, "Node mask=%lx\n", nodes[0]);
+		uthread[0].api_retval_actual = uti_pthread_create(
+			&(uthread[0].pthread),
+			&(uthread[0].pthread_attr),
+			myuthread,
+			(void *)0,
+			&(uthread[0].attr));
+		/* Record the API result */
+		record_uti_api_results(0);
+		end_test(0, 0);
+	}
 	/*
 	 ***************************************************************
 	 * Test 13:  Testing conflicting cache placement requests
@@ -978,25 +1237,24 @@ int main(int argc, char **argv)
 
 	/* Prep environment for starting testcase */
 	num_uthreads = 1;
-	begintest();
+	while (begintest(13)) {
+		/* Set test expectations */
+		uthread[0].api_retval_expected = EINVAL;
 
-	/* Set test expectations */
-	uthread[uindex].api_retval_expected = EINVAL;
-
-	/* Setup and call the uti api */
-	uti_attr_same_l1(&(uthread[uindex].attr));
-	uti_attr_different_l2(&(uthread[uindex].attr));
-	log_msg(LOG_DEBUG, "Node mask=%lx\n", nodes[0]);
-	uthread[uindex].api_retval_actual = uti_pthread_create(
-		&(uthread[uindex].pthread),
-		&(uthread[uindex].pthread_attr),
-		mythread,
-		(void *)uindex,
-		&(uthread[uindex].attr));
-	/* Record the API result */
-	record_api_results(uindex);
-	end_test(0);
-
+		/* Setup and call the uti api */
+		uti_attr_same_l1(&(uthread[0].attr));
+		uti_attr_different_l2(&(uthread[0].attr));
+		log_msg(LOG_DEBUG, "Node mask=%lx\n", nodes[0]);
+		uthread[0].api_retval_actual = uti_pthread_create(
+			&(uthread[0].pthread),
+			&(uthread[0].pthread_attr),
+			myuthread,
+			(void *)0,
+			&(uthread[0].attr));
+		/* Record the API result */
+		record_uti_api_results(0);
+		end_test(0, 0);
+	}
 	/*
 	 *********************************************************
 	 * Test 14: Location KEY test.
@@ -1008,35 +1266,35 @@ int main(int argc, char **argv)
 
 	/* Prep environment for starting testcase */
 	num_uthreads = 4;
-	begintest();
+	while (begintest(14)) {
+		/* Generate a new location key */
+		location_key  = random();
 
-	/* Generate a new location key */
-	location_key  = random();
+		for (uindex = 0; uindex < num_uthreads; uindex++) {
 
-	for (uindex = 0; uindex < num_uthreads; uindex++) {
+			/* Set test expectations for each utility thread */
+			uthread[uindex].api_retval_expected = 0;
+			uthread[uindex].placement_expected = 1;
+			uthread[uindex].behavior_expected = 1;
+			uthread[uindex].cputype_expected = CPUTYPE_FWK;
+			uthread[uindex].numa_id_expected = ALL_UTILS_SAME;
 
-		/* Set test expectations for each utility thread */
-		uthread[uindex].api_retval_expected = 0;
-		uthread[uindex].placement_expected = 1;
-		uthread[uindex].behavior_expected = 1;
-		uthread[uindex].cputype_expected = CPUTYPE_FWK;
-		uthread[uindex].numa_id_expected = ALL_UTILS_SAME;
-
-		/* Setup and call the uti api */
-		uti_attr_prefer_fwk(&(uthread[uindex].attr));
-		uti_attr_location_key(&(uthread[uindex].attr), location_key);
-		uti_attr_same_numa_domain(&(uthread[uindex].attr));
-		uthread[uindex].api_retval_actual = uti_pthread_create(
-			&(uthread[uindex].pthread),
-			&(uthread[uindex].pthread_attr),
-			mythread,
-			(void *)uindex,
-			&(uthread[uindex].attr));
-		/* Record the API result */
-		record_api_results(uindex);
+			/* Setup and call the uti api */
+			uti_attr_prefer_fwk(&(uthread[uindex].attr));
+			uti_attr_location_key(&(uthread[uindex].attr),
+						location_key);
+			uti_attr_same_numa_domain(&(uthread[uindex].attr));
+			uthread[uindex].api_retval_actual = uti_pthread_create(
+				&(uthread[uindex].pthread),
+				&(uthread[uindex].pthread_attr),
+				myuthread,
+				(void *)uindex,
+				&(uthread[uindex].attr));
+			/* Record the API result */
+			record_uti_api_results(uindex);
+		}
+		end_test(num_uthreads, 0);
 	}
-	end_test(num_uthreads);
-
 	/*
 	 *********************************************************
 	 * Test 15: Location KEY test.
@@ -1048,35 +1306,35 @@ int main(int argc, char **argv)
 
 	/* Prep environment for starting testcase */
 	num_uthreads = 4;
-	begintest();
+	while (begintest(15)) {
+		/* Generate a new location key */
+		location_key  = random();
 
-	/* Generate a new location key */
-	location_key  = random();
+		for (uindex = 0; uindex < num_uthreads; uindex++) {
 
-	for (uindex = 0; uindex < num_uthreads; uindex++) {
+			/* Set test expectations for each utility thread */
+			uthread[uindex].api_retval_expected = 0;
+			uthread[uindex].placement_expected = 1;
+			uthread[uindex].behavior_expected = 1;
+			uthread[uindex].cputype_expected = CPUTYPE_FWK;
+			uthread[uindex].numa_id_expected = ALL_UTILS_SAME;
 
-		/* Set test expectations for each utility thread */
-		uthread[uindex].api_retval_expected = 0;
-		uthread[uindex].placement_expected = 1;
-		uthread[uindex].behavior_expected = 1;
-		uthread[uindex].cputype_expected = CPUTYPE_FWK;
-		uthread[uindex].numa_id_expected = ALL_UTILS_SAME;
-
-		/* Setup and call the uti api */
-		uti_attr_prefer_fwk(&(uthread[uindex].attr));
-		uti_attr_location_key(&(uthread[uindex].attr), location_key);
-		uti_attr_same_l2(&(uthread[uindex].attr));
-		uthread[uindex].api_retval_actual = uti_pthread_create(
-			&(uthread[uindex].pthread),
-			&(uthread[uindex].pthread_attr),
-			mythread,
-			(void *)uindex,
-			&(uthread[uindex].attr));
-		/* Record the API result */
-		record_api_results(uindex);
+			/* Setup and call the uti api */
+			uti_attr_prefer_fwk(&(uthread[uindex].attr));
+			uti_attr_location_key(&(uthread[uindex].attr),
+						location_key);
+			uti_attr_same_l2(&(uthread[uindex].attr));
+			uthread[uindex].api_retval_actual = uti_pthread_create(
+				&(uthread[uindex].pthread),
+				&(uthread[uindex].pthread_attr),
+				myuthread,
+				(void *)uindex,
+				&(uthread[uindex].attr));
+			/* Record the API result */
+			record_uti_api_results(uindex);
+		}
+		end_test(num_uthreads, 0);
 	}
-	end_test(num_uthreads);
-
 	/*
 	 *********************************************************
 	 * Test 16: Location KEY test.
@@ -1088,34 +1346,34 @@ int main(int argc, char **argv)
 
 	/* Prep environment for starting testcase */
 	num_uthreads = 2;
-	begintest();
+	while (begintest(16)) {
+		location_key = random();
 
-	location_key = random();
+		for (uindex = 0; uindex < num_uthreads; uindex++) {
 
-	for (uindex = 0; uindex < num_uthreads; uindex++) {
+			/* Set test expectations for each utility thread */
+			uthread[uindex].api_retval_expected = 0;
+			uthread[uindex].placement_expected = 1;
+			uthread[uindex].behavior_expected = 1;
+			uthread[uindex].cputype_expected = CPUTYPE_FWK;
+			uthread[uindex].numa_id_expected = ALL_UTILS_DIFF;
 
-		/* Set test expectations for each utility thread */
-		uthread[uindex].api_retval_expected = 0;
-		uthread[uindex].placement_expected = 1;
-		uthread[uindex].behavior_expected = 1;
-		uthread[uindex].cputype_expected = CPUTYPE_FWK;
-		uthread[uindex].numa_id_expected = ALL_UTILS_DIFF;
-
-		/* Setup and call the uti api */
-		uti_attr_prefer_fwk(&(uthread[uindex].attr));
-		uti_attr_location_key(&(uthread[uindex].attr), location_key);
-		uti_attr_different_numa_domain(&(uthread[uindex].attr));
-		uthread[uindex].api_retval_actual = uti_pthread_create(
-			&(uthread[uindex].pthread),
-			&(uthread[uindex].pthread_attr),
-			mythread,
-			(void *)uindex,
-			&(uthread[uindex].attr));
-		/* Record the API result */
-		record_api_results(uindex);
+			/* Setup and call the uti api */
+			uti_attr_prefer_fwk(&(uthread[uindex].attr));
+			uti_attr_location_key(&(uthread[uindex].attr),
+						location_key);
+			uti_attr_different_numa_domain(&(uthread[uindex].attr));
+			uthread[uindex].api_retval_actual = uti_pthread_create(
+				&(uthread[uindex].pthread),
+				&(uthread[uindex].pthread_attr),
+				myuthread,
+				(void *)uindex,
+				&(uthread[uindex].attr));
+			/* Record the API result */
+			record_uti_api_results(uindex);
+		}
+		end_test(num_uthreads, 0);
 	}
-	end_test(num_uthreads);
-
 	/*
 	 *********************************************************
 	 * Test 17: Create two util threads to be placed on CPUs
@@ -1132,28 +1390,28 @@ int main(int argc, char **argv)
 	/* Prep environment for starting testcase */
 	num_uthreads = 2;
 
-	begintest();
+	while (begintest(17)) {
+		for (uindex = 0; uindex < num_uthreads; uindex++) {
 
-	for (uindex = 0; uindex < num_uthreads; uindex++) {
+			/* Set test expectations for each utility thread */
+			uthread[uindex].api_retval_expected = 0;
+			uthread[uindex].placement_expected = 1;
+			uthread[uindex].behavior_expected = 1;
+			uthread[uindex].cputype_expected = CPUTYPE_FWK;
 
-		/* Set test expectations for each utility thread */
-		uthread[uindex].api_retval_expected = 0;
-		uthread[uindex].placement_expected = 1;
-		uthread[uindex].behavior_expected = 1;
-		uthread[uindex].cputype_expected = CPUTYPE_FWK;
-
-		/* Setup and call the uti api */
-		uti_attr_fabric_intr_affinity(&(uthread[uindex].attr));
-		uthread[uindex].api_retval_actual = uti_pthread_create(
-			&(uthread[uindex].pthread),
-			&(uthread[uindex].pthread_attr),
-			mythread,
-			(void *)uindex,
-			&(uthread[uindex].attr));
-		/* Record the API result */
-		record_api_results(uindex);
+			/* Setup and call the uti api */
+			uti_attr_fabric_intr_affinity(&(uthread[uindex].attr));
+			uthread[uindex].api_retval_actual = uti_pthread_create(
+				&(uthread[uindex].pthread),
+				&(uthread[uindex].pthread_attr),
+				myuthread,
+				(void *)uindex,
+				&(uthread[uindex].attr));
+			/* Record the API result */
+			record_uti_api_results(uindex);
+		}
+		end_test(num_uthreads, 0);
 	}
-	end_test(num_uthreads);
 	/*
 	 *********************************************************
 	 * Test 18: Create a util thread to be placed on a CPU
@@ -1166,28 +1424,572 @@ int main(int argc, char **argv)
 	/* Prep environment for starting testcase */
 	num_uthreads = 1;
 
-	begintest();
+	while (begintest(18)) {
+		for (uindex = 0; uindex < num_uthreads; uindex++) {
 
-	for (uindex = 0; uindex < num_uthreads; uindex++) {
+			/* Set test expectations for each utility thread */
+			uthread[uindex].api_retval_expected = EINVAL;
 
-		/* Set test expectations for each utility thread */
-		uthread[uindex].api_retval_expected = EINVAL;
-
-		/* Setup and call the uti api */
-		uti_attr_fabric_intr_affinity(&(uthread[uindex].attr));
-		uti_attr_prefer_lwk(&(uthread[uindex].attr));
-		uthread[uindex].api_retval_actual = uti_pthread_create(
-			&(uthread[uindex].pthread),
-			&(uthread[uindex].pthread_attr),
-			mythread,
-			(void *)uindex,
-			&(uthread[uindex].attr));
-		/* Record the API result */
-		record_api_results(uindex);
+			/* Setup and call the uti api */
+			uti_attr_fabric_intr_affinity(&(uthread[uindex].attr));
+			uti_attr_prefer_lwk(&(uthread[uindex].attr));
+			uthread[uindex].api_retval_actual = uti_pthread_create(
+				&(uthread[uindex].pthread),
+				&(uthread[uindex].pthread_attr),
+				myuthread,
+				(void *)uindex,
+				&(uthread[uindex].attr));
+			/* Record the API result */
+			record_uti_api_results(uindex);
+		}
+		end_test(0, 0);
 	}
-	end_test(0);
+	/*
+	 **********************************************************
+	 * Test 19: Validate that a process enivronment can be created
+	 *          in which each CPU is hosting a compute thread and
+	 *          a utility thread, and no CPU contains more than one
+	 *          compute thread. We will alternately create compute threads
+	 *          and utility threads until we have created 2 times the
+	 *          number of CPUs available with threads. Verify that the
+	 *          scheduler has placed the threads appropriately
+	 **********************************************************
+	 */
 
+	/* Prep environment for starting testcase */
+	num_uthreads = num_lwkcpus; /* 1 on each CPU */
+	num_cthreads = num_lwkcpus - 1; /* 1 on each CPU */
 
+	while (begintest(19)) {
+		uindex = 0;
+		cindex = 0;
+		while (uindex < num_uthreads || cindex < num_cthreads) {
+
+			if (uindex < num_uthreads) {
+				/* Set test expectations for utility thread */
+				uthread[uindex].cputype_expected = CPUTYPE_LWK;
+				uthread[uindex].enable_compute_cpu_share_test = 1;
+				uthread[uindex].share_level_computes = 1;
+				uthread[uindex].enable_util_cpu_share_test = 1;
+				switch (overcommit_behavior) {
+				case AllCommits:
+					if (((uindex >= num_uthreads/2) &&
+					  (uindex < num_uthreads - num_uthreads/4)) ||
+					  (uindex < num_uthreads/4))
+					uthread[uindex].share_level_utils = 2;
+					else
+					uthread[uindex].share_level_utils = 1;
+					break;
+				case OnlyComputeCommits:
+					uthread[uindex].share_level_utils = num_uthreads;
+					break;
+				case OnlyUtilityCommits:
+					uthread[uindex].share_level_utils = 1;
+					break;
+				}
+				uthread[uindex].api_retval_expected = 0;
+				uthread[uindex].placement_expected = 1;
+
+				/* Setup and call the uti api */
+				uti_attr_prefer_lwk(&(uthread[uindex].attr));
+				uthread[uindex].api_retval_actual =
+					uti_pthread_create(
+					    &(uthread[uindex].pthread),
+					    &(uthread[uindex].pthread_attr),
+					    myuthread,
+					    (void *)uindex,
+					    &(uthread[uindex].attr));
+				/* Record the API result */
+				record_uti_api_results(uindex);
+				uindex++;
+			}
+			if (cindex >= num_cthreads)
+				continue;
+			/* Set test expectations for each compute thread */
+			cthread[cindex].enable_compute_cpu_share_test =
+								      1;
+			cthread[cindex].share_level_computes = 1;
+			cthread[cindex].enable_util_cpu_share_test = 1;
+			switch (overcommit_behavior) {
+			case AllCommits:
+				if (cindex < (num_uthreads/4 - 1))
+					cthread[cindex].share_level_utils = 0;
+				else if (cindex >=
+					 (num_uthreads -
+					  num_uthreads/4 - 1))
+					cthread[cindex].share_level_utils = 2;
+				else
+					cthread[cindex].share_level_utils = 1;
+				break;
+			case OnlyUtilityCommits:
+				cthread[cindex].share_level_utils = 1;
+				break;
+			case OnlyComputeCommits:
+				if (cindex == num_cthreads - 1)
+					cthread[cindex].share_level_utils = num_uthreads;
+				else
+					cthread[cindex].share_level_utils = 0;
+				break;
+			}
+			cthread[cindex].api_retval_expected = 0;
+			cthread[cindex].cputype_expected = CPUTYPE_LWK;
+
+			/* create a commpute thread */
+			cthread[cindex].api_retval_actual =
+				pthread_create(
+				    &(cthread[cindex].pthread),
+				    &(cthread[cindex].pthread_attr),
+				    mycthread,
+				    (void *)cindex);
+			/* Record the API result */
+			record_pthread_api_results(cindex);
+			cindex++;
+		}
+		end_test(num_uthreads, num_cthreads);
+	}
+	/*
+	 **********************************************************
+	 * Test 20: Validate that a process enivronment can be created
+	 *          in which each CPU is hosting a compute thread and
+	 *          a utility thread, and no CPU contains more than one
+	 *          compute thread. We will first create compute threads
+	 *          to fill up all CPUs. We will then create utility
+	 *          threads. Verify that the scheduler has placed
+	 *          threads appropriately.
+	 **********************************************************
+	 */
+
+	/* Prep environment for starting testcase */
+	num_uthreads = num_lwkcpus; /* 1 on each CPU */
+	num_cthreads = num_lwkcpus - 1; /* 1 on each CPU */
+
+	while (begintest(20)) {
+		for (cindex = 0; cindex < num_cthreads; cindex++) {
+			/* Set test expectations for each compute thread */
+			cthread[cindex].enable_compute_cpu_share_test = 1;
+			cthread[cindex].share_level_computes = 1;
+			cthread[cindex].enable_util_cpu_share_test = 1;
+			switch (overcommit_behavior) {
+			case AllCommits:
+			case OnlyUtilityCommits:
+				cthread[cindex].share_level_utils = 1;
+				break;
+			case OnlyComputeCommits:
+				if (cindex == num_cthreads - 1)
+					cthread[cindex].share_level_utils = num_uthreads;
+				else
+					cthread[cindex].share_level_utils = 0;
+			}
+			cthread[cindex].api_retval_expected = 0;
+			cthread[cindex].cputype_expected = CPUTYPE_LWK;
+
+			/* create a commpute thread */
+			cthread[cindex].api_retval_actual = pthread_create(
+			    &(cthread[cindex].pthread),
+			    &(cthread[cindex].pthread_attr),
+			    mycthread,
+			    (void *)cindex);
+			/* Record the API result */
+			record_pthread_api_results(cindex);
+		}
+		for (uindex = 0; uindex < num_uthreads; uindex++) {
+			/* Set test expectations for each utility thread */
+			uthread[uindex].cputype_expected = CPUTYPE_LWK;
+			uthread[uindex].enable_compute_cpu_share_test = 1;
+			uthread[uindex].share_level_computes = 1;
+			uthread[uindex].enable_util_cpu_share_test = 1;
+
+			switch (overcommit_behavior) {
+			case AllCommits:
+			case OnlyUtilityCommits:
+				uthread[uindex].share_level_utils = 1;
+				break;
+			case OnlyComputeCommits:
+				uthread[uindex].share_level_utils = num_uthreads;
+				break;
+			}
+			uthread[uindex].api_retval_expected = 0;
+			uthread[uindex].placement_expected = 1;
+
+			/* Setup and call the uti api */
+			uti_attr_prefer_lwk(&(uthread[uindex].attr));
+			uthread[uindex].api_retval_actual = uti_pthread_create(
+			    &(uthread[uindex].pthread),
+			    &(uthread[uindex].pthread_attr),
+			    myuthread,
+			    (void *)uindex,
+			    &(uthread[uindex].attr));
+			/* Record the API result */
+			record_uti_api_results(uindex);
+		}
+
+		end_test(num_uthreads, num_cthreads);
+	}
+	/*
+	 **********************************************************
+	 * Test 21: Validate that a process enivronment can be created
+	 *          in which each CPU is hosting a compute thread and
+	 *          a utility thread, and no CPU contains more than one
+	 *          compute thread. We will first create utility threads
+	 *          to fill up all CPUs. Then we will create compute
+	 *          threads until we have put a compute thread on
+	 *          each CPU . Verify that the default layout of the
+	 *          scheduler has placed one compute on each CPU.
+	 **********************************************************
+	 */
+
+	/* Prep environment for starting testcase */
+	num_uthreads = num_lwkcpus; /* 1 on each CPU */
+	num_cthreads = num_lwkcpus - 1; /* 1 on each CPU */
+
+	while (begintest(21)) {
+		for (uindex = 0; uindex < num_uthreads; uindex++) {
+			/* Set test expectations for each utility thread */
+			uthread[uindex].cputype_expected = CPUTYPE_LWK;
+			uthread[uindex].enable_compute_cpu_share_test = 1;
+			uthread[uindex].share_level_computes = 1;
+			uthread[uindex].enable_util_cpu_share_test = 1;
+			switch (overcommit_behavior) {
+			case AllCommits:
+				if ((uindex == 0) ||
+				    (uindex == num_uthreads - 1))
+					uthread[uindex].share_level_utils = 2;
+				else
+					uthread[uindex].share_level_utils = 1;
+				break;
+			case OnlyComputeCommits:
+				uthread[uindex].share_level_utils = num_uthreads;
+				break;
+			case OnlyUtilityCommits:
+				uthread[uindex].share_level_utils = 1;
+				break;
+			}
+			uthread[uindex].api_retval_expected = 0;
+			uthread[uindex].placement_expected = 1;
+
+			/* Setup and call the uti api */
+			uti_attr_prefer_lwk(&(uthread[uindex].attr));
+			uthread[uindex].api_retval_actual = uti_pthread_create(
+			    &(uthread[uindex].pthread),
+			    &(uthread[uindex].pthread_attr),
+			    myuthread,
+			    (void *)uindex,
+			    &(uthread[uindex].attr));
+			/* Record the API result */
+			record_uti_api_results(uindex);
+		}
+		for (cindex = 0; cindex < num_cthreads; cindex++) {
+			/* Set test expectations for each compute thread */
+			cthread[cindex].enable_compute_cpu_share_test = 1;
+			cthread[cindex].share_level_computes = 1;
+			cthread[cindex].enable_util_cpu_share_test = 1;
+			switch (overcommit_behavior) {
+			case AllCommits:
+				if (cindex == num_cthreads - 1)
+					cthread[cindex].share_level_utils = 2;
+				else
+					cthread[cindex].share_level_utils = 1;
+				break;
+			case OnlyComputeCommits:
+				if (cindex == num_cthreads - 1)
+					cthread[cindex].share_level_utils = num_uthreads;
+				else
+					cthread[cindex].share_level_utils = 0;
+				break;
+			case OnlyUtilityCommits:
+				cthread[cindex].share_level_utils = 1;
+				break;
+			}
+			cthread[cindex].api_retval_expected = 0;
+			cthread[cindex].cputype_expected = CPUTYPE_LWK;
+
+			/* create a commpute thread */
+			cthread[cindex].api_retval_actual = pthread_create(
+			    &(cthread[cindex].pthread),
+			    &(cthread[cindex].pthread_attr),
+			    mycthread,
+			    (void *)cindex);
+			/* Record the API result */
+			record_pthread_api_results(cindex);
+		}
+
+		end_test(num_uthreads, num_cthreads);
+	}
+	/*
+	 **********************************************************************
+	 * Test 22: Validate that a process enivronment can be created
+	 *          in which each CPU is hosting a compute thread and multiple
+	 *          utility threads, and no CPU contains more than one
+	 *          compute thread. We will first create a total number of
+	 *          utility threads equal to 2 times the number of available
+	 *          CPUs. Then we will create compute threads until we have one
+	 *          compute thread on each CPU.
+	 **********************************************************************
+	 */
+
+	/* Prep environment for starting testcase */
+	num_uthreads = num_lwkcpus * 2; /* 2  on each CPU */
+	num_cthreads = num_lwkcpus - 1; /* 1 on each CPU */
+
+	while (begintest(22)) {
+		for (uindex = 0; uindex < num_uthreads; uindex++) {
+			/* Set test expectations for each utility thread */
+			uthread[uindex].cputype_expected = CPUTYPE_LWK;
+			uthread[uindex].enable_compute_cpu_share_test = 1;
+			uthread[uindex].share_level_computes = 1;
+			uthread[uindex].enable_util_cpu_share_test = 1;
+			switch (overcommit_behavior) {
+			case AllCommits:
+				if ((uindex == 0) ||
+				    (uindex == num_uthreads/2 - 1) ||
+				    (uindex == num_uthreads - 1))
+					uthread[uindex].share_level_utils = 3;
+				else if (uindex == num_uthreads - 2)
+					uthread[uindex].share_level_utils = 1;
+				else
+					uthread[uindex].share_level_utils = 2;
+				break;
+			case OnlyComputeCommits:
+				uthread[uindex].share_level_utils = num_uthreads;
+				break;
+			case OnlyUtilityCommits:
+				uthread[uindex].share_level_utils = 2;
+				break;
+			}
+			uthread[uindex].api_retval_expected = 0;
+			uthread[uindex].placement_expected = 1;
+
+			/* Setup and call the uti api */
+			uti_attr_prefer_lwk(&(uthread[uindex].attr));
+			uthread[uindex].api_retval_actual = uti_pthread_create(
+			    &(uthread[uindex].pthread),
+			    &(uthread[uindex].pthread_attr),
+			    myuthread,
+			    (void *)uindex,
+			    &(uthread[uindex].attr));
+			/* Record the API result */
+			record_uti_api_results(uindex);
+		}
+		for (cindex = 0; cindex < num_cthreads; cindex++) {
+			/* Set test expectations for each compute thread */
+			cthread[cindex].enable_compute_cpu_share_test = 1;
+			cthread[cindex].share_level_computes = 1;
+			cthread[cindex].enable_util_cpu_share_test = 1;
+			switch (overcommit_behavior) {
+			case AllCommits:
+				if (cindex == num_cthreads - 1)
+					cthread[cindex].share_level_utils = 3;
+				else
+					cthread[cindex].share_level_utils = 2;
+				break;
+			case OnlyComputeCommits:
+				if (cindex == num_cthreads - 1)
+					cthread[cindex].share_level_utils = num_uthreads;
+				else
+					cthread[cindex].share_level_utils = 0;
+				break;
+			case OnlyUtilityCommits:
+				cthread[cindex].share_level_utils = 2;
+				break;
+			}
+			cthread[cindex].api_retval_expected = 0;
+			cthread[cindex].cputype_expected = CPUTYPE_LWK;
+
+			/* create a commpute thread */
+			cthread[cindex].api_retval_actual = pthread_create(
+			    &(cthread[cindex].pthread),
+			    &(cthread[cindex].pthread_attr),
+			    mycthread,
+			    (void *)cindex);
+			/* Record the API result */
+			record_pthread_api_results(cindex);
+		}
+
+		end_test(num_uthreads, num_cthreads);
+	}
+	/*
+	 **********************************************************************
+	 * Test 23: Validate that a process enivronment can be created
+	 *          in which a utility thread can be located at some location
+	 *          other than the end of the sequence list for the compute
+	 *          threads and fill up all of the CPUs with compute threads
+	 *          with no overcommitting of any CPUs. The CPU assignment for
+	 *          the compute thread should skip the CPU occupied by the
+	 *          utility thread and be committed to the remaining available
+	 *          CPUs.
+	 **********************************************************************
+	 */
+
+	/* Prep environment for starting testcase */
+	num_uthreads = 1;
+	/* Set number of cthreads equal to the number of CPUs minus the CPU
+	 * that the main thread occupies, minus the CPU(s) that the unthread(s)
+	 * will occupy.
+	 */
+	num_cthreads = num_lwkcpus - 1 - num_uthreads;
+
+	while (begintest(23)) {
+		for (uindex = 0; uindex < num_uthreads; uindex++) {
+			/* Set test expectations for each utility thread */
+			uthread[uindex].cputype_expected = CPUTYPE_LWK;
+			uthread[uindex].enable_compute_cpu_share_test = 1;
+			uthread[uindex].share_level_computes = 0;
+			uthread[uindex].enable_util_cpu_share_test = 1;
+			uthread[uindex].share_level_utils = 1;
+			uthread[uindex].api_retval_expected = 0;
+			uthread[uindex].placement_expected = 1;
+
+			/* Setup and call the uti api */
+			uti_attr_same_l2(&(uthread[uindex].attr));
+			uti_attr_prefer_lwk(&(uthread[uindex].attr));
+			uthread[uindex].api_retval_actual = uti_pthread_create(
+			    &(uthread[uindex].pthread),
+			    &(uthread[uindex].pthread_attr),
+			    myuthread,
+			    (void *)uindex,
+			    &(uthread[uindex].attr));
+			/* Record the API result */
+			record_uti_api_results(uindex);
+		}
+		for (cindex = 0; cindex < num_cthreads; cindex++) {
+			/* Set test expectations for each compute thread */
+			cthread[cindex].enable_compute_cpu_share_test = 1;
+			cthread[cindex].share_level_computes = 1;
+			cthread[cindex].enable_util_cpu_share_test = 1;
+			cthread[cindex].share_level_utils = 0;
+			cthread[cindex].api_retval_expected = 0;
+			cthread[cindex].cputype_expected = CPUTYPE_LWK;
+
+			/* create a commpute thread */
+			cthread[cindex].api_retval_actual = pthread_create(
+			    &(cthread[cindex].pthread),
+			    &(cthread[cindex].pthread_attr),
+			    mycthread,
+			    (void *)cindex);
+			/* Record the API result */
+			record_pthread_api_results(cindex);
+		}
+
+		end_test(num_uthreads, num_cthreads);
+	}
+	/*
+	 **********************************************************************
+	 * Test 24: Validate that a process enivronment can be created
+	 *          in which an utility thread is created to run
+	 *          exclusively on an LWK CPU. Compute threads and
+	 *          additional utility threads are also created, overcommitting
+	 *          the available CPU resources. Verify that no other threads
+	 *          are placed on the utility thread that is designated as
+	 *          needing exclusive use of a CPU.
+	 **********************************************************************
+	 */
+
+	/* Prep environment for starting testcase */
+	num_uthreads = 3;
+	num_cthreads = num_lwkcpus;
+
+	while (begintest(24)) {
+		for (uindex = 0; uindex < num_uthreads; uindex++) {
+			/* Set test expectations for each utility thread */
+			uthread[uindex].cputype_expected = CPUTYPE_LWK;
+			uthread[uindex].api_retval_expected = 0;
+			uthread[uindex].placement_expected = 1;
+
+			/* Setup and call the uti api */
+			if (uindex == 1) {
+				uti_attr_exclusive_cpu(&(uthread[uindex].attr));
+				uthread[uindex].behavior_expected = 1;
+				uthread[uindex].enable_util_cpu_share_test = 1;
+				uthread[uindex].share_level_utils = 1;
+				uthread[uindex].enable_compute_cpu_share_test = 1;
+				uthread[uindex].share_level_computes = 0;
+			}
+			uti_attr_prefer_lwk(&(uthread[uindex].attr));
+			uthread[uindex].api_retval_actual = uti_pthread_create(
+			    &(uthread[uindex].pthread),
+			    &(uthread[uindex].pthread_attr),
+			    myuthread,
+			    (void *)uindex,
+			    &(uthread[uindex].attr));
+			/* Record the API result */
+			record_uti_api_results(uindex);
+		}
+		for (cindex = 0; cindex < num_cthreads; cindex++) {
+			/* Set test expectations for each compute thread */
+			cthread[cindex].api_retval_expected = 0;
+			cthread[cindex].cputype_expected = CPUTYPE_LWK;
+
+			/* create a commpute thread */
+			cthread[cindex].api_retval_actual = pthread_create(
+			    &(cthread[cindex].pthread),
+			    &(cthread[cindex].pthread_attr),
+			    mycthread,
+			    (void *)cindex);
+			/* Record the API result */
+			record_pthread_api_results(cindex);
+		}
+
+		end_test(num_uthreads, num_cthreads);
+	}
+	/*
+	 **********************************************************************
+	 * Test 25: Create an environment where all CPUs are occuppied by
+	 *          icompute threads and utility threads and then attempt to
+	 *          create a utility thread that requires an exclusive CPU.
+	 *          Verify that the the API returns an indication that the
+	 *          requested exclusive behavior was not honored.
+	 **********************************************************************
+	 */
+
+	/* Prep environment for starting testcase */
+	num_uthreads = 3;
+	num_cthreads = num_lwkcpus - num_uthreads;
+
+	while (begintest(25)) {
+		for (cindex = 0; cindex < num_cthreads; cindex++) {
+			/* Set test expectations for each compute thread */
+			cthread[cindex].api_retval_expected = 0;
+			cthread[cindex].cputype_expected = CPUTYPE_LWK;
+
+			/* create a commpute thread */
+			cthread[cindex].api_retval_actual = pthread_create(
+			    &(cthread[cindex].pthread),
+			    &(cthread[cindex].pthread_attr),
+			    mycthread,
+			    (void *)cindex);
+			/* Record the API result */
+			record_pthread_api_results(cindex);
+		}
+
+		for (uindex = 0; uindex < num_uthreads; uindex++) {
+			/* Set test expectations for each utility thread */
+			uthread[uindex].cputype_expected = CPUTYPE_LWK;
+			uthread[uindex].api_retval_expected = 0;
+			uthread[uindex].placement_expected = 1;
+
+			/* Setup and call the uti api */
+			if (uindex == num_uthreads - 1) {
+				uti_attr_exclusive_cpu(&(uthread[uindex].attr));
+				/* No free CPU, expect behavior fail reported */
+				uthread[uindex].behavior_expected = 0;
+				uthread[uindex].enable_util_cpu_share_test = 1;
+				uthread[uindex].share_level_utils = 1;
+				uthread[uindex].enable_compute_cpu_share_test = 1;
+				uthread[uindex].share_level_computes = 0;
+			}
+			uti_attr_prefer_lwk(&(uthread[uindex].attr));
+			uthread[uindex].api_retval_actual = uti_pthread_create(
+			    &(uthread[uindex].pthread),
+			    &(uthread[uindex].pthread_attr),
+			    myuthread,
+			    (void *)uindex,
+			    &(uthread[uindex].attr));
+			/* Record the API result */
+			record_uti_api_results(uindex);
+		}
+
+		end_test(num_uthreads, num_cthreads);
+	}
 	/************************************************
 	 * All tests completed. Now summarize the results
 	 ************************************************/
@@ -1198,5 +2000,6 @@ out:
 
 static void usage(void)
 {
-	printf("uti_placement [--debug].. [--help]\n");
+	printf(
+	    "uti_placement [--behavior <N>] [--subtest <N>] [--debug].. [--help]\n");
 }
