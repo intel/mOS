@@ -84,7 +84,7 @@ def create_and_verify(obj, lwk_spec, sccpus_req, lwkcpus_req, v='0'):
 
     # Create LWK partition
     lwk_spec = lwk_spec.strip()
-    out, rc = run(['sudo', 'lwkctl', '-v', v, '-c', lwk_spec])
+    out, rc = run(['lwkctl', '-v', v, '-c', lwk_spec], requiresRoot=True)
 
     # Read and verify LWK partition  using lwkctl -s
 
@@ -131,7 +131,7 @@ def create_and_verify(obj, lwk_spec, sccpus_req, lwkcpus_req, v='0'):
         yod(obj, '../lwkmem/maptest', '--verbose', '--type', 'anonymous', '--num', 10, '--size', 4096, '--iterations', 10)
 
     # Delete partition
-    run(['sudo', 'lwkctl', '-v', v, '-d'])
+    run(['lwkctl', '-v', v, '-d'], requiresRoot=True)
 
     # Read and verify using lwkctl -s
     sccpus, lwkcpus = get_cpus()
@@ -318,7 +318,7 @@ class Partition(TestCase):
         s = '{} {}'.format(lwkcpus_spec, lwkmem_spec)
         logging.debug('Testing LWK partition: {}'.format(s))
 
-        out, rc = run(['sudo', 'lwkctl', '-v', v, '-c', s])
+        out, rc = run(['lwkctl', '-v', v, '-c', s], requiresRoot=True)
         self.assertFalse(rc == 0, 'Created LWK partition for invalid spec: {}'.format(s))
 
     def test_invalid_spec(self):
@@ -343,7 +343,7 @@ class Partition(TestCase):
         for s in invalid_lwkcpu_spec:
             s = '{} {}'.format(s, lwkmem_spec)
             logging.debug('Testing spec: ' + s)
-            out, rc = run(['sudo', 'lwkctl', '-v', v, '-c', s])
+            out, rc = run(['lwkctl', '-v', v, '-c', s], requiresRoot=True)
             self.assertFalse(rc == 0, 'Created LWK partition for invalid spec: {}'.format(s))
 
 class Profile(TestCase):

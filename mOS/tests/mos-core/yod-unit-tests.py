@@ -21,9 +21,11 @@ EBUSY = 240
 EINVAL = 234
 
 class HelloWorld(yod.YodTestCase):
-    @unittest.skipIf(len(LWK_CPUS) < 1,
-                     'test requires at least 1 LWK CPU')
     def test_hello(self):
+
+        if self.get_designated_lwkcpus().countCpus() < 1:
+            self.skipTest('Test requires at least one designated CPU.')
+
         # "Hello world" for yod.
         cmd = ['%HELLO%', 'from yod']
         self.expand_and_run(cmd, 0)
@@ -31,26 +33,23 @@ class HelloWorld(yod.YodTestCase):
 class Resources(yod.YodTestCase):
     @property
     def total_lwkmem(self):
-        return sum(int(x) for x in self.var['I_LWKMEM'].split())
+        return sum(self.lwkmem)
 
     def test_all(self):
         # Test "yod -R all foo".
 
-        cmd = ['%RESOURCES%', 'all', '%AFFINITY_TEST%', '--affinity', self.var['ALLCPUS'], '--lwkmem_reserved', str(self.total_lwkmem)]
+        self.lwkcpus_request = self.get_designated_lwkcpus()
+        self.compute_lwkmem_request(fraction=1.0)
+
+        cmd = ['%RESOURCES%', 'all', '%AFFINITY_TEST%', '--lwkcpus_reserved', str(self.lwkcpus_request), '--lwkmem_reserved', str(self.total_lwkmem)]
         self.expand_and_run(cmd, 0)
 
     def test_fraction(self):
-        designated = self.get_designated_lwkcpus()
-        n_cores = designated.countBy(self.topology.cores)
+
+        n_cores = self.get_designated_lwkcpus().countBy(self.topology.cores)
 
         if n_cores < 2:
             self.skipTest('This test requires at least 2 designated cores.')
-
-        n_cores //= 2
-
-        mask = yod.CpuSet(0)
-        for n in range(n_cores):
-            mask += self.topology.allcpus.selectNthBy(n+1, self.topology.cores)
 
         for frac in ['.5', '0.5', '1/2']:
             for alg in ['*', 'numa', 'simple']:
@@ -58,12 +57,14 @@ class Resources(yod.YodTestCase):
                 cmd = ['%RESOURCES%', frac]
 
                 if alg == '*':
-                    mask = self.get_n_cores(n_cores, fromcpus=designated)
+                    self.lwkcpus_request = self.get_n_cores(n_cores // 2)
                 else:
                     cmd += ['--resource_algorithm', alg]
-                    mask = self.get_n_cores(n_cores, fromcpus=designated, algorithm=alg)
+                    self.lwkcpus_request = self.get_n_cores(n_cores // 2, algorithm=alg)
 
-                cmd += ['%AFFINITY_TEST%', '--affinity', mask, '--lwkcpus_reserved', mask, '--lwkmem_reserved', self.total_lwkmem // 2]
+                self.compute_lwkmem_request(fraction=0.5)
+
+                cmd += ['%AFFINITY_TEST%', '--lwkcpus_reserved', self.lwkcpus_request, '--lwkmem_reserved', self.total_lwkmem // 2]
                 self.expand_and_run(cmd, 0)
 
 
@@ -75,15 +76,17 @@ class Cores(yod.YodTestCase):
         # more interesting.  Adjust the expected affinity to acount
         # for this missing CPU and other CPUs in the same core.
 
-        first = self.topology.allcpus.nthCpu(1)
-        desig = self.topology.allcpus - first
-        self.var['I_LWKCPUS'] = str(desig)
-        allcores = desig.filterBy(self.topology.cores)
+        designated = self.get_designated_lwkcpus()
+        designated -=  designated.nthCpu(1)
+        self.var['I_LWKCPUS'] = str(designated)
+        self.lwkcpus_request = self.get_designated_cores()
+        self.compute_lwkmem_request(fraction=1.0)
 
-        if allcores.isEmpty():
+        if self.lwkcpus_request.isEmpty():
             self.skipTest('Not enough cores for this test.')
 
-        cmd = ['%CORES%', 'all', '%MEM%', 'all', '%AFFINITY_TEST%', '--affinity', str(allcores), '--lwkcpus_reserved', str(allcores) ]
+        cmd = ['%CORES%', 'all', '%MEM%', 'all', '%AFFINITY_TEST%', '--lwkcpus_reserved', str(self.lwkcpus_request) ]
+
         self.expand_and_run(cmd, 0)
 
     def test_all_partial(self):
@@ -95,19 +98,20 @@ class Cores(yod.YodTestCase):
         # cores.  The lwkcpus_reserved state is the expected affinity
         # mask plus the one pre-reserved CPU.
 
-        first = self.topology.allcpus.nthCpu(1)
-        desig = self.topology.allcpus - first
-        second = desig.nthCpu(1)
+        first = self.get_designated_lwkcpus().nthCpu(1)
+        designated = self.get_designated_lwkcpus() - first
+        second = designated.nthCpu(1)
 
-        self.var['I_LWKCPUS'] = str(desig)
+        self.var['I_LWKCPUS'] = str(designated)
         self.var['I_LWKCPUS_RESERVED'] = str(second)
 
-        mask = (desig - second).filterBy(self.topology.cores)
+        self.lwkcpus_request = (designated - second).filterBy(self.topology.cores)
+        self.compute_lwkmem_request(fraction=1.0)
 
-        if mask.isEmpty():
+        if self.lwkcpus_request.isEmpty():
             self.skipTest('Not enough cores for this test.')
 
-        cmd = ['%CORES%', 'all', '%MEM%', 'all', '%AFFINITY_TEST%', '--affinity', str(mask), '--lwkcpus_reserved', str(mask + second) ]
+        cmd = ['%CORES%', 'all', '%MEM%', 'all', '%AFFINITY_TEST%', '--lwkcpus_reserved', str(self.lwkcpus_request + second) ]
         self.expand_and_run(cmd, 0)
 
     def test_all_none_available(self):
@@ -131,48 +135,49 @@ class Cores(yod.YodTestCase):
         # Eliminate one CPU from the designated list.  Then test the selection
         # of one core using various algorithms.
 
-        first = self.topology.allcpus.nthCpu(1)
-        desig = self.topology.allcpus - first
-        self.var['I_LWKCPUS'] = str(desig)
+        first = self.get_designated_lwkcpus().nthCpu(1)
+        designated = self.get_designated_lwkcpus() - first
+        self.var['I_LWKCPUS'] = str(designated)
 
         for alg in ['*', 'numa', 'simple']:
             cmd = ['%CORES%', 1]
             if alg == '*':
-                first_core = self.get_n_cores(1, fromcpus=desig)
+                self.lwkcpus_request = self.get_n_cores(1)
             else:
-                first_core = self.get_n_cores(1, fromcpus=desig, algorithm=alg)
+                self.lwkcpus_request = self.get_n_cores(1, algorithm=alg)
                 cmd += ['--resource_algorithm', alg]
 
-            cmd += ['%MEM%', 'all', '%AFFINITY_TEST%', '--affinity', first_core,
-                    '--lwkcpus_reserved', first_core]
+            cmd += ['%MEM%', 'all', '%AFFINITY_TEST%', '--lwkcpus_reserved', self.lwkcpus_request]
 
-            if first_core.isEmpty():
+            if self.lwkcpus_request.isEmpty():
                 self.skipTest('Test requires at least one designated core.')
 
+            self.compute_lwkmem_request(fraction=1.0)
             self.expand_and_run(cmd, 0)
 
     def test_many(self):
         # Test 'yod -C <N> foo' where N is the maximum number of cores possible.
 
-        first = self.topology.allcpus.nthCpu(1)
-        desig = self.topology.allcpus - first
-        ncores = desig.countBy(self.topology.cores)
-        mask = desig.filterBy(self.topology.cores)
+        first = self.get_designated_lwkcpus().nthCpu(1)
+        designated = self.get_designated_lwkcpus() - first
+        n_cores = designated.countBy(self.topology.cores)
+        self.lwkcpus_request = designated.filterBy(self.topology.cores)
 
-        if ncores == 0:
+        if n_cores == 0:
             self.skipTest('Test requires at least one designated core.')
 
-        self.var['I_LWKCPUS'] = str(desig)
-        cmd = ['%CORES%', str(ncores), '%MEM%', 'all', '%AFFINITY_TEST%', '--affinity', str(mask), '--lwkcpus_reserved', str(mask)]
+        self.var['I_LWKCPUS'] = str(designated)
+        cmd = ['%CORES%', str(n_cores), '%MEM%', 'all', '%AFFINITY_TEST%', '--lwkcpus_reserved', str(self.lwkcpus_request)]
+        self.compute_lwkmem_request(fraction=1.0)
         self.expand_and_run(cmd, 0)
 
     def test_too_few_designated(self):
         # Test "yod -C <N> foo" where <N> is larger than the number of designated
         # LWK cores.  This is an invalid request.
 
-        ncores = self.topology.allcpus.countBy(self.topology.cores)
+        n_cores = self.get_designated_cores().countBy(self.topology.cores)
 
-        cmd = ['%CORES%', str(ncores + 1), '%MEM%', 'all', '%HELLO%', 'should not get here']
+        cmd = ['%CORES%', str(n_cores + 1), '%MEM%', 'all', '%HELLO%', 'should not get here']
         self.expand_and_run(cmd, EINVAL)
 
     def test_too_few_available(self):
@@ -185,14 +190,14 @@ class Cores(yod.YodTestCase):
         # mask needs to account for both of these CPUs, module complete
         # cores.
 
-        first = self.topology.allcpus.nthCpu(1)
-        desig = self.topology.allcpus - first
-        second = desig.nthCpu(1)
-        remaining = (desig - second).filterBy(self.topology.cores)
-        ncores = remaining.countBy(self.topology.cores)
-        cmd = ['%CORES%', str(ncores+1), '%MEM%', 'all', '%HELLO%', 'should not get here']
+        first = self.get_designated_lwkcpus().nthCpu(1)
+        designated = self.get_designated_lwkcpus() - first
+        second = designated.nthCpu(1)
+        remaining = (designated - second).filterBy(self.topology.cores)
+        n_cores = remaining.countBy(self.topology.cores)
+        cmd = ['%CORES%', str(n_cores+1), '%MEM%', 'all', '%HELLO%', 'should not get here']
 
-        self.var['I_LWKCPUS'] = str(desig)
+        self.var['I_LWKCPUS'] = str(designated)
         self.var['I_LWKCPUS_RESERVED'] = str(second)
 
         self.expand_and_run(cmd, EBUSY)
@@ -201,16 +206,10 @@ class Cores(yod.YodTestCase):
         # Test "yod -C <frac> foo", i.e. the factional core specifier.
 
         designated = self.get_designated_lwkcpus()
-        ncores = designated.countBy(self.topology.cores)
+        n_cores = designated.countBy(self.topology.cores)
 
-        if ncores < 2:
+        if n_cores < 2:
             self.skipTest('This test requires at least 2 designated cores.')
-
-        ncores //= 2
-
-        mask = yod.CpuSet(0)
-        for n in range(ncores):
-            mask += self.topology.allcpus.selectNthBy(n+1, self.topology.cores)
 
         for frac in ['.5', '0.5', '1/2']:
             for alg in ['*', 'numa', 'simple']:
@@ -221,32 +220,33 @@ class Cores(yod.YodTestCase):
                         cmd += extra
 
                     if alg == '*':
-                        mask = self.get_n_cores(ncores, fromcpus=designated)
+                        self.lwkcpus_request = self.get_n_cores(n_cores // 2)
                     else:
                         cmd += ['--resource_algorithm', alg]
-                        mask = self.get_n_cores(ncores, fromcpus=designated, algorithm=alg)
+                        self.lwkcpus_request = self.get_n_cores(n_cores // 2, algorithm=alg)
 
-                    cmd += ['%AFFINITY_TEST%', '--affinity', mask,
-                        '--lwkcpus_reserved', mask]
+                    self.compute_lwkmem_request(fraction=0.5)
+
+                    cmd += ['%AFFINITY_TEST%', '--lwkcpus_reserved', self.lwkcpus_request]
                     self.expand_and_run(cmd, 0)
 
 
     def test_frac_zero(self):
         # Test "yod -C <frac> foo", where <frac> translates to zero cores (error).
 
-        designated_cores = self.topology.allcpus.countBy(self.topology.cores)
+        n_designated_cores = self.get_designated_cores().countBy(self.topology.cores)
         frac = 1.0
-        ncores = designated_cores
+        n_cores = n_designated_cores
 
         # Produce a fraction that translates to zero cores
-        while (ncores > 0):
+        while (n_cores > 0):
             frac *= .5
-            ncores = int(frac * designated_cores)
+            n_cores = int(frac * n_designated_cores)
 
         cmd = ['%CORES%', str(frac), '%MEM%', 'all', '%HELLO%', 'should not get here']
         self.expand_and_run(cmd, EINVAL)
 
-        cmd = ['%CORES%', '{}/{}'.format(1, designated_cores+1), '%HELLO%', 'should not get here']
+        cmd = ['%CORES%', '{}/{}'.format(1, n_designated_cores+1), '%HELLO%', 'should not get here']
         self.expand_and_run(cmd, EINVAL)
 
     def test_invalid_specifiers(self):
@@ -277,12 +277,14 @@ class Cores(yod.YodTestCase):
             self.expand_and_run(cmd, EINVAL)
 
 class Cpus(yod.YodTestCase):
+
     def test_all(self):
         # Test "yod --cpus all foo", which is also the default.
-        allcpus = self.topology.allcpus
+        self.lwkcpus_request = self.get_designated_lwkcpus()
+        self.compute_lwkmem_request(fraction=1.0)
         cmds = [[], ['%CPUS%', 'all', '%MEM%', 'all']]
         for cmd in cmds:
-            cmd += ['%AFFINITY_TEST%', '--affinity', str(allcpus), '--lwkcpus_reserved', str(allcpus)]
+            cmd += ['%AFFINITY_TEST%', '--lwkcpus_reserved', self.lwkcpus_request]
             self.expand_and_run(cmd, 0)
 
     def test_all_with_reserved(self):
@@ -291,20 +293,21 @@ class Cpus(yod.YodTestCase):
         # We will reserve the second and next to last CPUs.  So let's
         # say we need at least four CPUs.
 
-        ncpus = self.topology.allcpus.countCpus()
+        n_cpus = self.get_designated_lwkcpus().countCpus()
 
-        if ncpus < 4:
+        if n_cpus < 4:
             self.skipTest("Need at least 4 designated LWK CPUs.")
 
-        m1 = self.topology.allcpus.nthCpu(2)
-        m2 = self.topology.allcpus.nthCpu(ncpus-1)
-        mask = self.topology.allcpus - m1 - m2
+        m1 = self.get_designated_lwkcpus().nthCpu(2)
+        m2 = self.get_designated_lwkcpus().nthCpu(n_cpus-1)
+        self.lwkcpus_request = self.get_designated_lwkcpus() - m1 - m2
+        self.compute_lwkmem_request(fraction=1.0)
         cmds = [[], ['%CPUS%', 'all', '%MEM%', 'all']]
 
         self.var['I_LWKCPUS_RESERVED'] = str(m1 + m2)
 
         for cmd in cmds:
-            cmd += ['%AFFINITY_TEST%', '--affinity', str(mask), '--lwkcpus_reserved', self.var['ALLCPUS']]
+            cmd += ['%AFFINITY_TEST%', '--lwkcpus_reserved', self.var['ALLCPUS']]
             self.expand_and_run(cmd, 0)
 
     def test_all_with_all_reserved(self):
@@ -323,21 +326,23 @@ class Cpus(yod.YodTestCase):
 
         # Construct a list using every third CPU.
 
-        ncpus = self.topology.allcpus.countCpus()
-        mask = yod.CpuSet(0)
-        for n in range(1, ncpus, 3):
-            mask += yod.CpuSet(1 << n)
+        n_cpus = self.get_designated_lwkcpus().countCpus()
+        self.lwkcpus_request = yod.CpuSet(0)
+        for n in range(1, n_cpus, 3):
+            self.lwkcpus_request += yod.CpuSet(1 << n)
+
+        self.compute_lwkmem_request(fraction=1.0)
 
         # Use both simple and stride forms of the list:
-        masks = [str(mask), '1-' + str(ncpus-1) + ':3']
+        masks = [str(self.lwkcpus_request), '1-' + str(n_cpus-1) + ':3']
         for m in masks:
-            cmd = ['%CPUS%'] + [m] + ['%MEM%', 'all', '%AFFINITY_TEST%', '--affinity', str(mask), '--lwkcpus_reserved', str(mask)]
+            cmd = ['%CPUS%'] + [m] + ['%MEM%', 'all', '%AFFINITY_TEST%', '--lwkcpus_reserved', self.lwkcpus_request]
             self.expand_and_run(cmd, 0)
 
     def test_list_busy(self):
         # Launch using "yod -c <list> foo" where list contains a busy CPU
 
-        first = self.topology.allcpus.nthCpu(1)
+        first = self.get_designated_lwkcpus().nthCpu(1)
 
         # Reserve all CPUs and attempt to launch using one:
 
@@ -356,7 +361,7 @@ class Cpus(yod.YodTestCase):
 
         # Remove the first CPU from the designated list.
 
-        all_but_one = self.topology.allcpus - self.topology.allcpus.nthCpu(1)
+        all_but_one = self.get_designated_lwkcpus() - self.get_designated_lwkcpus().nthCpu(1)
 
         self.var['I_LWKCPUS'] = str(all_but_one)
 
@@ -375,7 +380,7 @@ class Cpus(yod.YodTestCase):
 class Mem(yod.YodTestCase):
     @property
     def total_lwkmem(self):
-        return sum(int(x) for x in self.var['I_LWKMEM'].split())
+        return sum(self.lwkmem)
 
     def test_all(self):
         # Test "yod -M all foo".
@@ -386,8 +391,11 @@ class Mem(yod.YodTestCase):
             [], # yod with no arguments -- implicitly reserves all memory
         ]
 
+        self.lwkcpus_request = self.get_designated_lwkcpus()
+        self.compute_lwkmem_request(fraction=1.0)
+
         for f in forms:
-            cmd = f + ['%AFFINITY_TEST%', '--affinity', self.var['ALLCPUS'], '--lwkmem_reserved', str(self.total_lwkmem)]
+            cmd = f + ['%AFFINITY_TEST%', '--lwkcpus_reserved', self.lwkcpus_request, '--lwkmem_reserved', str(self.total_lwkmem)]
             self.expand_and_run(cmd, 0)
 
     def test_size(self):
@@ -403,8 +411,11 @@ class Mem(yod.YodTestCase):
             ['%MEM%', '0x40000000'],
         ]
 
+        self.lwkcpus_request = self.get_designated_lwkcpus()
+        self.compute_lwkmem_request(size=1024 * 1024 * 1024, lwkcores_request=self.get_designated_lwkcpus())
+
         for f in forms:
-            cmd = f + ['%CORES%', 'all', '%AFFINITY_TEST%', '--affinity', self.var['ALLCPUS'], '--lwkmem_reserved', '0x40000000']
+            cmd = f + ['%CORES%', 'all', '%AFFINITY_TEST%', '--lwkcpus_reserved', self.var['ALLCPUS'], '--lwkmem_reserved', '0x40000000']
             self.expand_and_run(cmd, 0)
 
     def test_fraction(self):
@@ -418,8 +429,12 @@ class Mem(yod.YodTestCase):
             ['%MEM%', '1/2'],
         ]
 
+        x = self.total_lwkmem // 2
+        self.lwkcpus_request = self.get_designated_lwkcpus()
+        self.compute_lwkmem_request(fraction=0.5, lwkcores_request=self.get_designated_lwkcpus())
+
         for f in forms:
-            cmd = f + ['%CORES%', 'all', '%AFFINITY_TEST%', '--affinity', self.var['ALLCPUS'], '--lwkmem_reserved', str(self.total_lwkmem // 2)]
+            cmd = f + ['%CORES%', 'all', '%AFFINITY_TEST%', '--lwkcpus_reserved', self.var['ALLCPUS'], '--lwkmem_reserved', str(self.total_lwkmem // 2)]
             self.expand_and_run(cmd, 0)
 
     def test_too_big(self):
@@ -432,10 +447,7 @@ class Mem(yod.YodTestCase):
         # Test "yod -M <size> foo" where <size> is more than what was is
         # currently available.
 
-        if ARGS.test_yod_scalar:
-            self.var['I_LWKMEM_RESERVED'] = '1'
-        else:
-            self.var['I_LWKMEM_RESERVED'] = '1 0'
+        self.lwkmem_reserved[0] = 1
 
         cmd = ['%MEM%', str(self.total_lwkmem), '%CORES%', '1', '%HELLO%', 'should not get here']
         self.expand_and_run(cmd, EBUSY)
@@ -471,27 +483,35 @@ class Mem(yod.YodTestCase):
         # Test combinations of -M x and -"compute" y, ensuring that the explicit
         # memory specification is not affected by the number of CPUs requested.
 
-        mem_designated = sum(intlist(self.var['I_LWKMEM']))
-        second_cpu = self.topology.allcpus.nthCpu(2)
+        mem_designated = sum(self.lwkmem)
+
+        lwkcpus_designated = self.get_designated_lwkcpus()
+        n_cores = lwkcpus_designated.countBy(self.topology.cores)
+        second_cpu = self.get_designated_lwkcpus().nthCpu(2)
+        all_cores = self.get_n_cores(n_cores)
+        half_cores = self.get_n_cores(n_cores // 2)
+        one_core = self.get_n_cores(1)
 
         mems = [('all', mem_designated),
                 (.5,  mem_designated // 2),
                 ('2M', 2 * 1024**2)]
 
-        cpus = [('%CORES%', 'all'),
-                ('%CORES%', .5),
-                ('%CORES%', 1),
-                ('%CPUS%', 'all'),
-                ('%CPUS%', second_cpu),
-                ('%CPUS%', hex(second_cpu.mask)),
+        cpus = [('%CORES%', 'all', all_cores),
+                ('%CORES%', .5, half_cores),
+                ('%CORES%', 1, one_core),
+                ('%CPUS%', 'all', lwkcpus_designated),
+                ('%CPUS%', second_cpu, second_cpu),
+                ('%CPUS%', hex(second_cpu.mask), second_cpu),
         ]
 
         for memarg, memval in mems:
-            for cpuspec, cpuarg in cpus:
+            for cpuspec, cpuarg, requested in cpus:
 
                 mem_cmd = ['%MEM%', memarg]
                 cpu_cmd = [cpuspec, cpuarg]
                 rest_of_the_cmd = ['%AFFINITY_TEST%', '--lwkmem_reserved', memval]
+
+                self.lwkcpus_request = requested
 
                 # Test both ordering of memory & CPU.  The amount of memory
                 # reserved should *always* equal the explicit amount
@@ -506,6 +526,7 @@ class Mem(yod.YodTestCase):
     def test_aligned_mmap(self):
         for size in [1, 4096, '4k', 2*1024*1024, '2m', 1024*1024*1024, '1g']:
             for alignment in [None, 8*1024, '8K', 2*1024*1024, '2m', 1024*1024*1024, '1G']:
+                self.lwkcpus_request = self.get_designated_lwkcpus()
                 alopt = '{}'.format(size) if alignment is None else '{}:{}'.format(size, alignment)
                 cmd = ['--aligned-mmap', alopt, '%HELLO%']
                 self.expand_and_run(cmd, 0)
@@ -517,6 +538,7 @@ class Mem(yod.YodTestCase):
 
     def test_brk_clear_length(self):
         for size in [-1, 0, 1, 4096, '4k', '2m', '2.1M', '1g']:
+            self.lwkcpus_request = self.get_designated_lwkcpus()
             cmd = ['--brk-clear-length', size, '%HELLO%']
             self.expand_and_run(cmd, 0)
 
@@ -538,6 +560,9 @@ class Mem(yod.YodTestCase):
         ]
 
         for prefs, result in patterns:
+
+            self.lwkcpus_request = self.get_designated_lwkcpus()
+
             cmd = []
             for p in prefs:
                 cmd += ['%MEMPREFS%', p]
@@ -571,7 +596,7 @@ class CpuAlgorithm(yod.YodTestCase):
         # Exercise the random CPU assignment algorithm.
 
         # We will reserve 3 cores at random.
-        if self.topology.allcpus.countBy(self.topology.cores) < 3:
+        if self.get_designated_lwkcpus().countBy(self.topology.cores) < 3:
             self.skipTest('This test requires at least 3 cores.')
 
         # Note that we cannot really pre-determine what the affinity mask will be ....
@@ -592,10 +617,13 @@ class Mask(yod.YodTestCase):
 
         mask = 0xfedc
 
-        if not yod.CpuSet(mask).isSubsetOf(self.topology.allcpus):
+        if not yod.CpuSet(mask).isSubsetOf(self.get_designated_lwkcpus()):
             self.skipTest('This test requires that {} be LWK CPUs.'.format(hex(mask)))
 
-        cmd = ['%CPUS%', hex(mask), '%MEM%', 'all', '%AFFINITY_TEST%', '--affinity', hex(mask), '--lwkcpus_reserved', hex(mask)]
+        self.lwkcpus_request = yod.CpuSet(mask)
+        self.compute_lwkmem_request(fraction=1.0)
+
+        cmd = ['%CPUS%', hex(mask), '%MEM%', 'all', '%AFFINITY_TEST%', '--lwkcpus_reserved', hex(mask)]
         self.expand_and_run(cmd, 0)
 
 
@@ -603,11 +631,10 @@ class Mask(yod.YodTestCase):
         # Attempt to reserve a CPU that is not designated for LWK use.
 
         # Remove the first CPU from the designated list:
-        first = self.topology.allcpus.nthCpu(1)
-        desig = self.topology.allcpus - first
+        first = self.get_designated_lwkcpus().nthCpu(1)
+        desig = self.get_designated_lwkcpus() - first
         self.var['I_LWKCPUS'] = str(desig)
         cmd = ['%CPUS%', hex(int(first)), '%MEM%', 'all', '%HELLO%', 'should not get here']
-
         self.expand_and_run(cmd, EINVAL)
 
     def test_cmask_bad_specifiers(self):
@@ -652,6 +679,7 @@ class UtilityThread(yod.YodTestCase):
         # Test typical valid specifications for --utility_thread".
         util_thread_opts = [('%UTIL_THREADS%', '0'), ('%UTIL_THREADS%', '2')]
         for opt, arg in util_thread_opts:
+            self.lwkcpus_request = self.get_n_cores(1)
             cmd = [opt, arg, '-C', '1', '-M', 'all', '%HELLO%', 'from', 'yod']
             self.expand_and_run(cmd, 0)
 
@@ -681,6 +709,7 @@ class Options(yod.YodTestCase):
 
     def test_options(self):
         for options in self.option_patterns:
+            self.lwkcpus_request = self.get_designated_lwkcpus()
             cmd = []
             for option in options:
                 cmd += ['%OPT%', option]
@@ -691,6 +720,7 @@ class Options(yod.YodTestCase):
 
     def test_env_options(self):
         for options in self.option_patterns:
+            self.lwkcpus_request = self.get_designated_lwkcpus()
             env = {'YOD_OPTIONS': ' '.join(options)} # separate options with spaces
             cmd = ['%HELLO%', 'options!']
 
@@ -699,12 +729,14 @@ class Options(yod.YodTestCase):
             self._check_options(options)
 
     def test_interleave_default(self):
+        self.lwkcpus_request = self.get_designated_lwkcpus()
         cmd = ['%HELLO%', 'options!']
         self.expand_and_run(cmd, 0)
         options = self.get_options()
         self.assertTrue('lwkmem-interleave=2m' in options)
 
     def test_interleave_override(self):
+        self.lwkcpus_request = self.get_designated_lwkcpus()
         cmd = ['%OPT%', 'lwkmem-interleave=4k', '%HELLO%', 'options!']
         self.expand_and_run(cmd, 0)
         options = self.get_options()
@@ -720,16 +752,19 @@ class Assorted(yod.YodTestCase):
 
     def test_dry_run(self):
         # Dry-run a command that will fail if actually executed
-        cmd = ['--dry-run', '%AFFINITY_TEST%', '--affinity', 'GARBAGE']
+        cmd = ['--dry-run', '%AFFINITY_TEST%']
         self.expand_and_run(cmd, 0)
 
     def test_verbose_option(self):
         # Test "yod --verbose=9 foo".
         cmd = ['--verbose=9', '-C', '1', '-M', 'all', '%HELLO%', 'from', 'yod']
+        self.lwkcpus_request = self.get_n_cores(1)
         self.expand_and_run(cmd, 0)
 
     def test_rank_layout_option(self):
         # Test "yod --rank-layout <x> foo".
+
+        self.lwkcpus_request = self.get_n_cores(1)
 
         options = ['compact', 'scatter', 'scatter:1', 'disable']
         for o in options:
@@ -774,7 +809,7 @@ class Layout(yod.YodTestCase):
             self.expand_and_run(cmd, EINVAL)
 
         boundaries = {
-            'cpu'  : math.ceil(self.topology.allcpus.countCpus() / len(self.topology.cores)), # CPUs per core
+            'cpu'  : math.ceil(self.get_designated_lwkcpus().countCpus() / len(self.topology.cores)), # CPUs per core
             'core' : math.ceil(len(self.topology.cores) / len(self.topology.tiles)),          # cores per tile
             'tile' : math.ceil(len(self.topology.tiles) / len(self.topology.nodes)),          # tiles per node
             'node' : len(self.topology.nodes)                                                 # nodes per system
