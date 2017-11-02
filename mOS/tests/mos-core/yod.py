@@ -35,7 +35,8 @@ class affinity_test:
                 return cpulist(int(v[2:].replace(',', ''), 16))
             return cpulist(v)
         def mems(v):
-            s = sum(int(m, 0) for m in v.replace(',', ' ').split())
+            vec = v.replace(',', ' ').split()
+            s = sum(int(m, 0) for m in vec) + len(vec)
             return s // (2 * 1024**2)  # may round down
         def lines(l):
             l = l.split(' ', 1)
@@ -46,6 +47,7 @@ class affinity_test:
         act = dict(lines(l) for l in stdout.splitlines())
         for n, f in attrs.items():
             if getattr(self.args, n):
+                logging.debug('Check {}\n\tactual   : {}\n\texpected : {}'.format(n, f(act[n].strip()),f(getattr(self.args, n))))
                 test.assertEqual(f(getattr(self.args, n)),
                                  f(act[n].strip()),
                                  '{} should match'.format(n))
@@ -305,24 +307,24 @@ class YodTestCase(TestCase):
         cls.var['FS_DIR'] = state_dir
         cls.var['FS_LWKCPUS'] = '/'.join((state_dir, 'lwkcpus'))
         cls.var['FS_LWKCPUS_RESERVED'] = '/'.join((state_dir, 'lwkcpus_reserved'))
+        cls.var['FS_LWKCPUS_REQUEST'] = '/'.join((state_dir, 'lwkcpus_request'))
         cls.var['FS_LWKCPUS_SEQUENCE'] = '/'.join((state_dir, 'lwkcpus_sequence'))
         cls.var['FS_LWK_UTIL_THREADS'] = '/'.join((state_dir, 'lwk_util_threads'))
         cls.var['FS_LWKMEM'] = '/'.join((state_dir, 'lwkmem'))
         cls.var['FS_LWKMEM_RESERVED'] = '/'.join((state_dir, 'lwkmem_reserved'))
+        cls.var['FS_LWKMEM_REQUEST'] = '/'.join((state_dir, 'lwkmem_request'))
         cls.var['FS_LWKMEM_GROUPS'] = '/'.join((state_dir, 'lwkmem_groups'))
         cls.var['FS_LWKMEM_DOMAIN_INFO'] = '/'.join((state_dir, 'lwkmem_domain_info'))
         cls.var['FS_LWK_OPTIONS'] = '/'.join((state_dir, 'lwk_options'))
 
         cls.var['I_LWKCPUS'] = cls.var['ALLCPUS']
         cls.var['I_LWKCPUS_RESERVED'] = ' '
+        cls.var['I_LWKCPUS_REQUEST'] = ' '
         cls.var['I_LWK_UTIL_THREADS'] = '0'
 
-        if ARGS.test_yod_scalar:
-            cls.var['I_LWKMEM'] = '68719476736' # 64G
-            cls.var['I_LWKMEM_RESERVED'] = '0'
-        else:
-            cls.var['I_LWKMEM'] = '34359738368 34359738368' # 64G
-            cls.var['I_LWKMEM_RESERVED'] = '0 0'
+        cls.lwkmem = [32 * 1024 * 1024 * 1024] * len(cls.topology.nodes)
+        cls.lwkmem_reserved = [0]  * len(cls.topology.nodes)
+        cls.lwkmem_request = [0]  * len(cls.topology.nodes)
 
         cls.var['I_LWKMEM_DOMAIN_INFO'] = ''
         cls.var['I_LWK_OPTIONS'] = ''
@@ -367,14 +369,20 @@ class YodTestCase(TestCase):
         self.var = copy.copy(self.__class__.var)
         self.reset_sysfs()
 
+        self.lwkcpus_request = None
+        self.lwkmem_request = None
+        self.lwkmem_reserved = [0] * len(self.topology.nodes)
+
     def reset_sysfs(self):
         '''Reset the mock sysfs used by the yod test plugin.'''
 
         sysfs_reset = [
             (self.var['FS_LWKCPUS'], self.var['I_LWKCPUS']),
             (self.var['FS_LWKCPUS_RESERVED'], self.var['I_LWKCPUS_RESERVED']),
-            (self.var['FS_LWKMEM'], self.var['I_LWKMEM']),
-            (self.var['FS_LWKMEM_RESERVED'], self.var['I_LWKMEM_RESERVED']),
+            (self.var['FS_LWKCPUS_REQUEST'], self.var['I_LWKCPUS_REQUEST']),
+            (self.var['FS_LWKMEM'], strseq(self.lwkmem)),
+            (self.var['FS_LWKMEM_RESERVED'], strseq(self.lwkmem_reserved)),
+            (self.var['FS_LWKMEM_REQUEST'], strseq([0] * len(self.topology.nodes))),
             (self.var['FS_LWKMEM_GROUPS'], self.var['I_LWKMEM_GROUPS']),
             (self.var['FS_LWKCPUS_SEQUENCE'], ''),
             (self.var['FS_LWK_UTIL_THREADS'], self.var['I_LWK_UTIL_THREADS']),
@@ -397,15 +405,22 @@ class YodTestCase(TestCase):
         logging.debug('Expanding and running cmd="yod {}" expected={}'.format(' '.join(cmd), expected))
         cmds = self.expand_command(cmd)
 
+        automatic_checks = list()
+        if self.lwkcpus_request:
+            automatic_checks.append(self.validate_lwkcpus_request)
+
+        if self.lwkmem_request:
+            automatic_checks.append(self.validate_lwkmem_request)
+
         for c in cmds:
             with self.subTest('cmd={}'.format(' '.join(c))):
                 self.reset_sysfs()
                 logging.debug('Executing id={} cmd="{}"'.format(self.id(), ' '.join(c)))
                 out, actual = launch(self, c, env=tenv)
-                logging.debug('rc={} expected={} out={}'.format(actual, expected, out.replace('\n', '\n\t')))
+                logging.debug('rc={} expected={} out=\n\t{}'.format(actual, expected, out.replace('\n', '\n\t')))
                 self.assertEqual(actual, expected)
 
-                for assertion in postrun:
+                for assertion in postrun + automatic_checks:
                     assertion()
 
     def expand_command(self, cmd):
@@ -440,6 +455,12 @@ class YodTestCase(TestCase):
 
     def get_designated_lwkcpus(self):
         return CpuSet(0).fromList(self.var['I_LWKCPUS'])
+
+    def get_designated_cores(self):
+        return self.get_designated_lwkcpus().filterBy(self.topology.cores)
+
+    def get_n_designated_cores(self):
+        return self.get_designated_lwkcpus().filterBy(self.topology.cores).countBy(self.topology.cores)
 
     def get_n_cores(self, n, fromcpus=None, algorithm='numa'):
 
@@ -487,3 +508,60 @@ class YodTestCase(TestCase):
 
             lst = f.read().strip('\0').strip().split('\n')
             return lst
+
+    def validate_lwkcpus_request(self):
+        if self.lwkcpus_request:
+            actual = get_file(self.var['FS_LWKCPUS_REQUEST']).strip('\0')
+            logger.debug('{}\n  actual   : {}\n  expected : {}'.format(self.var['FS_LWKCPUS_REQUEST'], actual, str(self.lwkcpus_request)))
+            self.assertEqual(str(self.lwkcpus_request), actual)
+
+    def validate_lwkmem_request(self):
+        # Note that memory requests may be truncated to a 2M boundary.
+        if self.lwkmem_request:
+            def rounddown(lst):
+                twom = 2 * 1024 * 1024
+                return list((x // twom) * twom for x in lst)
+            actual = get_file(self.var['FS_LWKMEM_REQUEST']).strip('\0').strip()
+            logger.debug('{}\n  actual   : {} : {}\n  expected : {} : {}'.format(
+                self.var['FS_LWKMEM_REQUEST'],
+                actual, strseq(rounddown(intlist(actual))),
+                strseq(self.lwkmem_request),
+                strseq(rounddown(self.lwkmem_request))))
+            self.assertEqual(rounddown(self.lwkmem_request), rounddown(intlist(actual)))
+
+    def compute_lwkmem_request(self, fraction=None, size=None, lwkcores_request=None):
+
+        self.lwkmem_request = [0] * len(self.topology.nodes)
+
+        if fraction and size:
+            logger.error('Illegal request')
+            return
+
+        if fraction == 1.0:
+            self.lwkmem_request = self.lwkmem
+            return
+
+        if fraction:
+            total = int(fraction * sum(self.lwkmem))
+        else:
+            total = size
+
+        # If a core mask was provided, use it to proportionally determine
+        # where the memory comes from.  Otherwise, divide it equally across
+        # the domains (interleaving).
+        if lwkcores_request:
+            n_nodes = len(self.topology.nodes)
+            n_cores = lwkcores_request.countBy(self.topology.cores)
+
+            def core_ratio(nid):
+                return (lwkcores_request & self.topology.nodes[nid]).countBy(self.topology.cores) / n_cores
+
+            self.lwkmem_request = list(int(total * core_ratio(i)) for i in range(n_nodes))
+
+        else:
+            nid = -1
+            while total > 0:
+                nid += 1
+                amount = min([total, self.lwkmem[nid] - self.lwkmem_reserved[nid]])
+                self.lwkmem_request[nid] = amount
+                total -= amount
