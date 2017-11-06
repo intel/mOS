@@ -1,6 +1,6 @@
 #
 # Automatically generated file; DO NOT EDIT.
-# Linux/x86 4.9.27 Kernel Configuration
+# Linux/x86 4.9.44 Kernel Configuration
 #
 CONFIG_64BIT=y
 CONFIG_MOS_FOR_HPC=y
@@ -3244,7 +3244,9 @@ CONFIG_STAGING=y
 # Android
 #
 # CONFIG_LTE_GDM724X is not set
-# CONFIG_LNET is not set
+CONFIG_LNET=m
+CONFIG_LUSTRE_FS=m
+CONFIG_LNET_XPRT_IB=m
 # CONFIG_DGNC is not set
 # CONFIG_GS_FPGABOOT is not set
 # CONFIG_CRYPTO_SKEIN is not set
@@ -3468,8 +3470,7 @@ CONFIG_UEFI_CPER=y
 CONFIG_DCACHE_WORD_ACCESS=y
 CONFIG_FS_IOMAP=y
 # CONFIG_EXT2_FS is not set
-# CONFIG_EXT3_FS is not set
-# CONFIG_EXT4_FS is not set
+CONFIG_EXT4_FS=m
 # CONFIG_REISERFS_FS is not set
 # CONFIG_JFS_FS is not set
 CONFIG_XFS_FS=m
