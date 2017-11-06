@@ -18,6 +18,9 @@
 #include <linux/slab.h>
 #include "lwkcpu.h"
 #include "lwkctrl.h"
+#undef pr_fmt
+#define pr_fmt(fmt)	"mOS: " fmt
+
 
 static	cpumask_t to;
 static	cpumask_t from;
@@ -175,18 +178,25 @@ int lwkcpu_parse_args(char *arg, cpumask_t *lwkcpus,
 
 	while ((s_to = strsep(&arg, ":"))) {
 		if (!(s_from = strchr(s_to, '.'))) {
-			pr_warn("Invalid syntax. Value=%s\n", s_to);
+			pr_warn("%s Invalid CPU specification syntax. Value=%s\n",
+				__func__, s_to);
 			goto out;
 		}
 		*(s_from++) = '\0';
-		if (cpulist_parse(s_to, &to) < 0 ||
-		    cpulist_parse(s_from, &from) < 0) {
-			pr_warn("Invalid character in CPU specification.\n");
+		if (cpulist_parse(s_to, &to) < 0) {
+			pr_warn("%s Invalid character in CPU specification. Value=%s\n",
+				__func__, s_to);
+			goto out;
+		}
+		if (cpulist_parse(s_from, &from) < 0) {
+			pr_warn("%s Invalid character in CPU specification. Value=%s\n",
+				__func__, s_from);
 			goto out;
 		}
 		/* Only one syscall target cpu allowed per lwk cpu range */
 		if (cpumask_weight(&to) != 1) {
-			pr_warn("More than one syscall target CPU specified.\n");
+			pr_warn("%s More than one syscall target CPU specified.\n",
+				__func__);
 				goto out;
 		}
 		cpumask_or(syscall_cpus, syscall_cpus, &to);
@@ -230,10 +240,10 @@ int lwkcpu_state_init(char *profile)
 	strsize = snprintf(lwkctrl_cpu_profile_spec,
 			   LWKCTRL_CPU_PROFILE_SPECSZ, "%s", profile);
 	if (strlen(profile) > strsize) {
-		pr_warn("mOS: lwkcpu_profile spec truncation occurred in %s.\n",
+		pr_warn("lwkcpu_profile specification truncation occurred in %s.\n",
 			__func__);
 	} else
-		pr_info("mOS: LWK CPU profile set to: %s\n",
+		pr_info("LWK CPU profile set to: %s\n",
 			lwkctrl_cpu_profile_spec);
 	return 0;
 }

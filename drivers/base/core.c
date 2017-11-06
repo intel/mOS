@@ -28,6 +28,7 @@
 #include <linux/netdevice.h>
 #include <linux/sched/signal.h>
 #include <linux/sysfs.h>
+#include <linux/mos.h>
 
 #include "base.h"
 #include "power/power.h"
@@ -1011,6 +1012,20 @@ static ssize_t online_show(struct device *dev, struct device_attribute *attr,
 
 	device_lock(dev);
 	val = !dev->offline;
+#ifdef CONFIG_MOS_FOR_HPC
+	if (dev->bus == &cpu_subsys) {
+		bool is_lwkcpu = cpu_islwkcpu(dev->id);
+
+		if (IS_MOS_VIEW(current, MOS_VIEW_LWK_LOCAL)) {
+			val = cpumask_test_cpu(dev->id,
+					current->mos_process->lwkcpus);
+		} else if (IS_MOS_VIEW(current, MOS_VIEW_LWK) ||
+			   (IS_MOS_VIEW(current, MOS_VIEW_ALL) && is_lwkcpu))
+			val = is_lwkcpu;
+		else if (IS_MOS_VIEW(current, MOS_VIEW_LINUX) && is_lwkcpu)
+			val = false;
+	}
+#endif
 	device_unlock(dev);
 	return sprintf(buf, "%u\n", val);
 }

@@ -1457,14 +1457,6 @@ TASK_PFA_CLEAR(SPEC_IB_DISABLE, spec_ib_disable)
 TASK_PFA_TEST(SPEC_IB_FORCE_DISABLE, spec_ib_force_disable)
 TASK_PFA_SET(SPEC_IB_FORCE_DISABLE, spec_ib_force_disable)
 
-/*
- * task->mos_flags
- */
-
-#ifdef CONFIG_MOS_FOR_HPC
-#define MOS_IS_LWK_PROCESS 1
-#endif
-
 static inline void
 current_restore_flags(unsigned long orig_flags, unsigned long flags)
 {

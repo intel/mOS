@@ -20,6 +20,7 @@
 #include <linux/mm_types.h>
 
 #include <asm/thread_info.h>
+#include <linux/mos.h>
 
 #ifdef CONFIG_SMP
 # define INIT_PUSHABLE_TASKS(tsk)					\
@@ -213,10 +214,19 @@ extern struct cred init_cred;
 # define INIT_TASK_TI(tsk)
 #endif
 
+
 #ifdef CONFIG_SECURITY
 #define INIT_TASK_SECURITY .security = NULL,
 #else
 #define INIT_TASK_SECURITY
+#endif
+
+#ifdef CONFIG_MOS_FOR_HPC
+/* init process is not an LWK process so we can do this */
+#define INIT_MOS_VIEW(tsk)						\
+	.mos_flags = MOS_VIEW_DEFAULT,
+#else
+#define INIT_MOS_VIEW(tsk)
 #endif
 
 /*
@@ -299,6 +309,7 @@ extern struct cred init_cred;
 	INIT_KASAN(tsk)							\
 	INIT_LIVEPATCH(tsk)						\
 	INIT_TASK_SECURITY						\
+	INIT_MOS_VIEW(task)						\
 }
 
 

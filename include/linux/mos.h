@@ -20,19 +20,54 @@
 #include <linux/sched.h>
 #include <linux/cpuhotplug.h>
 
-/* Is current and MOS task? */
-#if defined(CONFIG_MOS_FOR_HPC) && defined(MOS_IS_LWK_PROCESS)
-#define is_mostask() (current->mos_flags & MOS_IS_LWK_PROCESS)
-#else
-#define is_mostask() (0)
-#endif
-
 #ifdef CONFIG_MOS_FOR_HPC
+/*
+ * task->mos_flags
+ */
+#define MOS_IS_LWK_PROCESS	1    /* bit 0 */
+
+#define MOS_VIEW_POS		1
+/* Bit 2,1                       */
+/*     0, 0  --> Linux view      */
+/*     0, 1  --> LWK global view */
+/*     1, 0  --> LWK local  view */
+/*     1, 1  --> All view        */
+#define MOS_VIEW_MASK		(3UL << MOS_VIEW_POS)
+#define MOS_VIEW_LINUX		(0UL << MOS_VIEW_POS)
+#define MOS_VIEW_LWK		(1UL << MOS_VIEW_POS)
+#define MOS_VIEW_LWK_LOCAL      (2UL << MOS_VIEW_POS)
+#define MOS_VIEW_ALL		(3UL << MOS_VIEW_POS)
+#define MOS_VIEW_DEFAULT	MOS_VIEW_ALL
+#define MOS_VIEW_STR_LEN	20
+#define MOS_VIEW_STR_LINUX	"linux"
+#define MOS_VIEW_STR_LWK	"lwk"
+#define MOS_VIEW_STR_LWK_LOCAL	"lwk-local"
+#define MOS_VIEW_STR_ALL	"all"
+
+#define CLR_MOS_VIEW(task) \
+	((task)->mos_flags &= ~MOS_VIEW_MASK)
+#define SET_MOS_VIEW(task, view) 				\
+	do {							\
+		CLR_MOS_VIEW(task);				\
+		(task)->mos_flags |= ((view) & MOS_VIEW_MASK);	\
+	} while (0)
+#define IS_MOS_VIEW(task, view) \
+	(((task)->mos_flags & MOS_VIEW_MASK) == ((view) & MOS_VIEW_MASK))
+#define is_mostask() (current->mos_flags & MOS_IS_LWK_PROCESS)
 #define cpu_lwkcpus_mask this_cpu_ptr(&lwkcpus_mask)
 #define cpu_islwkcpu(cpu) cpumask_test_cpu((cpu), cpu_lwkcpus_mask)
 #define mos_lwkcpus_arg (&__mos_lwkcpus_arg)
 #define mos_sccpus_arg (&__mos_sccpus_arg)
 #else
+#define MOS_VIEW_LINUX		0
+#define MOS_VIEW_LWK		0
+#define MOS_VIEW_LWK_LOCAL	0
+#define MOS_VIEW_ALL		0
+#define MOS_VIEW_DEFAULT	0
+#define CLR_MOS_VIEW(task)
+#define SET_MOS_VIEW(task, view)
+#define IS_MOS_VIEW(task, view) false
+#define is_mostask() false
 #define cpu_lwkcpus_mask NULL
 #define cpu_islwkcpu(cpu) false
 #define mos_lwkcpus_arg NULL
@@ -50,8 +85,11 @@ extern cpumask_t __mos_sccpus_arg;
 extern void mos_linux_enter(void);
 extern void mos_linux_leave(void);
 extern void mos_sysfs_update(void);
-
 extern void mos_exit_thread(pid_t pid, pid_t tgid);
+extern void get_mos_view_cpumask(struct cpumask *dst,
+			const struct cpumask *src);
+extern ssize_t cpumap_print_mos_view_cpumask(bool list,
+			char *buf, const struct cpumask *mask);
 
 enum lwkmem_kind_t {kind_4k = 0, kind_2m, kind_4m, kind_1g, kind_last};
 extern unsigned long lwk_page_shift[];
@@ -147,5 +185,9 @@ extern int do_cpu_down(unsigned int cpu, enum cpuhp_state target);
 static inline int lwk_config_lwkcpus(char *parm_value, char *p) { return -1; }
 static inline int lwk_config_lwkmem(char *parm_value) { return -1; }
 static inline void lwkctl_def_partition(void) {}
+static inline void get_mos_view_cpumask(struct cpumask *dst,
+				const struct cpumask *src) {}
+static inline ssize_t cpumap_print_mos_view_cpumask(bool list,
+			char *buf, const struct cpumask *mask) { return -1; }
 #endif /* CONFIG_MOS_FOR_HPC */
 #endif /* _LINUX_MOS_H */

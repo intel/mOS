@@ -299,16 +299,21 @@ static int __init lwkcpus(char *str)
 
 	strsize = snprintf(lwkctrl_cpus_spec, LWKCTRL_CPUS_SPECSZ, "%s", str);
 	if (strlen(str) > strsize)
-		pr_warn("mOS: lwkcpus spec truncation occurred in %s.\n",
+		pr_warn("lwkcpus specification truncation occurred in %s.\n",
 			__func__);
 
 	rc = lwkcpu_parse_args(str, mos_lwkcpus_arg, mos_sccpus_arg);
+
+	if (rc || cpumask_empty(mos_lwkcpus_arg))
+		pr_warn("No LWK CPUs found parsing param lwkcpus=%s\n",
+		 lwkctrl_cpus_spec);
 
 	if (rc) {
 		cpumask_clear(mos_lwkcpus_arg);
 		cpumask_clear(mos_sccpus_arg);
 		lwkctrl_cpus_spec[0] = '\0';
 	}
+
 	return rc;
 }
 early_param("lwkcpus", lwkcpus);
@@ -325,7 +330,7 @@ static int __init lwkcpu_profile(char *str)
 		strsize = snprintf(lwkctrl_cpu_profile_spec,
 				   LWKCTRL_CPU_PROFILE_SPECSZ, "%s", str);
 		if (strlen(str) > strsize) {
-			pr_warn("mOS: lwkcpu_profile spec truncation in %s.\n",
+			pr_warn("lwkcpu_profile specification truncation in %s.\n",
 				__func__);
 		}
 	}
@@ -344,7 +349,7 @@ static int __init lwkmem(char *str)
 
 	strsize = snprintf(lwkctrl_mem_spec, LWKCTRL_MEM_SPECSZ, "%s", str);
 	if (strsize >= LWKCTRL_MEM_SPECSZ)
-		pr_warn("mOS: lwkmem specification string truncation occurred in %s.\n",
+		pr_warn("lwkmem specification string truncation occurred in %s.\n",
 				__func__);
 	return 0;
 }
@@ -520,7 +525,7 @@ char *lwkmem_get_spec(void)
 
 	if (truncated) {
 		lwkctrl_mem_spec[LWKCTRL_MEM_SPECSZ - 1] = '\0';
-		pr_err("mOS: lwkmem spec truncated in %s()!\n", __func__);
+		pr_err("mOS: lwkmem specification truncated in %s()!\n", __func__);
 	}
 	return lwkctrl_mem_spec;
 }
