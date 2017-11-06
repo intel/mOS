@@ -2401,14 +2401,6 @@ TASK_PFA_TEST(SPEC_SSB_FORCE_DISABLE, spec_ssb_force_disable)
 TASK_PFA_SET(SPEC_SSB_FORCE_DISABLE, spec_ssb_force_disable)
 
 /*
- * task->mos_flags
- */
-
-#ifdef CONFIG_MOS_FOR_HPC
-#define MOS_IS_LWK_PROCESS 1
-#endif
-
-/*
  * task->jobctl flags
  */
 #define JOBCTL_STOP_SIGMASK	0xffff	/* signr of the last group stop */

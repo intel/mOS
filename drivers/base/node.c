@@ -18,6 +18,7 @@
 #include <linux/device.h>
 #include <linux/swap.h>
 #include <linux/slab.h>
+#include <linux/mos.h>
 
 static struct bus_type node_subsys = {
 	.name = "node",
@@ -32,6 +33,9 @@ static ssize_t node_read_cpumap(struct device *dev, bool list, char *buf)
 
 	/* 2008/04/07: buf currently PAGE_SIZE, need 9 chars per 32 bits. */
 	BUILD_BUG_ON((NR_CPUS/32 * 9) > (PAGE_SIZE-1));
+
+	if (IS_ENABLED(CONFIG_MOS_FOR_HPC))
+		return cpumap_print_mos_view_cpumask(list, buf, mask);
 
 	return cpumap_print_to_pagebuf(list, buf, mask);
 }

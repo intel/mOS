@@ -32,7 +32,7 @@
 #undef pr_fmt
 #define pr_fmt(fmt)	"mOS: " fmt
 
-#define MOS_VERSION	"0.5"
+#define MOS_VERSION	"0.6"
 
 static cpumask_var_t lwkcpus_map;
 static cpumask_var_t lwkcpus_syscall_map;
@@ -135,6 +135,36 @@ int mos_unregister_option_callback(const char *name,
 	}
 
 	return -EINVAL;
+}
+
+void get_mos_view_cpumask(struct cpumask *dst, const struct cpumask *src)
+{
+	if (IS_MOS_VIEW(current, MOS_VIEW_LWK_LOCAL))
+		cpumask_and(dst, src, current->mos_process->lwkcpus);
+	else {
+		if (IS_MOS_VIEW(current, MOS_VIEW_LINUX))
+			cpumask_andnot(dst, src, cpu_lwkcpus_mask);
+		else if (IS_MOS_VIEW(current, MOS_VIEW_LWK))
+			cpumask_and(dst, src, cpu_lwkcpus_mask);
+		else
+			cpumask_copy(dst, src);
+	}
+}
+
+ssize_t cpumap_print_mos_view_cpumask(bool list, char *buf,
+				const struct cpumask *mask)
+{
+	ssize_t ret;
+	cpumask_var_t mos_view_cpumask;
+
+	if (!alloc_cpumask_var(&mos_view_cpumask, GFP_KERNEL))
+		return -ENOMEM;
+
+	get_mos_view_cpumask(mos_view_cpumask, mask);
+
+	ret = cpumap_print_to_pagebuf(list, buf, mos_view_cpumask);
+	free_cpumask_var(mos_view_cpumask);
+	return ret;
 }
 
 #ifdef MOS_DEBUG_PROCESS
@@ -668,33 +698,6 @@ static ssize_t lwkmem_request_store(struct kobject *kobj,
 	return rc;
 }
 
-static ssize_t lwkmem_debug_show(struct kobject *kobj,
-			   struct kobj_attribute *attr, char *buff)
-{
-	int level;
-
-	level = 0;
-	if (lwkmem_get_debug_level)
-		level = lwkmem_get_debug_level();
-	return scnprintf(buff, PAGE_SIZE, "%u\n", level);
-}
-
-static ssize_t lwkmem_debug_store(struct kobject *kobj,
-				  struct kobj_attribute *attr,
-				  const char *buff, size_t count)
-{
-	int level = 0;
-
-	if (kstrtoint(buff, 0, &level)) {
-		pr_warn("Attempted to write invalid valid to lwkmem_debug");
-		return -EINVAL;
-	}
-
-	if (lwkmem_set_debug_level)
-		lwkmem_set_debug_level(level);
-	return count;
-}
-
 static ssize_t lwk_util_threads_store(struct kobject *kobj,
 				  struct kobj_attribute *attr,
 				  const char *buff, size_t count)
@@ -1111,16 +1114,16 @@ int lwk_config_lwkcpus(char *param_value, char *lwkcpu_profile)
 		goto out;
 	}
 
-	/* Let each CPU have its own copy of the lwkcpus mask. This gets
-	 * interrogated on each system call. */
-	for_each_possible_cpu(cpu)
-		cpumask_copy(per_cpu_ptr(&lwkcpus_mask, cpu), new_lwkcpus);
-
 	if (!cpumask_empty(back_to_linux)) {
 		rc = lwkcpu_partition_destroy(back_to_linux);
 		if (!rc)
 			lwkcpu_state_deinit();
 	}
+	/* Let each CPU have its own copy of the lwkcpus mask. This gets
+	 * interrogated on each system call.
+	 */
+	for_each_possible_cpu(cpu)
+		cpumask_copy(per_cpu_ptr(&lwkcpus_mask, cpu), new_lwkcpus);
 
 	if (!cpumask_empty(new_lwkcpus)) {
 		bool profile_set = false;
@@ -1355,7 +1358,6 @@ static struct kobj_attribute version_attr = __ATTR_RO(version);
 static struct kobj_attribute lwkmem_attr = __ATTR_RO(lwkmem);
 static struct kobj_attribute lwkmem_reserved_attr = __ATTR_RO(lwkmem_reserved);
 static struct kobj_attribute lwkmem_request_attr = __ATTR_WO(lwkmem_request);
-static struct kobj_attribute lwkmem_debug_attr = __ATTR_RW(lwkmem_debug);
 static struct kobj_attribute lwkprocesses_attr = __ATTR_RO(lwkprocesses);
 static struct kobj_attribute lwkcpus_sequence_attr =
 						__ATTR_WO(lwkcpus_sequence);
@@ -1377,7 +1379,6 @@ static  struct attribute *mos_attributes[] = {
 	&lwkmem_attr.attr,
 	&lwkmem_reserved_attr.attr,
 	&lwkmem_request_attr.attr,
-	&lwkmem_debug_attr.attr,
 	&lwkprocesses_attr.attr,
 	&lwkcpus_sequence_attr.attr,
 	&lwk_util_threads_attr.attr,
