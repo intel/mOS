@@ -18,6 +18,8 @@ import subprocess
 import sys
 import logging
 import re
+import os
+import random
 
 FORMAT_STRING = '[%(asctime)s] [%(levelname)-8s]  %(message)s'
 
@@ -32,10 +34,12 @@ def verbose(s):
         logging.info(s)
 
 
-def run(cmd, logger=logging.debug):
+def run(cmd, logger=logging.debug, requiresRoot=False):
     '''Run the command; return the output and status.'''
     try:
-        logger('cmd={}'.format(cmd))
+        if requiresRoot and os.geteuid() != 0:
+            cmd = ['sudo'] + cmd
+        logger('cmd={} euid={}'.format(cmd, os.geteuid()))
         out = ''
         p = subprocess.Popen(cmd, stderr=subprocess.STDOUT, universal_newlines=True, bufsize=0, stdout=subprocess.PIPE)
         line = p.stdout.readline()
@@ -75,24 +79,26 @@ def top_level_is_present(component):
 lwk_partition_descr = None
 
 def save_lwk_partition():
-    logging.info('Saving LWK partition spec and deleting current LWK partition ...')
 
     global lwk_partition_descr
 
     lwk_partition_descr, rc = run(['lwkctl', '--show', '--raw'])
-    
+    lwk_partition_descr = lwk_partition_descr.strip()
+
+    logging.info('Saved LWK partition spec "{}" and deleting current LWK partition ...'.format(lwk_partition_descr))
+
     if rc == 0:
-        out, rc = run(['sudo', 'lwkctl', '--delete', 'all'])
+        out, rc = run(['lwkctl', '--delete', 'all'], requiresRoot=True)
 
     if rc:
         fatal('Could not remove LWK partition.')
 
 def restore_lwk_partition():
-    logging.info('Restoring LWK partition ...')
+    logging.info('Restoring LWK partition "{}" ...'.format(lwk_partition_descr))
 
     # Use the LWK partition description that we snapshotted above
     # to restore the node to its prior configuration.
-    out, rc = run(['sudo', 'lwkctl', '-v', '2', '-c', lwk_partition_descr], logger=logging.info)
+    out, rc = run(['lwkctl', '-v', '2', '-c', lwk_partition_descr], logger=logging.info, requiresRoot=True)
 
     if rc != 0:
         fatal('Non-zero status from lwkctl when restoring LWK partition.')
@@ -269,7 +275,11 @@ def main():
 
     logging.info('Running {} tests ...'.format(len(test_list) if test_list is not None else 'all'))
 
-    for (precheck, setup, teardown) in test_partition:
+    keys = list(test_partition.keys())
+    random.seed()
+    random.shuffle(keys)
+
+    for (precheck, setup, teardown) in keys:
 
         if precheck is not None and not precheck():
             continue

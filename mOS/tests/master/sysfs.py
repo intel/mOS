@@ -37,7 +37,6 @@ class Basics(TestCase):
         'lwkcpus_reserved_mask':    statmode('rw-r--r--'),
         'lwkcpus_sequence':         statmode('-w--w--w-'),
         'lwkmem':                   statmode('r--r--r--'),
-        'lwkmem_debug':             statmode('rw-r--r--'),
         'lwkmem_request':           statmode('-w--w--w-'),
         'lwkmem_reserved':          statmode('r--r--r--'),
         'lwkmem_domain_info':       statmode('-w--w--w-'),

@@ -103,7 +103,7 @@ class cpulist(_collections.Set):
         if obj is None and mask is None:
             self._bits = 0
         elif mask is not None:  # str in Linux CPU mask format
-            self._bits = int(''.join(s.split(',')), 16)
+            self._bits = int(''.join(mask.split(',')), 16)
         elif isinstance(obj, str):  # str in Linux CPU list format
             self._bits = sum(1 << cpu for cpu in parse_list(obj))
         elif isinstance(obj, int):  # int (a bitmap)
@@ -230,7 +230,7 @@ STAPRUN = _find_tool('staprun')
 YOD = _find_tool('yod', IS_MOS, PATH=False)
 LWKCTL = _find_tool('lwkctl', IS_MOS, PATH=False)
 
-def run(test, *command, env={}, bg=False, pipe='', assertion=True):
+def run(test, *command, env={}, bg=False, pipe='', assertion=True, requiresRoot=False):
     # run(...) -> return code
     # run(..., bg=True) -> context manager which returns Popen instance
     # run(..., pipe='oe') -> return code, stdout, stderr
@@ -267,6 +267,10 @@ def run(test, *command, env={}, bg=False, pipe='', assertion=True):
         check_returncode(test, p.returncode, assertion)
 
     where = path_of(test)
+
+    if requiresRoot and os.geteuid() != 0:
+        command = tuple(['sudo']) + command
+
     command = [str(v) for v in command]
     env = {k: str(v) for k, v in env.items()}
     e = dict(os.environ)
@@ -338,10 +342,8 @@ class TestCase(unittest.TestCase):
                not os.path.exists(os.path.join(path_of(cls), f)):
                 cls.skipClass('requires a missing file: {}', f)
 
-        if modules and os.geteuid() != 0:
-            cls.skipClass('requires root to insmod')
         for m in modules:
-            run(cls, '/sbin/insmod', m)
+            run(cls, '/sbin/insmod', m, requiresRoot=True)
 
     def skipTest(self, reason, *args, **kw):
         super().skipTest(reason.format(*args, **kw))
@@ -372,4 +374,4 @@ class TestCase(unittest.TestCase):
         _logger.debug('rmmod %s', modules)
 
         for m in modules:
-            run(cls, '/sbin/rmmod', m)
+            run(cls, '/sbin/rmmod', m, requiresRoot=True)
