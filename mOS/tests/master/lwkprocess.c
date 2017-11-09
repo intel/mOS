@@ -32,6 +32,7 @@
  */
 
 int debug_mode = 0;
+int store_opt_bypass;
 
 #define error(fmt, ...) do { \
 	printf("(E) " fmt "\n", ## __VA_ARGS__); \
@@ -43,6 +44,7 @@ int debug_mode = 0;
 #define MOS_SYSFS		"/sys/kernel/mOS/"
 #define LWK_PROCESSES		MOS_SYSFS "lwkprocesses"
 #define UTILITY_THREADS		MOS_SYSFS "lwk_util_threads"
+#define LWK_OPTIONS		MOS_SYSFS "lwk_options"
 
 #define IS_A_MASK(s) ((strncmp(s, "0x", 2) == 0) || (strncmp(s, "0X", 2) == 0))
 
@@ -243,6 +245,20 @@ static int test_sysfs_sequence(const struct mos_sequence_t const *seq,
 	if (rc < 0)
 		error("Could not write %s.", UTILITY_THREADS);
 
+	if (!store_opt_bypass) {
+		/*
+		 * Store the options for the process. This is a write-only file
+		 * so we cannot validate further. The valid options are defined
+		 * in the lwkmem and lwksched branches. We cannot assume those
+		 * branches are merged therefore store a value of zero to
+		 * prevent an error. Storing to this file will drive the
+		 * process_start callback functions within the kernel.
+		 */
+		rc = mos_sysfs_write(LWK_OPTIONS, "\0", sizeof("\0"));
+		if (rc < 0)
+			error("Could not write %s.", LWK_OPTIONS);
+	}
+
 	/* Our pid should be the lone entry in the lwkprocesses file. */
 
 	rc = mos_sysfs_read(LWK_PROCESSES, buffer, sizeof(buffer));
@@ -273,6 +289,7 @@ int main(int argc, char **argv)
 
 	static struct option options[] = {
 		{ "lwkcpus", required_argument, 0, 'l' },
+		{ "bypass", required_argument, 0, 'b' },
 		{ "debug", no_argument, 0, 'd' },
 		{ "help", no_argument, 0, 'h' },
 	};
@@ -282,7 +299,7 @@ int main(int argc, char **argv)
 		int c;
 		int opt_index;
 
-		c = getopt_long(argc, argv, "l:dh", options, &opt_index);
+		c = getopt_long(argc, argv, "l:b:dh", options, &opt_index);
 
 		if (c == -1)
 			break;
@@ -291,6 +308,11 @@ int main(int argc, char **argv)
 
 		case 'l': {
 			lwkcpus = strdup(optarg);
+			break;
+		}
+
+		case 'b': {
+			store_opt_bypass = atoi(optarg);
 			break;
 		}
 

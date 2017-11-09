@@ -45,7 +45,7 @@ class Basics(TestCase):
                 with self.subTest(mask_desc[mask], n=count, cpu=cpu):
                     lwk = cpulist([cpu])
                     lwk = '0x'+lwk.mask() if mask else str(lwk)
-                    self.launch(assertion=cpu in LWK_CPUS, lwkcpus=lwk)
+                    self.launch(assertion=cpu in LWK_CPUS, lwkcpus=lwk, bypass=0)
 
     def test_all_lwkcpus(self):
         # Launch an LWK task bound to all LWK CPUs.
@@ -53,5 +53,12 @@ class Basics(TestCase):
             with self.subTest(mask_desc[mask]):
                 lwk = LWK_CPUS
                 lwk = '0x'+lwk.mask() if mask else str(lwk)
-                self.launch(assertion=True, lwkcpus=lwk)
+                self.launch(assertion=True, lwkcpus=lwk, bypass=0)
+    def test_opt_store_bypass(self):
+        # Launch/exit an LWK task but bypass process_start callbacks
+        for mask in (False, True):
+            with self.subTest(mask_desc[mask]):
+                lwk = LWK_CPUS
+                lwk = '0x'+lwk.mask() if mask else str(lwk)
+                self.launch(assertion=True, lwkcpus=lwk, bypass=1)
 

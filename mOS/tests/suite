@@ -32,6 +32,15 @@ def load_tests(loader, prefix='test.', omit='__init__', suffix='.py'):
     from importlib.machinery import SourceFileLoader
     suite = unittest.TestSuite()
     top = os.path.dirname(__file__)
+    # save sys path
+    sys_path = sys.path
+
+    for subtop in test_dirs(top):
+        for path, subdirs, files in os.walk(subtop):
+            for fp in set(os.path.join(path, f) for f in files if f.endswith(suffix)):
+                if not os.path.dirname(fp) in sys.path:
+                    sys.path.insert(0, os.path.dirname(fp))
+                    logger.debug('Added {} to sys path'.format(os.path.dirname(fp)))
     for subtop in test_dirs(top):
         for path, subdirs, files in os.walk(subtop):
             for fp in [os.path.join(path, f)
@@ -39,7 +48,6 @@ def load_tests(loader, prefix='test.', omit='__init__', suffix='.py'):
                 name = os.path.relpath(fp, top)[:-len(suffix)]
                 if name.endswith('/' + omit):
                     name = name[:-1-len(omit)]
-                sys.path.insert(0, os.path.dirname(fp))
                 try:
                     module = SourceFileLoader(name, fp).load_module(name)
                     n0 = suite.countTestCases()
@@ -49,8 +57,8 @@ def load_tests(loader, prefix='test.', omit='__init__', suffix='.py'):
                 except BaseException:
                     logger.debug('exception in %s:', fp, exc_info=True)
                     logger.warn('exception while loading %s', fp)
-                finally:
-                    sys.path.pop(0)
+    # restore sys path
+    sys.path = sys_path
     return suite
 
 def for_each_test(suite, func):
@@ -108,6 +116,11 @@ def main(argv):
     if args.yod and not os.access(args.yod, os.X_OK):
         logger.error('invalid path for yod: %s', args.yod)
         return 10
+
+    # Many tests need to see the entire system so lets put ourselves
+    # into that mode by default:
+    with open('/proc/self/mos_view', 'w') as mosview:
+        mosview.write('all')
 
     # discover available tests, match against patterns
 
