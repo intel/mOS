@@ -10,6 +10,6 @@
 # FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
 # more details.
 
-hostprogs-$(CONFIG_MOS_LWKMEM) := lwkprocess maptest heaptest alignmenttest options get_addr_test
+hostprogs-$(CONFIG_MOS_LWKMEM) := lwkprocess maptest heaptest alignmenttest options get_addr_test munmap
 HOSTLOADLIBES_get_addr_test := -lmos -lnuma -lpthread
 always := $(hostprogs-y)

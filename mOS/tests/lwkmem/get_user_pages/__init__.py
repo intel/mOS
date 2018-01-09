@@ -20,4 +20,4 @@ class Basics(TestCase):
 
     def test_memory(self):
         # Verify that get_user_pages works with LWK memory.
-        yod(self, './gup_test', '-f')
+        yod(self, './gup_test', '-f', requiresRoot=True)
