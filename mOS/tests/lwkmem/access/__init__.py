@@ -20,4 +20,4 @@ class Basics(TestCase):
 
     def test_memory(self):
         # Verify that copy_{to,from}_user works with LWK memory.
-        yod(self, './copy_test', '-f')
+        yod(self, './copy_test', '-f', requiresRoot=True)

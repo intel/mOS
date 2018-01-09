@@ -54,13 +54,9 @@ static int
 sanity_check(unsigned long addr, unsigned long phys_addr, int numa_domain,
 	int page_size)
 {
-
-	struct bitmask *mask;
-
-	mask = numa_get_mems_allowed();
-	if (numa_bitmask_isbitset(mask, numa_domain) != 1)   {
+	if (numa_domain < 0 || numa_domain > numa_max_node()) {
 		fprintf(stderr,
-			"\tERROR: mos_get_addr_info(addr 0x%lx) returned NUMA domain %d, which is not in the mems_allowed bit mask!\n",
+			"\tERROR: mos_get_addr_info(addr 0x%lx) returned NUMA domain %d, which is not a legal NID.\n",
 			addr, numa_domain);
 		return -1;
 	}

@@ -54,6 +54,24 @@ def get_file_as_vector(path):
     logging.debug('< (%r) = %r', path, vec)
     return vec
 
+def get_cpus_domains():
+    cpus = set()
+    fname = '/sys/devices/system/node/has_cpu'
+    with open(fname) as nodes:
+        for line in nodes:
+            for phrase in line.strip().split(','):
+                toks = phrase.split('-')
+                if len(toks) == 1:
+                    cpus.add(int(toks[0]))
+                elif len(toks) == 2:
+                    for n in range(int(toks[0]), int(toks[1]) + 1):
+                        cpus.add(n)
+                else:
+                    logging.error('Unrecognized format in {}: "{}"'.format(fname, line.strip()))
+                    return -1
+
+    return len(cpus)
+
 class Base(TestCase):
     require = [lwkmem_path]
 
@@ -119,7 +137,7 @@ class Yod(Base):
         # Verify we can allocate the full amount of designated memory
         def subtest(reserved, size):
             with self.subTest(reserved=reserved, size=size):
-                yod(self, '-M', reserved, '-C', 'all', './maptest', '--verbose',
+                yod(self, '-M', reserved, '-C', 'all', '--mosview', 'lwk-local', './maptest', '--verbose',
                     '--type', 'anonymous', '--num', -1, '--size', size)
         self.update_lwk_state()
         # first test allocation sizes that hit the TLB sizes
@@ -193,15 +211,68 @@ class Yod(Base):
          with self.subTest():
             yod(self, './get_addr_test')
 
+    def _test_munmap_segments(self, page_sizes=[4*KiB, 2*MiB], extra_yod_args=''):
+
+        self.update_lwk_state()
+
+        n_domains = get_cpus_domains()
+
+        for page_size in page_sizes:
+
+            # Iterate over a range of mapped region sizes.
+            # Note that we need at least 3 pages in the mapped region
+            # in order to be able to unmap left, center and right
+            # segments.  An in order to internally exercise the
+            # interleaving allocator, we would like to test at least up
+            # to 3 pages per domain.  For pragmatic reasons, we will
+            # want to test at least up to 8 page allocations and at
+            # most 12.
+
+            upper = min([max([3 * n_domains, 8]), 12])
+
+            for map_size in list(s * page_size for s in range(3, upper + 1)):
+
+                # Iterate over every possible size of sub-regions to
+                # unmap:
+
+                for unmap_size in list(u * page_size for u in range(1, map_size//page_size)):
+
+                    # Slide the unmapped region from left to right
+                    # through every possible situation.  This covers
+                    # unmapping left, right and center.
+
+                    for offset in list(o * page_size for o in range((map_size - unmap_size)//page_size + 1)):
+
+                        # Test both "all resources" and "1/N" resources, which
+                        # will cover both of the current allocation schemes:
+                        for scale in [1, n_domains]:
+                            with self.subTest():
+                                cmd = '-R 1/{} {} ./munmap --map-size {} --unmap-size {} --offset {} --page-size {}'.format(scale, extra_yod_args, map_size, unmap_size, offset, page_size)
+                                yod(self, *cmd.split())
+
+    def test_munmap_segments(self):
+        self._test_munmap_segments(extra_yod_args='')
+
+    # These other variants of unmap_segments are interesting but probably
+    # not worth running all the time.  We annotate them as such.
+    @unittest.skipUnless(ARGS.all_tests, 'Level 2 test.')
+    def test_munmap_segments_forced_mmap_alignment(self):
+        self._test_munmap_segments(extra_yod_args='--aligned-mmap 1')
+
+    @unittest.skipUnless(ARGS.all_tests, 'Level 2 test.')
+    def test_munmap_segments_4k_interleave(self):
+        self._test_munmap_segments(extra_yod_args='-o lwkmem-interleave=4k', page_sizes=[2*MiB])
 
 class Options(Base):
     require = [YOD, 'options']
     page_sizes = ['4k', '4K', '2m', '2M', '1g', '1G']
 
-    def _test_with_options(self, options):
+    def _test_with_options(self, options, extra_args=None):
         opts = []
         for o in options:
             opts += ['-o', o]
+        if extra_args:
+            opts += extra_args
         opts += ['./options']
         yod(self, *opts)
 
@@ -228,3 +299,18 @@ class Options(Base):
     def test_interleave(self):
         for sz in self.page_sizes + ['0']:
             self._test_with_options(['lwkmem-interleave={}'.format(sz)])
+
+    def test_trace_block_lists(self):
+        for addr in ['-1', '0x8000000']:
+            for suffix in [None, 'details', 'summary']:
+                self._test_with_options(['lwkmem-trace-block-list={}{}'.format(addr, ':{}'.format(suffix) if suffix else '')])
+
+    def test_zero_check(self):
+        # Test different combinations of checks and 'fix'.
+        # The resources are constrained to a single core and
+        # a modest amount of memory so that it doesn't
+        # take too long to run.
+        for check in ['free', 'alloc', 'release', 'all']:
+            for fix in [None, 'fix']:
+                zcheck = '{},{}'.format(check, fix) if fix else check
+                self._test_with_options(['lwkmem-zeroes-check={}'.format(zcheck)], extra_args=['-C', '1', '-M', '64m'])
