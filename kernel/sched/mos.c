@@ -52,6 +52,7 @@
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/lwksched.h>
+#include <trace/events/lwkwake.h>
 
 /*
  * Default timeslice is 100 msecs. Used when an mOS task has been enabled for
@@ -59,6 +60,8 @@
  */
 #define MOS_TIMESLICE		(100 * HZ / 1000)
 #define COMMIT_MAX		INT_MAX		/* Max limit */
+
+#define CMCI_THRESHOLD_MAX	32767
 
 /* Maximum supported number of active utility thread groups */
 #define UTIL_GROUP_LIMIT   4
@@ -96,9 +99,19 @@ static struct util_group {
 
 static unsigned int shallow_sleep_mwait;
 static unsigned int deep_sleep_mwait;
-#define MWAIT_ENABLED	0x80000000
-#define TLBS_FLUSHED	0x40000000
+static bool mwait_supported;
+static bool mwait_deep_sleep_tlbs_flushed;
 #define MWAIT_HINT(x) (x & 0xff)
+
+enum Idle_Control {
+	Idle_Mechanism_MWAIT,	/* Use mwait in when idle */
+	Idle_Mechanism_HALT,	/* Use halt when not requesting deep sleep */
+	Idle_Mechanism_POLL,	/* Use polling when not requesting deep sleep */
+	Idle_Boundary_NONE,	/* Idle CPUs will request to enter deep sleep */
+	Idle_Boundary_COMMITTED,/* Committed CPUs will not enter deep sleep */
+	Idle_Boundary_RESERVED,	/* Reserved CPUs will not enter deep sleep */
+	Idle_Boundary_ONLINE,	/* Online CPUs will not enter deep sleep */
+};
 
 static void set_cpus_allowed_mos(struct task_struct *p,
 				const struct cpumask *new_mask);
@@ -180,8 +193,8 @@ static void probe_mwait_capabilities(void)
 	if (!(ecx & CPUID5_ECX_EXTENSIONS_SUPPORTED) ||
 	    !(ecx & CPUID5_ECX_INTERRUPT_BREAK) ||
 	    !mwait_substates) {
-		pr_warn(
-		  "mOS-sched: MWAIT not supported by processor. IDLE HALT enabled\n");
+		pr_info(
+		    "mOS: MWAIT not supported by processor. IDLE HALT enabled.");
 		return;
 	}
 	/*
@@ -196,16 +209,16 @@ static void probe_mwait_capabilities(void)
 		if (num_substates) {
 			if (!found_first) {
 				found_first = true;
-				shallow_sleep_mwait = (mwait_cstate_hint << 4) |
-						      MWAIT_ENABLED;
+				mwait_supported = true;
+				shallow_sleep_mwait = (mwait_cstate_hint << 4);
 			}
 			deep_sleep_mwait = (mwait_cstate_hint << 4) |
-					   (num_substates - 1) | MWAIT_ENABLED;
+					   (num_substates - 1);
 			if (mwait_cstate_hint > 0)
-				deep_sleep_mwait |= TLBS_FLUSHED;
+				mwait_deep_sleep_tlbs_flushed = true;
 		}
 	}
-	if (shallow_sleep_mwait & MWAIT_ENABLED) {
+	if (mwait_supported) {
 
 		pr_info(
 		    "mOS-sched: IDLE MWAIT enabled. Hints min/max=%08x/%08x. CPUID_MWAIT substates=%08x\n",
@@ -296,8 +309,11 @@ static void init_mos_rq(struct rq *rq)
 	mos_rq->owner = 0;
 	atomic_set(&mos_rq->exclusive_pid, 0);
 	/* Initialize mwait flags based on our processor capabilities */
+	mos_rq->mwait_supported = mwait_supported;
 	mos_rq->deep_sleep_mwait = deep_sleep_mwait;
 	mos_rq->shallow_sleep_mwait = shallow_sleep_mwait;
+	mos_rq->idle_mechanism = Idle_Mechanism_MWAIT;
+	mos_rq->idle_boundary = Idle_Boundary_RESERVED;
 
 	sched_stats_init(&mos_rq->stats);
 }
@@ -684,7 +700,8 @@ static inline int mos_rq_index(int priority)
 	else {
 		/* Unexpected priority value */
 		qindex = MOS_RQ_IDLE_INDEX;
-		WARN_ONCE(1, "priority = 0x%x", priority);
+		mos_ras(MOS_SCHEDULER_WARNING, "%s: Unexpected priority = 0x%x",
+			__func__, priority);
 	}
 	return qindex;
 }
@@ -780,6 +797,8 @@ static void set_utility_cpus_allowed(struct task_struct *p,
 	bool key_store_pending = false;
 	enum mos_commit_cpu_scope commit_type;
 	pid_t exclusive_pid = 0;
+	bool fwk_requested = (hints->location & MOS_CLONE_ATTR_FWK_CPU) ? 1 : 0;
+	bool lwk_requested = (hints->location & MOS_CLONE_ATTR_LWK_CPU) ? 1 : 0;
 
 	if (hints->key) {
 		raw_spin_lock(&util_grp_lock);
@@ -801,7 +820,7 @@ static void set_utility_cpus_allowed(struct task_struct *p,
 		}
 	} else {
 		/* Cannot use our current CPU for location matching since
-		 * we may be running on a Linux syscall CPU (e.g. in clone).
+		 * we may be running on a Linux utility CPU (e.g. in clone).
 		 * Use the CPU designated as the LWK CPU home for this task.
 		 * We should have a valid LWK CPU home. However if it is not
 		 * valid, default to the first LWK CPU in the process mask.
@@ -812,15 +831,16 @@ static void set_utility_cpus_allowed(struct task_struct *p,
 		else {
 			topology =
 			  &(cpu_rq(cpumask_first(proc->lwkcpus))->mos.topology);
-			pr_warn("mOS: Expected a valid cpu_home in %s.\n",
-					__func__);
+			mos_ras(MOS_SCHEDULER_WARNING,
+				"%s: Expected a valid CPU home.", __func__);
 		}
 	}
 	/* We are placing a thread on a Utility CPU */
 	if (!zalloc_cpumask_var(&new_mask, GFP_KERNEL)) {
 		if (key_store_pending)
 			raw_spin_unlock(&util_grp_lock);
-		pr_warn("CPU mask allocation failure in %s.\n", __func__);
+		mos_ras(MOS_SCHEDULER_WARNING,
+			"%s: CPU mask allocation failure.", __func__);
 		return;
 	}
 
@@ -876,9 +896,14 @@ static void set_utility_cpus_allowed(struct task_struct *p,
 	 * exclusively on a CPU, then we will override the commit type to
 	 * ensure we find a completely un-committed CPU.
 	 */
-	 commit_type = exclusive_pid ? mos_commit_cpu_scope_AllCommits :
+	commit_type = exclusive_pid ? mos_commit_cpu_scope_AllCommits :
 					proc->overcommit_behavior;
 
+	if (fwk_requested && cpumask_empty(proc->utilcpus)) {
+		fwk_requested = 0;
+		lwk_requested = 1;
+		placement_honored = false;
+	}
 	/*
 	 * Try to honor the location request looking at the lwkcpus
 	 * and the shared utility pool. If location cannot be
@@ -890,7 +915,7 @@ static void set_utility_cpus_allowed(struct task_struct *p,
 	 * to some unexpected condition.
 	 */
 	for (i = 0, util_cpu = -1; i < 100; i++) {
-		if (!(hints->location & MOS_CLONE_ATTR_FWK_CPU)) {
+		if (!fwk_requested) {
 			/* Search for a CPU, looking for the least committed */
 			util_cpu = _select_cpu_candidate(p,
 					allowed_commit_level,
@@ -910,7 +935,8 @@ static void set_utility_cpus_allowed(struct task_struct *p,
 				break;
 			}
 		}
-		if (!(hints->location & MOS_CLONE_ATTR_LWK_CPU)) {
+
+		if (!lwk_requested) {
 			util_cpu = select_linux_utility_cpus(p,
 						     matchtype,
 						     loc_id,
@@ -968,11 +994,11 @@ static void set_utility_cpus_allowed(struct task_struct *p,
 			 */
 			allowed_commit_level++;
 		} else {
-			/* Give up on domain and cache placement. Relax the
-			 * type of match we are doing. If we keep returning
-			 * here, we will eventually relax the match type
-			 * to FirstAvail, which will always end up with a
-			 * valid CPU
+			/*
+			 * Relax the type of match we are doing. If we keep
+			 * returning here, we will eventually relax the match
+			 * type to FirstAvail, which will always end up with a
+			 * valid CPU.
 			 */
 			matchtype = relax_match(matchtype);
 			placement_honored = false;
@@ -1004,18 +1030,20 @@ static void set_utility_cpus_allowed(struct task_struct *p,
 					break;
 			}
 			if (i < UTIL_GROUP_LIMIT) {
-				WARN_ONCE(util_grp.entry[i].refcount,
-					"Unexpected non-zero refcount=%d\n",
-					util_grp.entry[i].refcount);
+				if (util_grp.entry[i].refcount) {
+					mos_ras(MOS_SCHEDULER_WARNING,
+					 "%s: Unexpected non-zero reference count (%d).",
+					  __func__, util_grp.entry[i].refcount);
+				}
 				util_grp.entry[i].refcount++;
 				util_grp.entry[i].key =	hints->key;
 				util_grp.entry[i].topology = *topology;
 				p->mos.active_hints.key = hints->key;
 			} else {
 				placement_honored = false;
-				WARN_ONCE(1,
-				"No utility thread key slots available in %s.\n",
-				__func__);
+				mos_ras(MOS_SCHEDULER_WARNING,
+				    "%s: No utility thread key slots available.",
+				    __func__);
 			}
 			key_store_pending = false;
 			raw_spin_unlock(&util_grp_lock);
@@ -1033,7 +1061,8 @@ static void set_utility_cpus_allowed(struct task_struct *p,
 		 */
 		if (!on_linux &&
 		    !(hints->behavior & MOS_CLONE_ATTR_EXCL) &&
-		    !(hints->location)) {
+		    !(hints->location) &&
+		    !cpumask_empty(proc->utilcpus)) {
 			/* Grab the utility list lock */
 			mutex_lock(&proc->util_list_lock);
 
@@ -1071,8 +1100,8 @@ static void set_utility_cpus_allowed(struct task_struct *p,
 	} else {
 		if (key_store_pending)
 			raw_spin_unlock(&util_grp_lock);
-		pr_warn("Utility cpu selection failure in %s.\n",
-				__func__);
+		mos_ras(MOS_SCHEDULER_WARNING,
+			"%s: Utility CPU selection failure.", __func__);
 	}
 	free_cpumask_var(new_mask);
 }
@@ -1151,9 +1180,8 @@ static void push_utility_threads(struct task_struct *p)
 			bool placement_honored = true;
 
 			if (!zalloc_cpumask_var(&new_mask, GFP_KERNEL)) {
-				pr_warn(
-				    "CPU mask allocation failure in %s.\n",
-				    __func__);
+				mos_ras(MOS_SCHEDULER_WARNING,
+				"%s: CPU mask allocation failure.", __func__);
 				break;
 			}
 
@@ -1204,8 +1232,9 @@ static void push_utility_threads(struct task_struct *p)
 					 * utility threads
 					 */
 					util_cpu = util_thread->mos.cpu_home;
-					pr_warn("mOS: unexpected condition searching for available CPU in %s.\n",
-					    __func__);
+					mos_ras(MOS_SCHEDULER_WARNING,
+						"%s: Unexpected condition searching for available CPU.",
+						__func__);
 					break;
 				}
 				/* Relax the match we are doing. If we keep
@@ -1257,6 +1286,64 @@ static void clear_clone_hints(struct task_struct *p)
 	memset(&p->mos.clone_hints, 0, sizeof(struct mos_clone_hints));
 }
 
+static inline void mos_idle_poll_halt_wait(struct mos_rq *mos_rq, int cpu)
+{
+	unsigned long ecx, eax;
+	bool deep_sleep = false;
+
+	/* Determine if we are going into deep sleep */
+	if (likely(mos_rq->mwait_supported)) {
+		if (mos_rq->idle_boundary == Idle_Boundary_RESERVED) {
+			if (unlikely(!mos_rq->owner))
+				deep_sleep = true;
+		} else if (mos_rq->idle_boundary == Idle_Boundary_COMMITTED) {
+			if (unlikely(!mos_rq->compute_commits &&
+			    !mos_rq->utility_commits))
+				deep_sleep = true;
+		} else if (mos_rq->idle_boundary == Idle_Boundary_NONE)
+			deep_sleep = true;
+	}
+	rcu_idle_enter();
+	if (likely(mos_rq->idle_mechanism == Idle_Mechanism_MWAIT ||
+							deep_sleep)) {
+		ecx = 1; /* mwait break on interrupt */
+		eax = MWAIT_HINT(deep_sleep ? deep_sleep_mwait :
+					      shallow_sleep_mwait);
+		if (deep_sleep && mwait_deep_sleep_tlbs_flushed)
+			leave_mm(cpu);
+		trace_mos_idle_mwait_entry(ecx, eax);
+		stop_critical_timings();
+		__monitor((void *)&current_thread_info()->flags, 0, 0);
+		if (!need_resched())
+			__mwait(eax, ecx);
+		start_critical_timings();
+		trace_mos_idle_mwait_exit(ecx, eax);
+		local_irq_enable();
+	} else if (mos_rq->idle_mechanism == Idle_Mechanism_HALT)  {
+		if (current_clr_polling_and_test())
+			local_irq_enable();
+		else {
+			trace_mos_idle_halt_entry(0);
+			stop_critical_timings();
+			/* Re-enable and halt */
+			safe_halt();
+			/* Running again */
+			start_critical_timings();
+			trace_mos_idle_halt_exit(0);
+		}
+		__current_set_polling();
+	} else /* if (mos_rq->idle_mechanism == Idle_Mechanism_POLL) */ {
+		trace_mos_idle_poll_entry(0);
+		stop_critical_timings();
+		local_irq_enable();
+		/* Hot polling */
+		while (!need_resched())
+			cpu_relax();
+		start_critical_timings();
+		trace_mos_idle_poll_exit(0);
+	}
+	rcu_idle_exit();
+}
 
 /*
  * This is the mOS idle loop.
@@ -1266,9 +1353,6 @@ static int mos_idle_main(void *data)
 	int cpu = (int)(unsigned long) data;
 	struct rq *rq;
 	struct mos_rq *mos_rq;
-	unsigned long ecx = 1; /* mwait break on interrupt */
-	unsigned long eax;
-
 
 	rq = cpu_rq(cpu);
 	mos_rq = &(rq->mos);
@@ -1293,48 +1377,13 @@ static int mos_idle_main(void *data)
 			arch_cpu_idle_enter();
 			/*
 			 * Check if the idle task must be rescheduled. If it
-			 * is the case, exit the function after re-enabling
+			 * is the case, exit idle after re-enabling
 			 * the local irq.
 			 */
 			if (need_resched())
 				local_irq_enable();
-			else {
-				unsigned int mwait_sleep;
-
-				if (likely(mos_rq->owner))
-					mwait_sleep =
-						mos_rq->shallow_sleep_mwait;
-				else
-					mwait_sleep = mos_rq->deep_sleep_mwait;
-
-				/* Tell the RCU framework entering idle */
-				rcu_idle_enter();
-				if (mwait_sleep & MWAIT_ENABLED) {
-					eax = MWAIT_HINT(mwait_sleep);
-					if (mwait_sleep & TLBS_FLUSHED)
-						leave_mm(cpu);
-					trace_mos_mwait_idle_entry(ecx, eax);
-					stop_critical_timings();
-					__monitor((void *)&current_thread_info()->flags, 0, 0);
-					if (!need_resched())
-						__mwait(eax, ecx);
-					trace_mos_mwait_idle_exit(ecx, eax);
-					start_critical_timings();
-					local_irq_enable();
-				} else {
-					if (current_clr_polling_and_test())
-						local_irq_enable();
-					else {
-						stop_critical_timings();
-						/* Re-enable and halt the CPU */
-						safe_halt();
-						/* Running again */
-						start_critical_timings();
-					}
-					__current_set_polling();
-				}
-				rcu_idle_exit();
-			}
+			else
+				mos_idle_poll_halt_wait(mos_rq, cpu);
 			arch_cpu_idle_exit();
 		}
 		/*
@@ -1379,11 +1428,12 @@ static void idle_task_prepare(int cpu)
 	mos_rq = &(rq->mos);
 
 	/* If already initialized, we wake up the task so that it can
-	 * re-evaluate its C-state. If it was in a deep sleep it will be
+	 * re-evaluate its C-state and adjust to the new idle control
+	 * specification. If it was in a deep sleep it will be
 	 * brought back to C1 in preparation for use by the process.
 	*/
 	if (mos_rq->idle) {
-		wake_up_if_idle(cpu);
+		resched_cpu(cpu);
 		return;
 	}
 	/*
@@ -1394,8 +1444,9 @@ static void idle_task_prepare(int cpu)
 	p = kthread_create_on_node(mos_idle_main, (void *)(unsigned long)cpu,
 				     cpu_to_node(cpu), "mos_idle/%d", cpu);
 	if (IS_ERR(p)) {
-		pr_err("(!) mos_idle thread create failure for CPU=%u in %s.\n",
-				cpu, __func__);
+		mos_ras(MOS_SCHEDULER_WARNING,
+		    "%s: mos_idle thread create failure for CPU=%u.",
+		    __func__, cpu);
 		return;
 	}
 	/*
@@ -1409,8 +1460,9 @@ static void idle_task_prepare(int cpu)
 		set_cpus_allowed_ptr(p, new_mask);
 		free_cpumask_var(new_mask);
 	} else {
-		pr_err("(!) mos_idle cpumask allocation failure for CPU=%u in %s.\n",
-			cpu, __func__);
+		mos_ras(MOS_SCHEDULER_WARNING,
+		"%s: mos_idle cpumask allocation failure for CPU=%u.",
+		__func__, cpu);
 		return;
 	}
 	trace_mos_idle_init(cpu);
@@ -1452,6 +1504,11 @@ void mos_sched_prepare_launch(void)
 		/* Set the owning process */
 		mos->owner = current->tgid;
 
+		/* Set the requested idle control */
+		mos->idle_mechanism = current->mos_process->idle_mechanism;
+		mos->idle_boundary = current->mos_process->idle_boundary;
+		mos->mwait_supported = mwait_supported;
+		mos->mwait_tlbs_flushed = mwait_deep_sleep_tlbs_flushed;
 	}
 	smp_mb(); /* idle tasks need to see the current owner */
 
@@ -1467,12 +1524,13 @@ static int lwksched_process_init(struct mos_process_t *mosp)
 {
 
 	if (!zalloc_cpumask_var(&mosp->original_cpus_allowed, GFP_KERNEL)) {
-		pr_warn("CPU mask allocation failure in %s.\n", __func__);
+		mos_ras(MOS_SCHEDULER_ERROR,
+			"%s: CPU mask allocation failure.", __func__);
 		return -ENOMEM;
 	}
 	atomic_set(&mosp->threads_created, 0); /* threads created */
 	mosp->num_util_threads = 0;
-	mosp->mce_polling_disabled = 0;
+	mosp->mce_modifications_active = 0;
 	mosp->move_syscalls_disable = 0;
 	mosp->enable_rr = 0;
 	mosp->disable_setaffinity = 0;
@@ -1481,17 +1539,29 @@ static int lwksched_process_init(struct mos_process_t *mosp)
 	mutex_init(&mosp->util_list_lock);
 	mosp->max_cpus_for_util = -1;
 	mosp->max_util_threads_per_cpu = 1;
+	mosp->cmci_threshold = CMCI_THRESHOLD_MAX;
+	mosp->correctable_mcheck_polling = 0;
 	mosp->overcommit_behavior = mos_commit_cpu_scope_OnlyUtilityCommits;
 	mosp->allowed_cpus_per_util = AllowMultipleCpusPerUtilThread;
+	if (likely(mwait_supported)) {
+		mosp->idle_mechanism = Idle_Mechanism_MWAIT;
+		mosp->idle_boundary = Idle_Boundary_RESERVED;
+	} else {
+		mosp->idle_mechanism = Idle_Mechanism_HALT;
+		mosp->idle_boundary = Idle_Boundary_ONLINE;
+	}
 
 	return 0;
 }
 
 static int lwksched_process_start(struct mos_process_t *mosp)
 {
+
+
 	mos_sched_prepare_launch();
-	mce_lwkprocess_begin(current->mos_process->lwkcpus);
-	mosp->mce_polling_disabled = 1;
+	mce_lwkprocess_begin(mosp->lwkcpus, mosp->cmci_threshold,
+				mosp->correctable_mcheck_polling);
+	mosp->mce_modifications_active = 1;
 
 	return 0;
 }
@@ -1614,7 +1684,7 @@ static void sleep_on_process_exit(struct mos_process_t *mosp)
 
 	for_each_cpu(cpu, mosp->lwkcpus)
 		/* Kick idle tasks causing them to re-evaluate their C-state */
-		wake_up_if_idle(cpu);
+		resched_cpu(cpu);
 }
 
 static void lwksched_process_exit(struct mos_process_t *mosp)
@@ -1629,9 +1699,11 @@ static void lwksched_process_exit(struct mos_process_t *mosp)
 	sched_stats_summarize(mosp);
 
 	/* Re-enable correctable machine check interrupts and polling */
-	if (mosp->mce_polling_disabled) {
-		mce_lwkprocess_end(current->mos_process->lwkcpus);
-		mosp->mce_polling_disabled = 0;
+	if (mosp->mce_modifications_active) {
+		mce_lwkprocess_end(current->mos_process->lwkcpus,
+				   mosp->cmci_threshold ? true : false,
+				   !mosp->correctable_mcheck_polling);
+		mosp->mce_modifications_active = 0;
 	}
 }
 
@@ -1671,8 +1743,9 @@ static int lwksched_enable_rr(const char *val,
 
 	return 0;
 invalid:
-	pr_err("(!) Illegal value (%s) in %s. Minimum valid timeslice is %d\n",
-	       val, __func__, min_msecs);
+	mos_ras(MOS_SCHEDULER_ERROR,
+	"%s: Illegal value (%s). Minimum valid timeslice is %d",
+	       __func__, val, min_msecs);
 	return -EINVAL;
 }
 
@@ -1695,8 +1768,8 @@ static int lwksched_disable_setaffinity(const char *val,
 
 	return 0;
 invalid:
-	pr_err("(!) Illegal value (%s) in %s. Expected >= 0.\n",
-	       val, __func__);
+	mos_ras(MOS_SCHEDULER_ERROR,
+		"%s: Illegal value (%s). Expected >= 0.", __func__, val);
 	return -EINVAL;
 }
 
@@ -1715,8 +1788,7 @@ static int lwksched_stats(const char *val, struct mos_process_t *mosp)
 
 	return 0;
 invalid:
-	pr_err("(!) Illegal value (%s) in %s.\n",
-	       val, __func__);
+	mos_ras(MOS_SCHEDULER_ERROR, "%s: Illegal value (%s).", __func__, val);
 	return -EINVAL;
 }
 
@@ -1736,13 +1808,21 @@ static int lwksched_util_threshold(const char *val, struct mos_process_t *mosp)
 	rc = kstrtoint(max_thread_str, 0, &mosp->max_util_threads_per_cpu);
 	if (rc)
 		goto invalid;
+	if (mosp->max_util_threads_per_cpu < 0)
+		goto invalid;
 	rc = kstrtoint(max_cpus_str, 0, &mosp->max_cpus_for_util);
 	if (rc)
 		goto invalid;
+	if ((mosp->max_cpus_for_util != -1) &&
+	    (cpumask_empty(mosp->utilcpus))) {
+		mos_ras(MOS_SCHEDULER_ERROR,
+		    "%s: Illegal threshold value (%s) due to no utility CPUs configured",
+		    __func__, val);
+		return -EINVAL;
+	}
 	return 0;
 invalid:
-	pr_err("Illegal value (%s) in %s.\n",
-		val, __func__);
+	mos_ras(MOS_SCHEDULER_ERROR, "%s: Illegal value (%s).", __func__, val);
 	return -EINVAL;
 }
 
@@ -1763,8 +1843,7 @@ static int lwksched_overcommit_behavior(const char *val,
 		return 0;
 	}
 invalid:
-	pr_err("(!) Illegal value (%s) in %s.\n",
-	       val, __func__);
+	mos_ras(MOS_SCHEDULER_ERROR, "%s: Illegal value (%s).", __func__, val);
 	return -EINVAL;
 }
 
@@ -1774,6 +1853,108 @@ static int lwksched_one_cpu_per_util(const char *val,
 	mosp->allowed_cpus_per_util = AllowOnlyOneCpuPerUtilThread;
 	return 0;
 }
+
+static int lwksched_idle_control(const char *val, struct mos_process_t *mosp)
+{
+	char *mechanism_str = NULL;
+	char *boundary_str = NULL;
+	int rc = 0;
+
+	if (!val) {
+		mos_ras(MOS_SCHEDULER_ERROR,
+		    "%s: Required value=<mechanism,boundary> not specified.",
+		    __func__);
+		rc = -EINVAL;
+		goto leave;
+	}
+	boundary_str = kstrdup(val, GFP_KERNEL);
+	if (!boundary_str)
+		return -ENOMEM;
+	mechanism_str = strsep(&boundary_str, ",");
+	if (!boundary_str) {
+		mos_ras(MOS_SCHEDULER_ERROR,
+			"%s: Missing boundary specification: %s",
+			__func__, val);
+		rc = -EINVAL;
+		goto leave;
+	}
+	/* Mechanism processing */
+	if (!strcmp(mechanism_str, "mwait")) {
+		if (mwait_supported)
+			mosp->idle_mechanism = Idle_Mechanism_MWAIT;
+		else {
+			mos_ras(MOS_SCHEDULER_ERROR,
+				"%s: MWAIT not supported on current platform.",
+				__func__);
+			rc = -EINVAL;
+			goto leave;
+		}
+	} else if (!strcmp(mechanism_str, "halt"))
+		mosp->idle_mechanism = Idle_Mechanism_HALT;
+	else if (!strcmp(mechanism_str, "poll"))
+		mosp->idle_mechanism = Idle_Mechanism_POLL;
+	else {
+		mos_ras(MOS_SCHEDULER_ERROR, "%s: Invalid mechanism (%s).",
+		    __func__, mechanism_str);
+		rc = -EINVAL;
+		goto leave;
+	}
+	/* Boundary processing */
+	if (!strcmp(boundary_str, "none"))
+		mosp->idle_boundary = Idle_Boundary_NONE;
+	else if (!strcmp(boundary_str, "committed"))
+		mosp->idle_boundary = Idle_Boundary_COMMITTED;
+	else if (!strcmp(boundary_str, "reserved"))
+		mosp->idle_boundary = Idle_Boundary_RESERVED;
+	else if (!strcmp(boundary_str, "online"))
+		mosp->idle_boundary = Idle_Boundary_ONLINE;
+	else {
+		mos_ras(MOS_SCHEDULER_ERROR, "%s: Invalid boundary (%s).",
+			__func__, boundary_str);
+		rc = -EINVAL;
+		goto leave;
+	}
+leave:
+	kfree(mechanism_str);
+	return rc;
+}
+
+static int lwksched_cmci_control(const char *val, struct mos_process_t *mosp)
+{
+	char *threshold_str = NULL;
+	char *poll_enable_str = NULL;
+
+	if (!val)
+		goto invalid;
+	poll_enable_str = kstrdup(val, GFP_KERNEL);
+	if (!poll_enable_str)
+		goto invalid;
+	threshold_str = strsep(&poll_enable_str, ",");
+	if (!poll_enable_str || !threshold_str)
+		goto invalid;
+	if (!strcmp(threshold_str, "max-threshold"))
+		mosp->cmci_threshold = CMCI_THRESHOLD_MAX;
+	else if (!strcmp(threshold_str, "disable-cmci"))
+		mosp->cmci_threshold = 0;
+	else if (kstrtoint(threshold_str, 0, &mosp->cmci_threshold))
+		goto invalid;
+	if (!strcmp(poll_enable_str, "enable-poll"))
+		mosp->correctable_mcheck_polling = 1;
+	else if (!strcmp(poll_enable_str, "disable-poll"))
+		mosp->correctable_mcheck_polling = 0;
+	else
+		goto invalid;
+	if ((mosp->cmci_threshold < 0) ||
+	    (mosp->cmci_threshold > CMCI_THRESHOLD_MAX))
+		goto invalid;
+	kfree(threshold_str);
+	return 0;
+invalid:
+	mos_ras(MOS_SCHEDULER_ERROR, "%s: Illegal value (%s).", __func__, val);
+	kfree(threshold_str);
+	return -EINVAL;
+}
+
 
 static int __init lwksched_mod_init(void)
 {
@@ -1796,10 +1977,37 @@ static int __init lwksched_mod_init(void)
 				     lwksched_overcommit_behavior);
 	mos_register_option_callback("one-cpu-per-util",
 				     lwksched_one_cpu_per_util);
+	mos_register_option_callback("idle-control",
+				     lwksched_idle_control);
+	mos_register_option_callback("cmci-control",
+				     lwksched_cmci_control);
 	return 0;
 }
 
 subsys_initcall(lwksched_mod_init);
+
+static void mos_timer_fn(unsigned long data)
+{
+	struct mos_rq *mos = (struct mos_rq *)data;
+
+	mos->api_timeout = 1;
+	/* Runs in same CPU that is testing for timeout. No fence needed */
+}
+
+static int timer_init(cpumask_var_t lwkcpus)
+{
+	int cpu;
+
+	for_each_cpu(cpu, lwkcpus) {
+		struct mos_rq *mos_rq;
+
+		mos_rq = &(cpu_rq(cpu)->mos);
+		setup_pinned_timer(&mos_rq->api_timer, mos_timer_fn,
+				   (unsigned long)mos_rq);
+		mos_rq->api_timeout = 0;
+	}
+	return 0;
+}
 
 static int lwksched_topology_init(void)
 {
@@ -1884,7 +2092,8 @@ int __init init_sched_mos(void)
 	}
 	if (!zalloc_cpumask_var(&saved_wq_mask, GFP_KERNEL))
 
-		pr_warn("CPU mask allocation failure in %s.\n", __func__);
+		mos_ras(MOS_SCHEDULER_WARNING,
+			"%s: CPU mask allocation failure.", __func__);
 
 	return 0;
 }
@@ -1917,11 +2126,13 @@ int mos_sched_init(void)
 			pr_info("mOS-sched: set unbound workqueue cpumask to %*pbl\n",
 					cpumask_pr_args(wq_mask));
 		else
-			pr_warn("Failed setting unbound workqueue cpumask in %s. rc=%d\n",
+			mos_ras(MOS_SCHEDULER_WARNING,
+				"%s: Failed setting unbound workqueue cpumask. rc=%d",
 				__func__, rc);
 		free_cpumask_var(wq_mask);
 	} else
-		pr_warn("CPU mask allocation failure in %s.\n", __func__);
+		mos_ras(MOS_SCHEDULER_WARNING,
+			"%s: CPU mask allocation failure.", __func__);
 
 	probe_mwait_capabilities();
 
@@ -1949,7 +2160,16 @@ int mos_sched_init(void)
  */
 int mos_sched_activate(cpumask_var_t new_lwkcpus)
 {
-	return lwksched_topology_init();
+	int lwkcpu;
+
+	lwksched_topology_init();
+	timer_init(new_lwkcpus);
+
+	/* Create the idle tasks on each LWK CPU */
+	for_each_cpu(lwkcpu, new_lwkcpus)
+		idle_task_prepare(lwkcpu);
+
+	return 0;
 }
 
 /*
@@ -1978,8 +2198,8 @@ int mos_sched_deactivate(cpumask_var_t back_to_linux)
 		/* Force each mos idle thread to exit */
 		idle_task = mos_rq->idle;
 		if (idle_task) {
-			/* Kick the idle thread out of halt state */
-			wake_up_if_idle(adios);
+			/* Kick idle thread to re-evaluate rq->lwkcpu */
+			resched_cpu(adios);
 			/* Do not continue until we are sure it exited */
 			kthread_stop(idle_task);
 			mos_rq->idle = NULL;
@@ -2016,7 +2236,8 @@ int mos_sched_exit(void)
 					cpumask_pr_args(saved_wq_mask));
 
 	else
-		pr_warn("Failed setting unbound workqueue cpumask in %s. rc=%d\n",
+		mos_ras(MOS_SCHEDULER_WARNING,
+			"%s: Failed setting unbound workqueue cpumask. rc=%d",
 				__func__, rc);
 	return 0;
 }
@@ -2194,6 +2415,100 @@ asmlinkage long lwk_sys_mos_set_clone_attr(
 	return 0;
 }
 
+SYSCALL_DEFINE4(mos_mwait,
+		enum mos_mwait_sleep, sleep_level,
+		unsigned long __user *, location,
+		unsigned long, previous_value,
+		unsigned int, timeout_msecs)
+{
+
+	return -EINVAL;
+}
+
+asmlinkage long lwk_sys_mos_mwait(
+				unsigned int sleep_level,
+				unsigned long __user *location,
+				unsigned long previous,
+				unsigned int timeout_msecs)
+{
+	unsigned int mwait_sleep;
+	unsigned long ecx = 1; /* mwait break on interrupt */
+	unsigned long eax;
+	unsigned long now;
+	unsigned long expire_time;
+	unsigned int cpu;
+	struct rq *rq;
+	struct mos_rq *mos_rq;
+	long rc = 0;
+
+	switch (sleep_level) {
+	case mos_mwait_sleep_normal:
+		mwait_sleep = shallow_sleep_mwait;
+		break;
+	case mos_mwait_sleep_deep:
+		mwait_sleep = deep_sleep_mwait;
+		break;
+	default:
+		return -EINVAL;
+	};
+	preempt_disable();
+	cpu = smp_processor_id();
+	rq = cpu_rq(cpu);
+	if (!rq->lwkcpu) {
+		preempt_enable();
+		return -EINVAL;
+	}
+	mos_rq = &rq->mos;
+	expire_time = jiffies + msecs_to_jiffies(timeout_msecs);
+	mos_rq->api_timeout = 0;
+	if (timeout_msecs)
+		mod_timer(&mos_rq->api_timer, expire_time);
+	eax = MWAIT_HINT(mwait_sleep);
+	if (unlikely(get_user(now, location)))
+		rc = -EFAULT;
+	else if (likely(now == previous)) {
+		for (;;) {
+			user_access_begin();
+			__monitor((void *)location, 0, 0);
+			user_access_end();
+			/* Must re-test after monitor is set */
+			if (unlikely(__get_user(now, location))) {
+				rc = -EFAULT;
+				break;
+			}
+			if (likely(now == previous)) {
+				trace_mos_mwait_api_entry(ecx, eax);
+				__mwait(eax, ecx);
+				rc++;
+				trace_mos_mwait_api_exit(ecx, eax);
+				if (unlikely(__get_user(now, location))) {
+					rc = -EFAULT;
+					break;
+				}
+				if (now != previous)
+					break;
+				if (unlikely(signal_pending(current))) {
+					rc = -EINTR;
+					break;
+				}
+				cond_resched();
+			} else
+				break;
+			if (mos_rq->api_timeout) {
+				/* Return errno if we timed-out waiting */
+				rc = -EBUSY;
+				break;
+			}
+		}
+	}
+	if (timeout_msecs && !mos_rq->api_timeout)
+		/* note: del_timer() is tolerant if timeout occurs here */
+		del_timer(&mos_rq->api_timer);
+
+	preempt_enable();
+	return rc;
+}
+
 /*
  * The following are the class functions called from the Linux core scheduler.
  * These interfaces are called when the mOS tasks interface with the Linux
@@ -2284,8 +2599,9 @@ void assimilate_task_mos(struct rq *rq, struct task_struct *p)
 	    (strncmp(p->comm, "cpuhp", 5)) &&
 	    (strncmp(p->comm, "mos_idle", 8))) {
 		/* Un-expected task. Warn and continue with assimilation */
-		pr_warn("mOS-sched: Unexpected assimilation of task %s. Cpus_allowed: %*pbl\n",
-			p->comm, cpumask_pr_args(&p->cpus_allowed));
+		mos_ras(MOS_SCHEDULER_WARNING,
+			"%s: Unexpected assimilation of task %s. Cpus_allowed: %*pbl",
+			__func__, p->comm, cpumask_pr_args(&p->cpus_allowed));
 	}
 	p->mos.orig_class = p->sched_class;
 	p->mos.orig_policy = p->policy;
@@ -2295,8 +2611,9 @@ void assimilate_task_mos(struct rq *rq, struct task_struct *p)
 	    (p->sched_class == &fair_sched_class)) {
 		p->mos.assimilated = 1;
 	} else {
-		pr_warn("mOS-sched: Unrecognized scheduling class. Policy=%d\n",
-				p->policy);
+		mos_ras(MOS_SCHEDULER_WARNING,
+			"%s: Unrecognized scheduling class. Policy=%d",
+			__func__, p->policy);
 	}
 	if (p->mos.assimilated) {
 		p->sched_class = &mos_sched_class;
@@ -2756,7 +3073,8 @@ int mos_select_next_cpu(struct task_struct *p, const struct cpumask *new_mask)
 	if (cpumask_subset(new_mask, p->mos_process->lwkcpus))
 		return select_cpu_candidate(p, COMMIT_MAX);
 	/*
-	 * All other conditions pick first cpu in the new mask
+	 * This must be a syscall migration or a utility thread being
+	 * moved to a CPU controlled by Linux
 	 */
 	return cpumask_any_and(cpu_online_mask, new_mask);
 }

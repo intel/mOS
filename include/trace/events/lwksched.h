@@ -14,6 +14,7 @@
 
 #undef TRACE_SYSTEM
 #define TRACE_SYSTEM mos
+#undef TRACE_INCLUDE_FILE
 #define TRACE_INCLUDE_FILE lwksched
 
 #if !defined(_TRACE_LWKSCHED_H) || defined(TRACE_HEADER_MULTI_READ)
@@ -132,19 +133,19 @@ DECLARE_EVENT_CLASS(mos_assimilate_template,
 	TP_ARGS(p),
 
 	TP_STRUCT__entry(
-		__array(	char,	comm,	TASK_COMM_LEN	)
-		__field(	int,	cpu			)
-		__field(	int,	policy			)
-		__field(	int,	thread_type		)
-		__field(	int,	nr_cpus 		)
+		__array(char, comm, TASK_COMM_LEN)
+		__field(int, cpu)
+		__field(int, policy)
+		__field(int, thread_type)
+		__field(int, nr_cpus)
 	),
 
 	TP_fast_assign(
 		memcpy(__entry->comm, p->comm, TASK_COMM_LEN);
-		__entry->cpu		= task_cpu(p);
-		__entry->policy		= p->policy;
-		__entry->thread_type	= p->mos.thread_type;
-		__entry->nr_cpus	= p->nr_cpus_allowed;
+		__entry->cpu = task_cpu(p);
+		__entry->policy	= p->policy;
+		__entry->thread_type = p->mos.thread_type;
+		__entry->nr_cpus = p->nr_cpus_allowed;
 	),
 
 	TP_printk("comm=%s cpu=%d policy=%d:%s type=%d:%s nr_cpus=%d",
@@ -193,15 +194,15 @@ TRACE_EVENT(mos_clone_cpu_assign,
 	TP_ARGS(cpu, p),
 
 	TP_STRUCT__entry(
-		__field(	int,	cpu			)
-		__field(	int,	pid 			)
-		__field(	int,	nr_cpus 		)
+		__field(int, cpu)
+		__field(int, pid)
+		__field(int, nr_cpus)
 	),
 
 	TP_fast_assign(
-		__entry->cpu		= cpu;
-		__entry->pid		= p->pid;
-		__entry->nr_cpus	= p->nr_cpus_allowed;
+		__entry->cpu = cpu;
+		__entry->pid = p->pid;
+		__entry->nr_cpus = p->nr_cpus_allowed;
 	),
 
 	TP_printk("target cpu=%d pid=%d num cpus allowed=%d",
@@ -218,13 +219,13 @@ TRACE_EVENT(mos_timer_tick,
 	TP_ARGS(p),
 
 	TP_STRUCT__entry(
-		__field(	int,	policy			)
-		__field(	int,	nr_cpus 		)
+		__field(int, policy)
+		__field(int, nr_cpus)
 	),
 
 	TP_fast_assign(
-		__entry->policy		= p->policy;
-		__entry->nr_cpus	= p->nr_cpus_allowed;
+		__entry->policy	= p->policy;
+		__entry->nr_cpus = p->nr_cpus_allowed;
 	),
 
 	TP_printk("policy=%d:%s num cpus allowed=%d",
@@ -243,15 +244,14 @@ TRACE_EVENT(mos_idle_init,
 	TP_ARGS(cpu),
 
 	TP_STRUCT__entry(
-		__field(	int,	cpu			)
+		__field(int, cpu)
 	),
 
 	TP_fast_assign(
-		__entry->cpu		= cpu;
+		__entry->cpu = cpu;
 	),
 
-	TP_printk("create for cpu=%d",
-		  __entry->cpu)
+	TP_printk("create for cpu=%d", __entry->cpu)
 );
 
 /*
@@ -265,19 +265,19 @@ TRACE_EVENT(mos_cpu_commit,
 	TP_ARGS(p, cpu, compute_commit, utility_commit, overflow),
 
 	TP_STRUCT__entry(
-		__field(	int,	pid			)
-		__field(	int,	cpu			)
-		__field(	int,	compute_commit		)
-		__field(	int,	util_commit		)
-		__field(	int,	overflow		)
+		__field(int, pid)
+		__field(int, cpu)
+		__field(int, compute_commit)
+		__field(int, util_commit)
+		__field(int, overflow)
 	),
 
 	TP_fast_assign(
-		__entry->pid		= p->pid;
-		__entry->cpu		= cpu;
-		__entry->compute_commit	= compute_commit;
-		__entry->util_commit	= utility_commit;
-		__entry->overflow	= overflow;
+		__entry->pid = p->pid;
+		__entry->cpu = cpu;
+		__entry->compute_commit = compute_commit;
+		__entry->util_commit = utility_commit;
+		__entry->overflow = overflow;
 	),
 
 	TP_printk("pid=%d cpu=%d compute_level=%d util_level=%d %s",
@@ -296,19 +296,19 @@ TRACE_EVENT(mos_cpu_uncommit,
 	TP_ARGS(p, cpu, compute_commit, utility_commit, underflow),
 
 	TP_STRUCT__entry(
-		__field(	int,	pid			)
-		__field(	int,	cpu			)
-		__field(	int,	compute_commit		)
-		__field(	int,	util_commit		)
-		__field(	int,	underflow		)
+		__field(int, pid)
+		__field(int, cpu)
+		__field(int, compute_commit)
+		__field(int, util_commit)
+		__field(int, underflow)
 	),
 
 	TP_fast_assign(
-		__entry->pid		= p->pid;
-		__entry->cpu		= cpu;
-		__entry->compute_commit	= compute_commit;
-		__entry->util_commit	= utility_commit;
-		__entry->underflow	= underflow;
+		__entry->pid = p->pid;
+		__entry->cpu = cpu;
+		__entry->compute_commit = compute_commit;
+		__entry->util_commit = utility_commit;
+		__entry->underflow = underflow;
 	),
 
 	TP_printk("pid=%d cpu=%d compute_level=%d util_level=%d %s",
@@ -329,25 +329,25 @@ DECLARE_EVENT_CLASS(mos_cpu_select_template,
 		range, exclusive_pid),
 
 	TP_STRUCT__entry(
-		__field(	int,	pid			)
-		__field(	int,	cpu			)
-		__field(	int,	commit_type		)
-		__field(	int,	commit_level		)
-		__field(	int,	match_type		)
-		__field(	int,	match_id		)
-		__field(	int,	range			)
-		__field(	int,	exclusive_pid		)
+		__field(int, pid)
+		__field(int, cpu)
+		__field(int, commit_type)
+		__field(int, commit_level)
+		__field(int, match_type)
+		__field(int, match_id)
+		__field(int, range)
+		__field(int, exclusive_pid)
 	),
 
 	TP_fast_assign(
-		__entry->pid		= p->pid;
-		__entry->cpu		= cpu;
-		__entry->commit_type	= commit_type;
-		__entry->commit_level	= commit_level;
-		__entry->match_type	= match_type;
-		__entry->match_id	= match_id;
-		__entry->range		= range;
-		__entry->exclusive_pid	= exclusive_pid;
+		__entry->pid = p->pid;
+		__entry->cpu = cpu;
+		__entry->commit_type = commit_type;
+		__entry->commit_level = commit_level;
+		__entry->match_type = match_type;
+		__entry->match_id = match_id;
+		__entry->range = range;
+		__entry->exclusive_pid = exclusive_pid;
 	),
 
 	TP_printk(
@@ -389,15 +389,15 @@ TRACE_EVENT(mos_util_thread_assigned,
 	TP_ARGS(cpu, num_cpus, placed),
 
 	TP_STRUCT__entry(
-		__field(	int,	cpu			)
-		__field(	int,	num_cpus		)
-		__field(	int,	placed			)
+		__field(int, cpu)
+		__field(int, num_cpus)
+		__field(int, placed)
 	),
 
 	TP_fast_assign(
-		__entry->cpu		= cpu;
-		__entry->num_cpus	= num_cpus;
-		__entry->placed		= placed;
+		__entry->cpu = cpu;
+		__entry->num_cpus = num_cpus;
+		__entry->placed = placed;
 	),
 
 	TP_printk("cpu=%d num_cpus_allowed=%d placement_honored=%d",
@@ -415,19 +415,19 @@ TRACE_EVENT(mos_util_thread_pushed,
 	TP_ARGS(from_cpu, to_cpu, p, num_cpus, placed),
 
 	TP_STRUCT__entry(
-		__field(	int,	from_cpu		)
-		__field(	int,	to_cpu			)
-		__field(	int,	pid			)
-		__field(	int,	num_cpus		)
-		__field(	int,	placed			)
+		__field(int, from_cpu)
+		__field(int, to_cpu)
+		__field(int, pid)
+		__field(int, num_cpus)
+		__field(int, placed)
 	),
 
 	TP_fast_assign(
-		__entry->from_cpu	= from_cpu;
-		__entry->to_cpu		= to_cpu;
-		__entry->pid		= p->pid;
-		__entry->num_cpus	= num_cpus;
-		__entry->placed		= placed;
+		__entry->from_cpu = from_cpu;
+		__entry->to_cpu = to_cpu;
+		__entry->pid = p->pid;
+		__entry->num_cpus = num_cpus;
+		__entry->placed = placed;
 	),
 
 	TP_printk(
@@ -446,13 +446,13 @@ TRACE_EVENT(mos_clone_attr_active,
 	TP_ARGS(behavior, placement),
 
 	TP_STRUCT__entry(
-		__field(	unsigned int,	behavior	)
-		__field(	unsigned int,	placement	)
+		__field(unsigned int, behavior)
+		__field(unsigned int, placement)
 	),
 
 	TP_fast_assign(
-		__entry->behavior	= behavior;
-		__entry->placement	= placement;
+		__entry->behavior = behavior;
+		__entry->placement = placement;
 	),
 
 	TP_printk("behavior=%d placement=%d",
@@ -469,13 +469,13 @@ TRACE_EVENT(mos_clone_attr_cleared,
 	TP_ARGS(behavior, placement),
 
 	TP_STRUCT__entry(
-		__field(	unsigned int,	behavior	)
-		__field(	unsigned int,	placement	)
+		__field(unsigned int, behavior)
+		__field(unsigned int, placement)
 	),
 
 	TP_fast_assign(
-		__entry->behavior	= behavior;
-		__entry->placement	= placement;
+		__entry->behavior = behavior;
+		__entry->placement = placement;
 	),
 
 	TP_printk("previous behavior=%d placement=%d",
@@ -493,15 +493,15 @@ TRACE_EVENT(mos_select_main_thread_home,
 	TP_ARGS(p, cpu),
 
 	TP_STRUCT__entry(
-		__field( 	int,	pid		)
-		__field(	int,	from_cpu	)
-		__field(	int,	to_cpu		)
+		__field(int, pid)
+		__field(int, from_cpu)
+		__field(int, to_cpu)
 	),
 
 	TP_fast_assign(
-		__entry->pid		= p->pid;
-		__entry->from_cpu	= p->mos.cpu_home;
-		__entry->to_cpu		= cpu;
+		__entry->pid = p->pid;
+		__entry->from_cpu = p->mos.cpu_home;
+		__entry->to_cpu = cpu;
 	),
 
 	TP_printk("pid=%d from cpu=%d to cpu=%d",
@@ -519,10 +519,10 @@ TRACE_EVENT(mos_mwait_cstates_configured,
 	TP_ARGS(min_cstate, max_cstate, ecx, substates),
 
 	TP_STRUCT__entry(
-		__field( 	unsigned int,	min_cstate	)
-		__field(	unsigned int,	max_cstate	)
-		__field(	unsigned int,	ecx		)
-		__field(	unsigned int,	substates	)
+		__field(unsigned int, min_cstate)
+		__field(unsigned int, max_cstate)
+		__field(unsigned int, ecx)
+		__field(unsigned int, substates)
 	),
 
 	TP_fast_assign(
@@ -538,53 +538,7 @@ TRACE_EVENT(mos_mwait_cstates_configured,
 );
 
 /*
- * IDLE loop entering mwait
- */
-TRACE_EVENT(mos_mwait_idle_entry,
-
-	TP_PROTO(unsigned int ecx, unsigned int eax),
-
-	TP_ARGS(ecx, eax),
-
-	TP_STRUCT__entry(
-		__field(	unsigned int,	ecx	)
-		__field(	unsigned int,	eax	)
-	),
-
-	TP_fast_assign(
-		__entry->ecx		= ecx;
-		__entry->eax		= eax;
-	),
-
-	TP_printk("Enter MWAIT... ecx=%08x eax=%08x",
-			__entry->ecx, __entry->eax)
-);
-
-/*
- * IDLE loop exiting mwait
- */
-TRACE_EVENT(mos_mwait_idle_exit,
-
-	TP_PROTO(unsigned int ecx, unsigned int eax),
-
-	TP_ARGS(ecx, eax),
-
-	TP_STRUCT__entry(
-		__field(	unsigned int,	ecx	)
-		__field(	unsigned int,	eax	)
-	),
-
-	TP_fast_assign(
-		__entry->ecx		= ecx;
-		__entry->eax		= eax;
-	),
-
-	TP_printk("...Leave MWAIT ecx=%08x eax=%08x",
-			__entry->ecx, __entry->eax)
-);
-
-/*
- * IDLE loop entering mwait
+ * MWAIT API entering mwait
  */
 TRACE_EVENT(mos_mwait_api_entry,
 
@@ -593,13 +547,13 @@ TRACE_EVENT(mos_mwait_api_entry,
 	TP_ARGS(ecx, eax),
 
 	TP_STRUCT__entry(
-		__field(	unsigned int,	ecx	)
-		__field(	unsigned int,	eax	)
+		__field(unsigned int, ecx)
+		__field(unsigned int, eax)
 	),
 
 	TP_fast_assign(
-		__entry->ecx		= ecx;
-		__entry->eax		= eax;
+		__entry->ecx = ecx;
+		__entry->eax = eax;
 	),
 
 	TP_printk("Enter MWAIT... ecx=%08x eax=%08x",
@@ -607,7 +561,7 @@ TRACE_EVENT(mos_mwait_api_entry,
 );
 
 /*
- * IDLE loop exiting mwait
+ * MWAIT API exiting mwait
  */
 TRACE_EVENT(mos_mwait_api_exit,
 
@@ -616,19 +570,18 @@ TRACE_EVENT(mos_mwait_api_exit,
 	TP_ARGS(ecx, eax),
 
 	TP_STRUCT__entry(
-		__field(	unsigned int,	ecx	)
-		__field(	unsigned int,	eax	)
+		__field(unsigned int, ecx)
+		__field(unsigned int, eax)
 	),
 
 	TP_fast_assign(
-		__entry->ecx		= ecx;
-		__entry->eax		= eax;
+		__entry->ecx = ecx;
+		__entry->eax = eax;
 	),
 
 	TP_printk(".d..Leave MWAIT ecx=%08x eax=%08x",
 			__entry->ecx, __entry->eax)
 );
-
 
 #endif /* _TRACE_MOS_H */
 

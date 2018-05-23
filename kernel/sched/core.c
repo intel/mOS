@@ -1133,6 +1133,12 @@ static int __set_cpus_allowed_ptr(struct task_struct *p,
 		goto out;
 	}
 
+	if (is_mos_process(p) &&
+	    !is_migration_mask_valid_mos(new_mask, p)) {
+		ret = -EINVAL;
+		goto out;
+	}
+
 	do_set_cpus_allowed(p, new_mask);
 
 	if (!IS_ENABLED(CONFIG_MOS_SCHEDULER)) {

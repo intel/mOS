@@ -130,11 +130,14 @@ struct mos_process_t {
 	/* Original cpus_allowed mask at launch */
 	cpumask_var_t original_cpus_allowed;
 	/* Correctable machine check interrupt polling */
-	bool mce_polling_disabled;
+	bool mce_modifications_active;
 	/* Control migration of system calls */
 	bool move_syscalls_disable;
 	/* Enabled round-robin threads. Value=timeslice in ms */
 	int enable_rr;
+	/* Idle control fields */
+	int idle_mechanism;
+	int idle_boundary;
 	/* Disable sched_setaffinity. Value = errno+1 */
 	int disable_setaffinity;
 	/* Logging verbosity for scheduler statistics */
@@ -147,6 +150,10 @@ struct mos_process_t {
 	int overcommit_behavior;
 	/* One CPU or multiple CPUs allowed for a utility thread */
 	int allowed_cpus_per_util;
+	/* Correcable machine check interrupt enablement and threshold */
+	unsigned int cmci_threshold;
+	/* Correcable machine check polling enablement */
+	bool correctable_mcheck_polling;
 	/* List of utility threads on LWK CPUs */
 	struct list_head util_list;
 	/* Mutex for controlling the util_list */
@@ -204,6 +211,11 @@ extern void lwkctl_def_partition(void);
 
 #ifdef CONFIG_MOS_SCHEDULER
 /* Scheduler additions go here */
+extern void mce_lwkprocess_begin(cpumask_t *lwkcpus, unsigned int threshold,
+				 bool poll_enable);
+extern void mce_lwkprocess_end(cpumask_t *lwkcpus, bool reset_threshold,
+				bool reenable_poll);
+
 enum mos_match_cpu {
 	mos_match_cpu_FirstAvail = 0,
 	mos_match_cpu_SameCore,

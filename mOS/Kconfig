@@ -63,21 +63,22 @@ config MOS_SCHEDULER
 	  is under the control of the mOS scheduler.
 
 	  This feature remains disabled unless you specify which CPUs
-	  are designated as LWK CPUs with the mos_syscall_cpus kernel
+	  are designated as LWK CPUs with the lwkcpus kernel
 	  command line option.
 config MOS_MOVE_SYSCALLS
 	bool "Run system calls on subset of CPUs"
 	depends on MOS_FOR_HPC
 	---help---
-	  Affinitize threads onto a "syscall CPU" upon entry to most
+	  Affinitize threads onto a "utility CPU" upon entry to many
 	  system calls, reverting the affinity mask once the system call
 	  is complete. In effect, system call processing is only
-	  performed on syscall CPUs, while userspace processing is
+	  performed on utility CPUs, while userspace processing is
 	  unconstrained.
 
 	  This feature remains disabled unless you specify which CPUs
 	  should move syscalls onto which other CPUs with the
-	  mos_syscall_cpus kernel command line option.
+	  lwkcpus kernel command line option or with the creation of an
+          lwk partition using the lwkctl command.
 
 	  Unless you operate a top-500 supercomputer, say N.
 

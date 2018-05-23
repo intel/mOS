@@ -623,10 +623,21 @@ struct mos_rq {
 	unsigned int shallow_sleep_mwait;
 	unsigned int deep_sleep_mwait;
 
+	/* Power management */
+	unsigned int idle_mechanism;
+	unsigned int idle_boundary;
+	bool mwait_supported;
+	bool mwait_tlbs_flushed;
+
+	bool api_timeout;
+
 	/* Number of mOS utility threads committed to run on this CPU. */
 	unsigned int utility_commits;
 	/* Number of mOS compute threads committed to run on this CPU */
 	unsigned int compute_commits;
+
+	/* mwait API timer */
+	struct timer_list api_timer;
 
 	/* Scheduler statistics */
 	struct mos_sched_stats stats;
