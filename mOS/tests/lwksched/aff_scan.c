@@ -37,7 +37,7 @@
  *    specific # of cpus or to number available in system.
  *
  *  Possible additions
- *    - Check syscall cpu id?  How?  Helper thread/process?  The migration
+ *    - Check utility cpu id?  How?  Helper thread/process?  The migration
  *    tests use System Tap, don't really want that dependency here.
  *    - Add work loads?
  *    - Exercise a greater variety of system calls?

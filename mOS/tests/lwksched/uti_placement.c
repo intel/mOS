@@ -54,6 +54,7 @@ static pthread_cond_t count_cv;
 static int uthreads_finished;
 static int cthreads_finished;
 static int numtests;
+static int numskipped;
 static int numutils_created;
 static int numcomputes_created;
 static int numfails;
@@ -116,11 +117,11 @@ static struct {
 
 static int num_lwkcpus;
 static int lwkcpus_in_node[NUMNODES];
-static int linuxcpus_in_node[NUMNODES];
+static int utilitycpus_in_node[NUMNODES];
 static int util_thread_count[MAX_CPUS];
 static int compute_thread_count[MAX_CPUS];
 static int num_nodes_containing_lwkcpus;
-static int num_nodes_containing_linuxcpus;
+static int num_nodes_containing_utilitycpus;
 static int overcommit_behavior = OnlyUtilityCommits;
 
 static void *myuthread(void *arg)
@@ -323,16 +324,17 @@ static int begintest(int testnum)
 		/* Subtesting not active. Already ran our test once */
 		return 0;
 	numtests = testnum;
+	if (!num_uthreads) {
+		numskipped++;
+		return 0;
+	}
 	init_nodes();
 	init_uthreads();
 	init_cthreads();
 	pthread_cond_init(&count_cv, NULL);
 	pthread_mutex_init(&count_lock, NULL);
 	pthread_mutex_init(&lock, NULL);
-	if (!num_uthreads)
-		log_msg(LOG_INFO, "Test=%d being skipped.",
-				numtests);
-	else
+	if (num_uthreads)
 		log_msg(LOG_INFO, "Beginning test=%d...", numtests);
 	return 1;
 }
@@ -637,9 +639,10 @@ static void end_test(int expected_utils, int expected_computes)
 
 static int summarize(void)
 {
-	log_msg(LOG_INFO, "Tests run: %d Successes: %d Failures: %d",
-		numtests, numsuccess, numfails);
-	if (numfails || (numtests != (numsuccess + numfails)))
+	log_msg(LOG_INFO,
+	    "Tests run: %d Successes: %d Failures: %d Skipped: %d",
+		numtests, numsuccess, numfails, numskipped);
+	if (numfails || (numtests != (numsuccess + numskipped)))
 		return -1;
 	return 0;
 }
@@ -666,6 +669,7 @@ int main(int argc, char **argv)
 	long int rc;
 	long int uindex;
 	long int cindex;
+	int testnum = 0;
 	int i, j;
 	int valid_environment;
 	unsigned long node_mask;
@@ -690,7 +694,7 @@ int main(int argc, char **argv)
 		  .path = "/sys/kernel/mOS/lwkcpus_mask",
 		  .required = 1 },
 		{ .set = &linuxutilcpus,
-		  .path = "/sys/kernel/mOS/lwkcpus_syscall_mask",
+		  .path = "/sys/kernel/mOS/utility_cpus_mask",
 		  .required = 1 },
 		{ .set = &nodecpus[0],
 		  .path = "/sys/devices/system/node/node0/cpumap",
@@ -804,9 +808,9 @@ int main(int argc, char **argv)
 		if (lwkcpus_in_node[i])
 			num_nodes_containing_lwkcpus++;
 		CPU_AND_S(setsize, cpuset_temp, linuxutilcpus, nodecpus[i]);
-		linuxcpus_in_node[i] = CPU_COUNT_S(setsize, cpuset_temp);
-		if (linuxcpus_in_node[i])
-			num_nodes_containing_linuxcpus++;
+		utilitycpus_in_node[i] = CPU_COUNT_S(setsize, cpuset_temp);
+		if (utilitycpus_in_node[i])
+			num_nodes_containing_utilitycpus++;
 	}
 	/* Seed the random number generator */
 	srandom(time(NULL));
@@ -817,9 +821,11 @@ int main(int argc, char **argv)
 	 * Test 1: Create two util threads on same numa domain
 	 ****************************************************
 	 */
+	testnum++;
+
 	/* Prep environment for starting testcase */
 	num_uthreads = 2;
-	while (begintest(1)) {
+	while (begintest(testnum)) {
 		for (uindex = 0; uindex < num_uthreads; uindex++) {
 
 			/* Set test expectations for each utility thread */
@@ -847,16 +853,19 @@ int main(int argc, char **argv)
 	 * Test 2: Create two util threads on different numa domain
 	 *********************************************************
 	 */
+	testnum++;
 
 	/* Determine if the environment supports this test */
 	if (num_nodes_containing_lwkcpus < 2) {
-		log_msg(LOG_DEBUG, "Test requires more than one domain.");
+		log_msg(LOG_INFO,
+		    "Skipping test=%d. Requires more than one domain.",
+		    testnum);
 		num_uthreads = 0; /* Skip test */
 	} else
 		num_uthreads = 2;
 
 	/* Prep environment for starting testcase */
-	while (begintest(2)) {
+	while (begintest(testnum)) {
 		for (uindex = 0; uindex < num_uthreads; uindex++) {
 
 			/* Set test expectations for each utility thread */
@@ -884,10 +893,11 @@ int main(int argc, char **argv)
 	 * Test 3: Create a util thread in same L2 cache
 	 ****************************************************
 	 */
+	testnum++;
 
 	/* Prep environment for starting testcase */
 	num_uthreads = 1;
-	while (begintest(3)) {
+	while (begintest(testnum)) {
 		for (uindex = 0; uindex < num_uthreads; uindex++) {
 
 			/* Set test expectations for each utility thread */
@@ -914,10 +924,11 @@ int main(int argc, char **argv)
 	 * Test 4: Create two util threads on different L2 caches
 	 *********************************************************
 	 */
+	testnum++;
 
 	/* Prep environment for starting testcase */
 	num_uthreads = 2;
-	while (begintest(4)) {
+	while (begintest(testnum)) {
 		for (uindex = 0; uindex < num_uthreads; uindex++) {
 
 			/* Set test expectations for each utility thread */
@@ -945,10 +956,17 @@ int main(int argc, char **argv)
 	 *         and two util threads explicitly on FWK CPUs
 	 *********************************************************
 	 */
+	testnum++;
 
 	/* Prep environment for starting testcase */
-	num_uthreads = 4;
-	while (begintest(5)) {
+	if (!num_nodes_containing_utilitycpus) {
+		log_msg(LOG_INFO,
+		    "Skipping test=%d. Requires at least one utility CPU.",
+		    testnum);
+		num_uthreads = 0; /* Skip test */
+	} else
+		num_uthreads = 4;
+	while (begintest(testnum)) {
 		for (uindex = 0; uindex < num_uthreads; uindex++) {
 
 			/* Set test expectations for each utility thread */
@@ -977,17 +995,18 @@ int main(int argc, char **argv)
 	}
 	/*
 	 *********************************************************
-	 * Test 6: Create four util threads explicitly on Linux CPUs
+	 * Test 6: Create four util threads explicitly on Utility CPUs
 	 *         and in a different numa domain as the caller
 	 *********************************************************
 	 */
+	testnum++;
 
 	/* Determine if the environment supports this test */
 	valid_environment = 0;
 	for (i = 0; i < NUMNODES; i++) {
 		if (i == my_nodeid)
 			continue;
-		if (linuxcpus_in_node[i]) {
+		if (utilitycpus_in_node[i]) {
 			valid_environment = 1;
 			break;
 		}
@@ -996,11 +1015,12 @@ int main(int argc, char **argv)
 		num_uthreads = 4;
 	else {
 		num_uthreads = 0; /* Skip test */
-		log_msg(LOG_DEBUG,
-			"Test requires Linux CPU in a different numa domain.");
+		log_msg(LOG_INFO,
+			"Skipping test=%d. Requires Utility CPU in a different numa domain.",
+			testnum);
 	}
 	/* Prep environment for starting testcase */
-	while (begintest(6)) {
+	while (begintest(testnum)) {
 		for (uindex = 0; uindex < num_uthreads; uindex++) {
 
 			/* Set test expectations for each utility thread */
@@ -1030,6 +1050,7 @@ int main(int argc, char **argv)
 	 *         and explicity on all available numa domains
 	 *********************************************************
 	 */
+	testnum++;
 
 	/* Prep environment for starting testcase */
 	num_uthreads = num_nodes_containing_lwkcpus;
@@ -1038,7 +1059,7 @@ int main(int argc, char **argv)
 			numa_list[j++] = i;
 	}
 	node_mask = 1;
-	while (begintest(7)) {
+	while (begintest(testnum)) {
 		log_msg(LOG_DEBUG,
 		    "Explicitly setting threads on %d numa domains.",
 				num_uthreads);
@@ -1075,11 +1096,12 @@ int main(int argc, char **argv)
 	 *         and explicity specify invalid domains
 	 *********************************************************
 	 */
+	testnum++;
 
 	/* Prep environment for starting testcase */
 	num_uthreads = 2;
 	node_mask = 0x10;
-	while (begintest(8)) {
+	while (begintest(testnum)) {
 		for (uindex = 0; uindex < num_uthreads; uindex++) {
 
 			/* Set test expectations for each utility thread */
@@ -1112,19 +1134,27 @@ int main(int argc, char **argv)
 	 *         and explicity in a valid domain
 	 *********************************************************
 	 */
+	testnum++;
 
 	/* Prep environment for starting testcase */
-	num_uthreads = 2;
+	if (!num_nodes_containing_utilitycpus) {
+		log_msg(LOG_INFO,
+		    "Skipping test=%d. Requires at least one utility CPU.",
+		    testnum);
+		num_uthreads = 0; /* Skip test */
+	} else
+		num_uthreads = 2;
+
 	/* Find the first domain that contains a Linux utility CPU */
 	node_mask = 1;
 	for (i = 0; i < NUMNODES; i++) {
-		if (linuxcpus_in_node[i])
+		if (utilitycpus_in_node[i])
 			break;
 	}
 	/* Set the node mask to this domain */
 	node_mask <<= i;
 
-	while (begintest(9)) {
+	while (begintest(testnum)) {
 		for (uindex = 0; uindex < num_uthreads; uindex++) {
 
 			/* Set test expectations for each utility thread */
@@ -1156,10 +1186,11 @@ int main(int argc, char **argv)
 	 * Test 10:  Testing conflicting domain placement requests
 	 ***************************************************************
 	 */
+	testnum++;
 
 	/* Prep environment for starting testcase */
 	num_uthreads = 1;
-	while (begintest(10)) {
+	while (begintest(testnum)) {
 		/* Set test expectations */
 		uthread[0].api_retval_expected = EINVAL;
 
@@ -1182,10 +1213,11 @@ int main(int argc, char **argv)
 	 * Test 11:  Testing conflicting cache placement requests
 	 ***************************************************************
 	 */
+	testnum++;
 
 	/* Prep environment for starting testcase */
 	num_uthreads = 1;
-	while (begintest(11)) {
+	while (begintest(testnum)) {
 		/* Set test expectations */
 		uthread[0].api_retval_expected = EINVAL;
 
@@ -1208,10 +1240,11 @@ int main(int argc, char **argv)
 	 * Test 12:  Testing conflicting cache placement requests
 	 ***************************************************************
 	 */
+	testnum++;
 
 	/* Prep environment for starting testcase */
 	num_uthreads = 1;
-	while (begintest(12)) {
+	while (begintest(testnum)) {
 		/* Set test expectations */
 		uthread[0].api_retval_expected = EINVAL;
 
@@ -1234,10 +1267,11 @@ int main(int argc, char **argv)
 	 * Test 13:  Testing conflicting cache placement requests
 	 ***************************************************************
 	 */
+	testnum++;
 
 	/* Prep environment for starting testcase */
 	num_uthreads = 1;
-	while (begintest(13)) {
+	while (begintest(testnum)) {
 		/* Set test expectations */
 		uthread[0].api_retval_expected = EINVAL;
 
@@ -1263,10 +1297,18 @@ int main(int argc, char **argv)
 	 *          in the same domain
 	 *********************************************************
 	 */
+	testnum++;
 
 	/* Prep environment for starting testcase */
-	num_uthreads = 4;
-	while (begintest(14)) {
+	if (!num_nodes_containing_utilitycpus) {
+		log_msg(LOG_INFO,
+		    "Skipping test=%d. Requires at least one utility CPU.",
+		    testnum);
+		num_uthreads = 0; /* Skip test */
+	} else
+		num_uthreads = 4;
+
+	while (begintest(testnum)) {
 		/* Generate a new location key */
 		location_key  = random();
 
@@ -1303,10 +1345,18 @@ int main(int argc, char **argv)
 	 *          in the same L2
 	 *********************************************************
 	 */
+	testnum++;
 
 	/* Prep environment for starting testcase */
-	num_uthreads = 4;
-	while (begintest(15)) {
+	if (!num_nodes_containing_utilitycpus) {
+		log_msg(LOG_INFO,
+		    "Skipping test=%d. Requires at least one utility CPU.",
+		    testnum);
+		num_uthreads = 0; /* Skip test */
+	} else
+		num_uthreads = 4;
+
+	while (begintest(testnum)) {
 		/* Generate a new location key */
 		location_key  = random();
 
@@ -1343,10 +1393,18 @@ int main(int argc, char **argv)
 	 *          in different domains
 	 *********************************************************
 	 */
+	testnum++;
 
 	/* Prep environment for starting testcase */
-	num_uthreads = 2;
-	while (begintest(16)) {
+	if (num_nodes_containing_utilitycpus < 2) {
+		log_msg(LOG_INFO,
+		    "Skipping test=%d. Requires utility CPUs in two domains.",
+		    testnum);
+		num_uthreads = 0; /* Skip test */
+	} else
+		num_uthreads = 2;
+
+	while (begintest(testnum)) {
 		location_key = random();
 
 		for (uindex = 0; uindex < num_uthreads; uindex++) {
@@ -1386,11 +1444,18 @@ int main(int argc, char **argv)
 	 *          a future testcase enhancement.
 	 *********************************************************
 	 */
+	testnum++;
 
 	/* Prep environment for starting testcase */
-	num_uthreads = 2;
+	if (!num_nodes_containing_utilitycpus) {
+		log_msg(LOG_INFO,
+		    "Skipping test=%d. Requires at least one utility CPU.",
+		    testnum);
+		num_uthreads = 0; /* Skip test */
+	} else
+		num_uthreads = 2;
 
-	while (begintest(17)) {
+	while (begintest(testnum)) {
 		for (uindex = 0; uindex < num_uthreads; uindex++) {
 
 			/* Set test expectations for each utility thread */
@@ -1420,11 +1485,18 @@ int main(int argc, char **argv)
 	 *          is surfaced as an invalid specification.
 	 *********************************************************
 	 */
+	testnum++;
 
 	/* Prep environment for starting testcase */
-	num_uthreads = 1;
+	if (!num_nodes_containing_utilitycpus) {
+		log_msg(LOG_INFO,
+		    "Skipping test=%d. Requires at least one utility CPU.",
+		    testnum);
+		num_uthreads = 0; /* Skip test */
+	} else
+		num_uthreads = 1;
 
-	while (begintest(18)) {
+	while (begintest(testnum)) {
 		for (uindex = 0; uindex < num_uthreads; uindex++) {
 
 			/* Set test expectations for each utility thread */
@@ -1455,12 +1527,13 @@ int main(int argc, char **argv)
 	 *          scheduler has placed the threads appropriately
 	 **********************************************************
 	 */
+	testnum++;
 
 	/* Prep environment for starting testcase */
 	num_uthreads = num_lwkcpus; /* 1 on each CPU */
 	num_cthreads = num_lwkcpus - 1; /* 1 on each CPU */
 
-	while (begintest(19)) {
+	while (begintest(testnum)) {
 		uindex = 0;
 		cindex = 0;
 		while (uindex < num_uthreads || cindex < num_cthreads) {
@@ -1558,12 +1631,13 @@ int main(int argc, char **argv)
 	 *          threads appropriately.
 	 **********************************************************
 	 */
+	testnum++;
 
 	/* Prep environment for starting testcase */
 	num_uthreads = num_lwkcpus; /* 1 on each CPU */
 	num_cthreads = num_lwkcpus - 1; /* 1 on each CPU */
 
-	while (begintest(20)) {
+	while (begintest(testnum)) {
 		for (cindex = 0; cindex < num_cthreads; cindex++) {
 			/* Set test expectations for each compute thread */
 			cthread[cindex].enable_compute_cpu_share_test = 1;
@@ -1637,12 +1711,13 @@ int main(int argc, char **argv)
 	 *          scheduler has placed one compute on each CPU.
 	 **********************************************************
 	 */
+	testnum++;
 
 	/* Prep environment for starting testcase */
 	num_uthreads = num_lwkcpus; /* 1 on each CPU */
 	num_cthreads = num_lwkcpus - 1; /* 1 on each CPU */
 
-	while (begintest(21)) {
+	while (begintest(testnum)) {
 		for (uindex = 0; uindex < num_uthreads; uindex++) {
 			/* Set test expectations for each utility thread */
 			uthread[uindex].cputype_expected = CPUTYPE_LWK;
@@ -1726,12 +1801,13 @@ int main(int argc, char **argv)
 	 *          compute thread on each CPU.
 	 **********************************************************************
 	 */
+	testnum++;
 
 	/* Prep environment for starting testcase */
 	num_uthreads = num_lwkcpus * 2; /* 2  on each CPU */
 	num_cthreads = num_lwkcpus - 1; /* 1 on each CPU */
 
-	while (begintest(22)) {
+	while (begintest(testnum)) {
 		for (uindex = 0; uindex < num_uthreads; uindex++) {
 			/* Set test expectations for each utility thread */
 			uthread[uindex].cputype_expected = CPUTYPE_LWK;
@@ -1819,6 +1895,7 @@ int main(int argc, char **argv)
 	 *          CPUs.
 	 **********************************************************************
 	 */
+	testnum++;
 
 	/* Prep environment for starting testcase */
 	num_uthreads = 1;
@@ -1828,11 +1905,12 @@ int main(int argc, char **argv)
 	 */
 	num_cthreads = num_lwkcpus - 1 - num_uthreads;
 
-	while (begintest(23)) {
+	while (begintest(testnum)) {
 		for (uindex = 0; uindex < num_uthreads; uindex++) {
 			/* Set test expectations for each utility thread */
 			uthread[uindex].cputype_expected = CPUTYPE_LWK;
-			uthread[uindex].enable_compute_cpu_share_test = 1;
+			if (overcommit_behavior == AllCommits)
+				uthread[uindex].enable_compute_cpu_share_test = 1;
 			uthread[uindex].share_level_computes = 0;
 			uthread[uindex].enable_util_cpu_share_test = 1;
 			uthread[uindex].share_level_utils = 1;
@@ -1853,10 +1931,11 @@ int main(int argc, char **argv)
 		}
 		for (cindex = 0; cindex < num_cthreads; cindex++) {
 			/* Set test expectations for each compute thread */
+			if (overcommit_behavior == AllCommits)
+				cthread[cindex].enable_util_cpu_share_test = 1;
+			cthread[cindex].share_level_utils = 0;
 			cthread[cindex].enable_compute_cpu_share_test = 1;
 			cthread[cindex].share_level_computes = 1;
-			cthread[cindex].enable_util_cpu_share_test = 1;
-			cthread[cindex].share_level_utils = 0;
 			cthread[cindex].api_retval_expected = 0;
 			cthread[cindex].cputype_expected = CPUTYPE_LWK;
 
@@ -1883,12 +1962,13 @@ int main(int argc, char **argv)
 	 *          needing exclusive use of a CPU.
 	 **********************************************************************
 	 */
+	testnum++;
 
 	/* Prep environment for starting testcase */
 	num_uthreads = 3;
 	num_cthreads = num_lwkcpus;
 
-	while (begintest(24)) {
+	while (begintest(testnum)) {
 		for (uindex = 0; uindex < num_uthreads; uindex++) {
 			/* Set test expectations for each utility thread */
 			uthread[uindex].cputype_expected = CPUTYPE_LWK;
@@ -1934,18 +2014,19 @@ int main(int argc, char **argv)
 	/*
 	 **********************************************************************
 	 * Test 25: Create an environment where all CPUs are occuppied by
-	 *          icompute threads and utility threads and then attempt to
+	 *          compute threads and utility threads and then attempt to
 	 *          create a utility thread that requires an exclusive CPU.
 	 *          Verify that the the API returns an indication that the
 	 *          requested exclusive behavior was not honored.
 	 **********************************************************************
 	 */
+	testnum++;
 
 	/* Prep environment for starting testcase */
 	num_uthreads = 3;
 	num_cthreads = num_lwkcpus - num_uthreads;
 
-	while (begintest(25)) {
+	while (begintest(testnum)) {
 		for (cindex = 0; cindex < num_cthreads; cindex++) {
 			/* Set test expectations for each compute thread */
 			cthread[cindex].api_retval_expected = 0;

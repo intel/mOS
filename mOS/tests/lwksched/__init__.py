@@ -89,7 +89,7 @@ class Basics(TestCase):
     def test_util_max_cpus_enforced(self):
         # Create number of utility threads greater than the max number of
         # allowed utility CPUs. Verify that the extra utility threads
-        # are placed on the syscall target CPUs and we do not exceed the
+        # are placed on the utility CPUs and we do not exceed the
         # max number of LWK CPUs for utility thread usage.
         v = ['--debug'] if ARGS.test_debug else []
         rng = range(1,8)
@@ -167,7 +167,7 @@ class Basics(TestCase):
         # Place worker and utility threads on LWK CPUs allowing overcommit of
         # utility threads. Verify that that overcommittment
         # occurs. Create additional worker threads to push utility threads
-        # to the syscall cpus. Verify that the push occurs.
+        # to the utility cpus. Verify that the push occurs.
         v = ['--debug'] if ARGS.test_debug else []
         rng = range(1,8)
         for maxutilcpus in rng:
@@ -210,7 +210,7 @@ class Basics(TestCase):
         v = ['--debug'] if ARGS.test_debug else []
         rng = range(4)
         for n in rng:
-            rng2 = range(-1,3)
+            rng2 = range(1,3)
             for x in rng2:
                 with self.subTest(utils=n, threads=len(LWK_CPUS) - 2 + n):
                     yod(self,
@@ -226,7 +226,7 @@ class Basics(TestCase):
                         '--maxutilspercpu', x,
                         *v)
         for n in rng:
-            rng2 = range(-1,3)
+            rng2 = range(1,3)
             for x in rng2:
                 with self.subTest(utils=n, threads=len(LWK_CPUS) - 2 + n):
                     yod(self,
@@ -279,6 +279,7 @@ class Syscalls(TestCase):
     require = [
         YOD,
         'set_clone_attr',
+        'mwait_api',
         ]
 
     def test_set_clone_attr(self):
@@ -287,6 +288,11 @@ class Syscalls(TestCase):
         yod(self, '-C', '1', '-M', 'all', './set_clone_attr', *v)
         # Verify correct clone behavior
         #
+
+    def test_mos_mwait(self):
+        v = ['--debug'] if ARGS.test_debug else []
+        # mos_mwait syscall validation
+        yod(self, './mwait_api', *v)
 
 class APIs(TestCase):
     require = [

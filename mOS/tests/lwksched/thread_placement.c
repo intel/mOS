@@ -70,7 +70,8 @@ static int get_scheduler_policy(void)
  *
  *   - ensure that the thread lands on an appropriate CPU.
  *   - ensure that the thread stays on the same CPU for the duration of
- *     the run unless it is a utility thread being pushed to a shared CPU.
+ *     the run unless it is a utility thread being pushed to a
+ *     utility CPU.
  *   - ensure that utility threads are pushed off lwkcpus when expected.
  *   - ensure that worker threads are not overcommitted on lwkcpus.
  *
@@ -148,11 +149,11 @@ static void *worker(void *arg)
 						goto out;
 					}
 				}
-				/* Test we moved to a shared utility CPU */
+				/* Test we moved to a utility CPU */
 				if (!CPU_ISSET_S(cpu_now, setsize,
 						 lwkcpus_util_shared)) {
 					log_msg(LOG_ERR, CPUFMT
-						" CPU migration violation: target %d (PID=%d) is not a shared utility CPU.",
+						" CPU migration violation: target %d (PID=%d) is not a utility CPU.",
 						tid, syscall(SYS_gettid),
 						cpu_now);
 					rc--;
@@ -167,7 +168,7 @@ static void *worker(void *arg)
 
 					if (policy != SCHED_OTHER) {
 						log_msg(LOG_ERR,
-							"Utility (PID=%d) on syscall CPU %d and not Linux policy (%d)\n",
+							"Utility thread (PID=%d) on utility CPU %d and not Linux policy (%d)\n",
 							syscall(SYS_gettid), cpu_now, policy);
 						rc--;
 						goto out;
@@ -260,11 +261,11 @@ int main(int argc, char **argv)
 		{ .set = &lwkcpus,
 		  .path = "/sys/kernel/mOS/lwkcpus_mask" },
 		{ .set = &lwkcpus_util_combined,
-		  .path = "/sys/kernel/mOS/lwkcpus_syscall_mask" },
+		  .path = "/sys/kernel/mOS/utility_cpus_mask" },
 		{ .set = &lwkcpus_reserved,
 		  .path = "/sys/kernel/mOS/lwkcpus_reserved_mask" },
 		{ .set = &lwkcpus_util_shared,
-		  .path = "/sys/kernel/mOS/lwkcpus_syscall_mask" },
+		  .path = "/sys/kernel/mOS/utility_cpus_mask" },
 		{ .set = &compute_threads,
 		  .path = 0 },
 		{ .set = &linuxcpus,
@@ -393,7 +394,7 @@ int main(int argc, char **argv)
 	}
 	/* Did the expected number of utility threads get pushed */
 	if ((n_threads + 1 < n_lwkcpus) || (n_util_threads == 0) ||
-	    (max_util_cpus == 0))
+	    (max_util_cpus == 0) || !CPU_COUNT_S(setsize, lwkcpus_util_shared))
 		expected_pushes = 0;
 	else
 		expected_pushes = MIN((n_threads + 1 - n_lwkcpus),
@@ -466,14 +467,15 @@ static int register_pthread(unsigned int tid, int cpu)
 	/*
 	 * Determine if overcommitment is not expected.
 	 * Any threads considered utility threads should be
-	 * pushed to the shared Linux CPUs before overcommitment
+	 * pushed to the utility CPUs before overcommitment
 	 * occurs. The only allowed condition for overcommmitment
 	 * of two compute threads is when the number of compute
 	 * threads exceeds the number of LWK CPUs.
 	 */
 	if ((CPU_ISSET_S(cpu, setsize, lwkcpus)) &&
 	    (CPU_ISSET_S(cpu, setsize, util_threads)) &&
-	    (max_utils_per_cpu == 1)) {
+	    (max_utils_per_cpu == 1) &&
+	    (CPU_COUNT_S(setsize, lwkcpus_util_shared))) {
 		log_msg(LOG_ERR,
 			"Utility thread (PID=%d) on CPU %d is being over-committed with a %s thread.",
 			syscall(SYS_gettid), cpu, pthread_type);
@@ -481,7 +483,8 @@ static int register_pthread(unsigned int tid, int cpu)
 	}
 
 	if ((CPU_ISSET_S(cpu, setsize, compute_threads)) &&
-	    ((n_threads - n_util_threads) <= n_lwkcpus)) {
+	    ((n_threads - n_util_threads) <= n_lwkcpus) &&
+	    (CPU_COUNT_S(setsize, lwkcpus_util_shared))) {
 		log_msg(LOG_ERR,
 			"Compute thread (PID=%d) on CPU %d is being over-committed with a %s thread.",
 			syscall(SYS_gettid), cpu, pthread_type);
@@ -511,8 +514,9 @@ static int register_pthread(unsigned int tid, int cpu)
 	 * than the maximum allowed number of utility CPUs.
 	 */
 	CPU_AND_S(setsize, temp_cpumask, lwkcpus, util_threads);
-	if (max_util_cpus >= 0 &&
-	    CPU_COUNT_S(setsize, temp_cpumask) > max_util_cpus) {
+	if ((max_util_cpus >= 0) &&
+	    (CPU_COUNT_S(setsize, temp_cpumask) > max_util_cpus) &&
+	    (CPU_COUNT_S(setsize, lwkcpus_util_shared))) {
 		log_msg(LOG_ERR,
 			"Utility threads occupying=%d CPUs. Max number of Utility CPUs allowed=%d.",
 			CPU_COUNT_S(setsize, temp_cpumask), max_util_cpus);
@@ -543,7 +547,7 @@ static int register_pthread(unsigned int tid, int cpu)
 		} else if (!CPU_ISSET_S(cpu, setsize, lwkcpus) &&
 			  !CPU_ISSET_S(cpu, setsize, lwkcpus_util_shared)) {
 			log_msg(LOG_ERR,
-			       "Utility thread (PID=%d) not on an LWK or syscall target CPU (%d).\n",
+			       "Utility thread (PID=%d) not on an LWK or a utility CPU (%d).\n",
 			       syscall(SYS_gettid), cpu);
 			rc--;
 		}
