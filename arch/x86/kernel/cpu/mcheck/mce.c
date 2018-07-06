@@ -2265,6 +2265,54 @@ static void mce_enable_ce(void *all)
 		__mcheck_cpu_init_timer();
 }
 
+/*
+ * When an LWK process is launched, this function will be called with a cpumask
+ * representing the CPUs reserved for the process. Polling will be disabled
+ * for correctable machine check events and correctable machine check interrupts
+ * will be disabled.
+ */
+void mce_lwkprocess_begin(cpumask_t *lwkcpus)
+{
+	int cpu;
+
+	if (!mce_available(raw_cpu_ptr(&cpu_info)))
+		return;
+	if (mca_cfg.ignore_ce == true)
+		return;
+	/* Disable the polling timer on each CPU in the mask */
+	for_each_cpu(cpu, lwkcpus)
+		del_timer_sync(&per_cpu(mce_timer, cpu));
+
+	/* Disable CMCI on each of the CPUs in the mask */
+	on_each_cpu_mask(lwkcpus, mce_disable_cmci, NULL, 1);
+}
+/*
+ * When an LWK process exits, this function will be called with a cpumask
+ * representing the CPUs reserved for the process. The state of machine check
+ * polling and correctable machine check interrupt enablement will be restored.
+ * An immediate poll of the machine check banks to flush out any events that
+ * may have accumulated during the process execution will be performed.
+ */
+void mce_lwkprocess_end(cpumask_t *lwkcpus)
+{
+	int cpu;
+
+	if (!mce_available(raw_cpu_ptr(&cpu_info)))
+		return;
+	if (mca_cfg.ignore_ce == true)
+		return;
+
+	/* Enable correctable error interrupts */
+	on_each_cpu_mask(lwkcpus, mce_enable_ce, NULL, 1);
+	/* Enable the polling timer on each CPU in the mask */
+	for_each_cpu(cpu, lwkcpus) {
+		struct timer_list *t = &per_cpu(mce_timer, cpu);
+
+		if (!timer_pending(t))
+			mce_start_timer(cpu, t);
+	}
+}
+
 static struct bus_type mce_subsys = {
 	.name		= "machinecheck",
 	.dev_name	= "machinecheck",

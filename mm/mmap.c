@@ -44,6 +44,8 @@
 #include <linux/userfaultfd_k.h>
 #include <linux/moduleparam.h>
 #include <linux/pkeys.h>
+#include <linux/mos.h>
+#include <linux/sizes.h>
 
 #include <asm/uaccess.h>
 #include <asm/cacheflush.h>
@@ -484,7 +486,10 @@ anon_vma_interval_tree_post_update_vma(struct vm_area_struct *vma)
 		anon_vma_interval_tree_insert(avc, &avc->anon_vma->rb_root);
 }
 
-static int find_vma_links(struct mm_struct *mm, unsigned long addr,
+#ifndef CONFIG_MOS_LWKMEM
+static
+#endif
+int find_vma_links(struct mm_struct *mm, unsigned long addr,
 		unsigned long end, struct vm_area_struct **pprev,
 		struct rb_node ***rb_link, struct rb_node **rb_parent)
 {
@@ -598,7 +603,10 @@ __vma_link(struct mm_struct *mm, struct vm_area_struct *vma,
 	__vma_link_rb(mm, vma, rb_link, rb_parent);
 }
 
-static void vma_link(struct mm_struct *mm, struct vm_area_struct *vma,
+#ifndef CONFIG_MOS_LWKMEM
+static
+#endif
+void vma_link(struct mm_struct *mm, struct vm_area_struct *vma,
 			struct vm_area_struct *prev, struct rb_node **rb_link,
 			struct rb_node *rb_parent)
 {
@@ -1152,6 +1160,9 @@ struct vm_area_struct *vma_merge(struct mm_struct *mm,
 					 end, prev->vm_pgoff, NULL, prev);
 		if (err)
 			return NULL;
+#ifdef CONFIG_MOS_LWKMEM
+		if (!is_lwkmem(prev))
+#endif
 		khugepaged_enter_vma_merge(prev, vm_flags);
 		return prev;
 	}
@@ -1179,6 +1190,9 @@ struct vm_area_struct *vma_merge(struct mm_struct *mm,
 		}
 		if (err)
 			return NULL;
+#ifdef CONFIG_MOS_LWKMEM
+		if (!is_lwkmem(area))
+#endif
 		khugepaged_enter_vma_merge(area, vm_flags);
 		return area;
 	}
@@ -2546,6 +2560,28 @@ static int __split_vma(struct mm_struct *mm, struct vm_area_struct *vma,
 			return err;
 	}
 
+#ifdef CONFIG_MOS_LWKMEM
+	if (is_lwkmem(vma) && (vma->vm_flags & VM_HUGEPAGE)) {
+		if ((vma->vm_flags & VM_LWK_1G) && !IS_ALIGNED(addr, SZ_1G)) {
+			pr_err("ERROR: %s() failed to split 1g TLB at %lx\n",
+				__func__, addr);
+			return -EINVAL;
+		}
+#if defined(CONFIG_X86_64) || defined(CONFIG_X86_PAE)
+		if (!IS_ALIGNED(addr, SZ_2M)) {
+			pr_err("ERROR: %s() failed to split 2m TLB at %lx\n",
+				__func__, addr);
+			return -EINVAL;
+		}
+#else
+		if (!IS_ALIGNED(addr, SZ_4M)) {
+			pr_err("ERROR: %s() failed to split 4m TLB at %lx\n",
+				__func__, addr);
+			return -EINVAL;
+		}
+#endif
+	}
+#endif
 	new = kmem_cache_alloc(vm_area_cachep, GFP_KERNEL);
 	if (!new)
 		return -ENOMEM;
@@ -2958,6 +2994,13 @@ void exit_mmap(struct mm_struct *mm)
 	if (mm->locked_vm) {
 		vma = mm->mmap;
 		while (vma) {
+#ifdef CONFIG_MOS_LWKMEM
+			if (is_lwkmem(vma)) {
+				pr_err("exit_mmap() not calling munlock_vma_pages_all()\n");
+				vma = vma->vm_next;
+				continue;
+			}
+#endif /* CONFIG_MOS_LWKMEM */
 			if (vma->vm_flags & VM_LOCKED)
 				munlock_vma_pages_all(vma);
 			vma = vma->vm_next;

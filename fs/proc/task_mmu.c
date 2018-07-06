@@ -15,6 +15,7 @@
 #include <linux/mmu_notifier.h>
 #include <linux/page_idle.h>
 #include <linux/shmem_fs.h>
+#include <linux/mos.h>
 
 #include <asm/elf.h>
 #include <asm/uaccess.h>
