@@ -94,6 +94,7 @@ static const char * const MAP_TYPES[] = {
 static struct map_type_t *yod_maps[YOD_NUM_MAP_ELEMS];
 
 int yod_verbosity = YOD_QUIET;
+int mpi_localnranks = 0;
 
 extern struct yod_plugin mos_plugin;
 static struct yod_plugin *plugin = &mos_plugin;
@@ -131,8 +132,9 @@ struct help_text {
 	{"Option", "Argument", "Description",},
 	{"----------------", "----------------",
 		    "--------------------------------"},
-	{"--resources, -R", "<fraction|all>", "Reserves a portion of LWK"},
-	{0, 0, "resources."},
+	{"--resources, -R", "<fraction|all|MPI>", "Reserves a portion of LWK"},
+	{0, 0, "resources.  If MPI is specified then MPI environment"},
+	{0, 0, "variables are used to determine the fractional amount."},
 	{"--cpus, -c", "<list>|all", "Reserves the LWK CPUs."},
 	{"--cores, -C", "<num>|all", "Reserves the LWK cores."},
 	{"--util_threads, -u", "<num>", "Specifies the number of utility"},
@@ -544,7 +546,8 @@ static int yod_simple_memory_selection_algorithm(lwk_request_t *this)
 			remainder = MIN(remainder, this->lwkmem_size_by_group[g]);
 			this->lwkmem_request[i] += remainder;
 			this->lwkmem_size_by_group[g] -= remainder;
-			yod_append_memory_nid(g, i, this);
+			if (remainder)
+				yod_append_memory_nid(g, i, this);
 			YOD_LOG(YOD_DEBUG,
 				"Selecting %'zd bytes from nid %zd / group %s ; remaining: %'zd",
 				remainder, i, MEM_GROUPS[g], this->lwkmem_size_by_group[g]);
@@ -565,7 +568,8 @@ static int yod_simple_memory_selection_algorithm(lwk_request_t *this)
 		remainder = MIN(remainder, this->lwkmem_size);
 		this->lwkmem_request[i] += remainder;
 		this->lwkmem_size -= remainder;
-		yod_append_memory_nid(yod_nid_to_mem_group(i), i, this);
+		if (remainder)
+			yod_append_memory_nid(yod_nid_to_mem_group(i), i, this);
 	}
 
 	return this->lwkmem_size ? -EBUSY : 0;
@@ -726,7 +730,8 @@ static void all_available_memsize_resolver(lwk_request_t *this)
 
 	for (i = 0; i < this->n_nids; i++) {
 		this->lwkmem_request[i] = this->lwkmem_designated[i] - this->lwkmem_reserved[i];
-		yod_append_memory_nid(yod_nid_to_mem_group(i), i, this);
+		if (this->lwkmem_request[i])
+			yod_append_memory_nid(yod_nid_to_mem_group(i), i, this);
 	}
 
 	this->lwkmem_size = 0; /* resolved */
@@ -1257,7 +1262,7 @@ static int yodopt_mem(const char *opt)
 
 static int yodopt_lwk_resources(const char *opt)
 {
-	double fraction;
+	double fraction = 0.0;
 
 	yodopt_check_for_cpus_already_specified();
 	yodopt_check_for_mem_already_specified();
@@ -1270,8 +1275,14 @@ static int yodopt_lwk_resources(const char *opt)
 		lwk_req.lwkcpus_resolver = all_available_lwk_cores_resolver;
 		lwk_req.memsize_resolver = all_available_memsize_resolver;
 		fraction = 1.0;
-	} else if (yodopt_parse_floating_point(opt, &fraction, 0.0, 1.0) == 0 ||
-		   yodopt_parse_rational(opt, &fraction, 0.0, 1.0) == 0) {
+	} else if (strcmp("MPI", opt) == 0 ||
+		   (yodopt_parse_floating_point(opt, &fraction, 0.0, 1.0) == 0 ||
+		    yodopt_parse_rational(opt, &fraction, 0.0, 1.0) == 0)) {
+		if (fraction == 0.0) {
+			if (!mpi_localnranks)
+				yod_abort(-EINVAL, "Invalid MPI_LOCALNRANKS value %u.", mpi_localnranks);
+			fraction = 1.0 / (double)mpi_localnranks;
+		}
 		requested_lwk_cores = fraction *
 			yod_count_by(get_designated_lwkcpus(), YOD_CORE);
 		lwk_req.lwkcpus_resolver = n_cores_lwkcpu_resolver;
@@ -1987,7 +1998,7 @@ static void set_mos_view(char *view_requested)
 int main(int argc, char **argv)
 {
 
-	char *verbose_env, *tst_plugin, *options;
+	char *verbose_env, *tst_plugin, *options, *mpi_env;
 	int rc;
 	char *timeout_str;
 	size_t i, total_mem;
@@ -1997,6 +2008,10 @@ int main(int argc, char **argv)
 	verbose_env = getenv("YOD_VERBOSE");
 	if (verbose_env)
 		yod_verbosity = atoi(verbose_env);
+
+	mpi_env = getenv("MPI_LOCALNRANKS");
+	if (mpi_env)
+		mpi_localnranks = atoi(mpi_env);
 
 	tst_plugin = getenv("YOD_TST_PLUGIN");
 	if (tst_plugin) {

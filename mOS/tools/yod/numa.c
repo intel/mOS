@@ -339,7 +339,8 @@ static int indirect_numa_memory_selection(struct lwk_request_t *req)
 
 			req->lwkmem_request[nid] = requested;
 			req->lwkmem_size_by_group[m] -= requested;
-			yod_append_memory_nid(m, nid, req);
+			if (requested)
+				yod_append_memory_nid(m, nid, req);
 		}
 	}
 
@@ -384,7 +385,8 @@ static int indirect_numa_memory_selection(struct lwk_request_t *req)
 
 		req->lwkmem_request[nid] += requested;
 		req->lwkmem_size_by_group[m] -= requested;
-		yod_append_memory_nid(m, nid, req);
+		if (requested)
+			yod_append_memory_nid(m, nid, req);
 	}
 
 	incomplete = false;
@@ -537,7 +539,8 @@ int yod_numa_memory_selection_algorithm(lwk_request_t *req)
 
 		req->lwkmem_request[nid] = rqst;
 		req->lwkmem_size_by_group[m] -= rqst;
-		yod_append_memory_nid(m, nid, req);
+		if (rqst)
+			yod_append_memory_nid(m, nid, req);
 	}
 
 	return 0;

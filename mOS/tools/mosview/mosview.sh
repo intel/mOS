@@ -114,7 +114,7 @@ if [[ $MOSVIEW != "" ]]; then
             help
             exit 1
         else
-            set_mos_view $$ $MOSVIEW
+            set_mos_view self $MOSVIEW
             exec "$@"
         fi
     fi

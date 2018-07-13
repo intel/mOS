@@ -43,7 +43,7 @@ Multi-OS (mOS)
 .B --create, -c 'lwkcpus=<\fIlwkcpu_spec\fP> lwkcpu_profile=<\fIprofile\fP> lwkmem=<\fIlwkmem_spec\fP>'
 Creates a new LWK partition. If an LWK partition already exists then it will be deleted before creating the new partition. LWK CPU and memory specifications for the new partition are passed as arguments in the following format,
 .sp 2
-lwkcpus=<syscall cpu1>.<lwkcpu set1>:<syscall cpu2>.<lwkcpu set2>...
+lwkcpus=<utility cpu1>.<lwkcpu set1>:<utility cpu2>.<lwkcpu set2>...
 .sp 2
 lwkcpu_profile=<normal or debug>
 .br
@@ -101,12 +101,18 @@ For example, the list '0-2,8' is equivalent to mask 0x107.
 
 Creates LWK partition with following specification,
 .RS
-LWKCPUs - CPUs 52 to 67 and 256 to 271 will be LWK CPUs, CPU 1 will be their syscall CPU target. CPUs 120 to 135 will be LWKCPUs, CPU 69 will be their syscall CPU target.
+LWKCPUs - CPUs 52 to 67 and 256 to 271 will be LWK CPUs. CPU 1 will be a utility CPU used for syscall migration and utility threads. CPUs 120 to 135 will be LWKCPUs. CPU 69 will be a utility CPU used for syscall migration and utility threads.
 .br
 LWKCPU profile - normal profile, each LWK CPU will be booted through a minimal set of hotplug states.
 .br
 LWKMEM - Requesting 16G on every NUMA node 0 to 3 and 3968M on every NUMA node 4 to 7
 .RE
+.TP
+.B sudo lwkctl -c 'lwkcpus=52-67,256-271:120-135:1,69. lwkcpu_profile=normal lwkmem=0:16G,1:16G,2:16G,3:16G,4:3968M,5:3968M,6:3968M,7:3968M'
+Creates LWK partition similar to above but with no syscall migration. CPUs 1 and 69 are utility CPUs for utility threads.
+.TP
+.B sudo lwkctl -c 'lwkcpus=52-67,256-271:120-135 lwkcpu_profile=normal lwkmem=0:16G,1:16G,2:16G,3:16G,4:3968M,5:3968M,6:3968M,7:3968M'
+Creates LWK partition similar to above but with no utility CPUs.
 
 .SH AUTHORS
 lwkctl was written by Sharath Kumar Bhat

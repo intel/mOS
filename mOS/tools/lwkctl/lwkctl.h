@@ -22,7 +22,7 @@
 #define MOS_SYSFS_VERSION (MOS_SYSFS_ROOT "version")
 #define MOS_SYSFS_LWKCPUS (MOS_SYSFS_ROOT "lwkcpus")
 #define MOS_SYSFS_LWKCPUS_RES (MOS_SYSFS_ROOT "lwkcpus_reserved")
-#define MOS_SYSFS_SCCPUS (MOS_SYSFS_ROOT "lwkcpus_syscall")
+#define MOS_SYSFS_UTILITY_CPUS (MOS_SYSFS_ROOT "utility_cpus")
 #define MOS_SYSFS_LWKMEM (MOS_SYSFS_ROOT "lwkmem")
 #define MOS_SYSFS_LWKCONFIG (MOS_SYSFS_ROOT "lwk_config")
 #define CPU_SYSFS "/sys/devices/system/cpu/"

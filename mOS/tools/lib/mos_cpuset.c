@@ -303,6 +303,13 @@ void mos_cpuset_set(int cpu, mos_cpuset_t *set)
 	CPU_SET_S(cpu, mos_setsize(), set->cpuset);
 }
 
+void mos_cpuset_clr(int cpu, mos_cpuset_t *set)
+{
+	assert(set != NULL && set->cpuset != NULL);
+	assert(cpu <= mos_max_cpus());
+	CPU_CLR_S(cpu, mos_setsize(), set->cpuset);
+}
+
 void mos_cpuset_xor(mos_cpuset_t *dest, mos_cpuset_t *a, mos_cpuset_t *b)
 {
 	assert(a != NULL && a->cpuset != NULL);

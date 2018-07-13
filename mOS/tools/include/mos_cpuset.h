@@ -83,6 +83,14 @@ extern int mos_parse_cpumask(const char *msk, mos_cpuset_t *set);
  */
 extern void mos_cpuset_set(int cpu, mos_cpuset_t *);
 
+/**
+ * Clears the bit for the given CPU number.
+ * @param[in] cpu The CPU number.
+ * @param[in] set The CPU set being altered.
+ * @pre set is assumed to be non-null.
+ */
+extern void mos_cpuset_clr(int cpu, mos_cpuset_t *set);
+
 extern size_t mos_setsize(void);
 
 /**

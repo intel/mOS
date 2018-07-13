@@ -42,13 +42,15 @@ by yod are owned by the launched process for its duration.
 .SH OPTIONS
 
 .TP
-.B --resources, -R <\fIfraction\fP, all>
+.B --resources, -R <\fIfraction\fP, all, MPI>
 Reserves a portion of the LWK resources.  If specified as a fraction, then
 the corresponding number of LWK cores are reserved, as well as an equal
 portion of the designated LWK memory. A \fIfraction\fP may be specified in
 floating point format or as a rational number M/N, where M and N are integers.
-Fractions must be in the interval (0, 1].  This option may not be combined with
-any of the --cpu, --cores or --mem options.
+Fractions must be in the interval (0, 1].  If MPI is specified then MPI
+environment variables are used to determine the fractional amount of
+resources.  This option may not be combined with any of the --cpu, --cores
+or --mem options.
 
 .PP
 The following options control the overall reservation of LWK CPUs.  At
@@ -240,8 +242,8 @@ CPU per each reserved core before scheduling work on the remaining CPUs
 of the reserved cores.
 
 If the OMP_NUM_THREADS environment variable is set, the \fB:<count>\fP
-suffix for the \fBcpu\fP term defaults to the number of reserved cores
-divided by OMP_NUM_THREADS.
+suffix for the \fBcpu\fP term defaults to OMP_NUM_THREADS divided by the
+number of reserved cores, or 1, whichever is larger.
 
 .SH MEMORY PREFERENCES
 

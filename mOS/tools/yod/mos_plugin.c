@@ -203,7 +203,7 @@ static void mos_read_and_populate(enum map_elem_t typ, const char *pathspec, int
 
 	set = mos_cpuset_alloc_validate();
 
-	if (!mos_sysfs_read(path, buffer, sizeof(buffer)))
+	if (mos_sysfs_read(path, buffer, sizeof(buffer)) < 0)
 		yod_abort(-1, "Could not read %s", path);
 
 	if (mos_parse_cpulist(buffer, set))
@@ -246,7 +246,7 @@ static void mos_init_cpu_map(void)
 	 * how many CPUs are actually active for this system.
 	 */
 
-	if (!mos_sysfs_read(CPU_ONLINE, buffer, sizeof(buffer)))
+	if (mos_sysfs_read(CPU_ONLINE, buffer, sizeof(buffer)) < 0)
 		yod_abort(-1, "Could not read %s", CPU_ONLINE);
 
 	set = mos_cpuset_alloc_validate();
@@ -273,7 +273,7 @@ static void mos_init_cpu_map(void)
 		if (snprintf(fname, sizeof(fname), CACHE_LEVEL, 0, l2_index) >= (int)sizeof(fname))
 			yod_abort(-1, "Buffer overflow in expanding %s", CACHE_LEVEL);
 
-		if (!mos_sysfs_read(fname, buffer, sizeof(buffer)))
+		if (mos_sysfs_read(fname, buffer, sizeof(buffer)) < 0)
 			yod_abort(-1, "Could not read %s", fname);
 
 		if (atoi(buffer) == 2)

@@ -36,4 +36,13 @@ long mos_set_clone_attr(struct mos_clone_attr *attr,
 }
 
 
+long mos_mwait(unsigned int sleep_level,
+		unsigned long *location,
+		unsigned long prev_value,
+		unsigned int msec_timeout)
+{
+	return syscall(509, sleep_level, location, prev_value, msec_timeout);
+}
+
+
 /* other mOS system calls */
