@@ -19,6 +19,8 @@
 #include <linux/cpumask.h>
 #include <linux/sched.h>
 #include <linux/cpuhotplug.h>
+#include <linux/mm.h>
+#include <linux/mosras.h>
 
 #ifdef CONFIG_MOS_FOR_HPC
 /*
@@ -54,6 +56,7 @@
 #define IS_MOS_VIEW(task, view) \
 	(((task)->mos_flags & MOS_VIEW_MASK) == ((view) & MOS_VIEW_MASK))
 #define is_mostask() (current->mos_flags & MOS_IS_LWK_PROCESS)
+#define is_lwk_process(task) (task->mos_flags & MOS_IS_LWK_PROCESS)
 #define cpu_lwkcpus_mask this_cpu_ptr(&lwkcpus_mask)
 #define cpu_islwkcpu(cpu) cpumask_test_cpu((cpu), cpu_lwkcpus_mask)
 #define mos_lwkcpus_arg (&__mos_lwkcpus_arg)
@@ -68,6 +71,7 @@
 #define SET_MOS_VIEW(task, view)
 #define IS_MOS_VIEW(task, view) false
 #define is_mostask() false
+#define is_lwk_process(task) false
 #define cpu_lwkcpus_mask NULL
 #define cpu_islwkcpu(cpu) false
 #define mos_lwkcpus_arg NULL
@@ -85,7 +89,7 @@ extern cpumask_t __mos_sccpus_arg;
 extern void mos_linux_enter(void);
 extern void mos_linux_leave(void);
 extern void mos_sysfs_update(void);
-extern void mos_exit_thread(pid_t pid, pid_t tgid);
+extern void mos_exit_thread(void);
 extern void get_mos_view_cpumask(struct cpumask *dst,
 			const struct cpumask *src);
 extern ssize_t cpumap_print_mos_view_cpumask(bool list,

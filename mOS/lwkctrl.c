@@ -74,14 +74,16 @@ int lwkcpu_partition_create(cpumask_var_t lwkcpus_req)
 	if (!zalloc_cpumask_var(&lwkcpus_booted, GFP_KERNEL) ||
 	    !zalloc_cpumask_var(&lwkcpus_down, GFP_KERNEL) ||
 	    !zalloc_cpumask_var(&lwkcpus_up, GFP_KERNEL)) {
-		pr_warn("%s: Failed to allocate cpumasks.\n", __func__);
+		mos_ras(MOS_LWKCTL_FAILURE,
+			"%s: Failed to allocate cpumasks.", __func__);
 		return -1;
 	}
 
 	/* Initialize mOS scheduler */
 	ret = mos_sched_init();
 	if (ret) {
-		pr_err("%s: Failed to initialize mOS scheduler\n", __func__);
+		mos_ras(MOS_LWKCTL_FAILURE,
+			"%s: Failed to initialize mOS scheduler.", __func__);
 		goto error;
 	}
 
@@ -93,7 +95,8 @@ int lwkcpu_partition_create(cpumask_var_t lwkcpus_req)
 						 lwkcpus_down)) {
 				cpumask_andnot(lwkcpus_up, lwkcpus_booted,
 					       lwkcpus_down);
-				pr_warn("%s: (!) Failed to rollback %*pbl\n",
+				mos_ras(MOS_LWKCTL_FAILURE,
+					"%s: Failed to rollback %*pbl.",
 					__func__, cpumask_pr_args(lwkcpus_up));
 			}
 		}
@@ -105,7 +108,8 @@ int lwkcpu_partition_create(cpumask_var_t lwkcpus_req)
 		if (!irq_can_set_affinity(irq))
 			continue;
 		if (!irq_save_affinity_linux(irq, lwkcpus_req)) {
-			pr_warn("%s:WARN couldn't drive away IRQ%d\n",
+			mos_ras(MOS_LWKCTL_WARNING,
+				"%s: could not drive away irq%d.",
 				__func__, irq);
 		}
 	}
@@ -113,19 +117,22 @@ int lwkcpu_partition_create(cpumask_var_t lwkcpus_req)
 	/* Activate mOS scheduler on LWK CPUs */
 	ret = mos_sched_activate(lwkcpus_req);
 	if (ret) {
-		pr_err("%s: Failed to activate mOS scheduler\n", __func__);
+		mos_ras(MOS_LWKCTL_FAILURE,
+			"%s: Failed to activate mOS scheduler.", __func__);
 
 		/* Rollback all LWK CPUs booted */
 		if (lwkcpu_down_multiple(lwkcpus_booted,
 					 lwkcpus_down)) {
 			cpumask_andnot(lwkcpus_up, lwkcpus_booted,
 				       lwkcpus_down);
-			pr_warn("%s: (!) Failed to rollback %*pbl\n",
+			mos_ras(MOS_LWKCTL_FAILURE,
+				"%s: Failed to rollback %*pbl.",
 				__func__,
 				cpumask_pr_args(lwkcpus_up));
 		}
 		if (mos_sched_exit()) {
-			pr_err("%s: Failed to de-initialize mOS scheduler\n",
+			mos_ras(MOS_LWKCTL_FAILURE,
+				"%s: Failed to de-initialize the mOS scheduler.",
 				__func__);
 		}
 		goto error;
@@ -155,14 +162,16 @@ int lwkcpu_partition_destroy(cpumask_var_t lwkcpus_req)
 
 	if (!zalloc_cpumask_var(&lwkcpus_shutdown, GFP_KERNEL) ||
 	    !zalloc_cpumask_var(&lwkcpus_up, GFP_KERNEL)) {
-		pr_warn("%s: Failed to allocate cpumasks.\n", __func__);
+		mos_ras(MOS_LWKCTL_FAILURE,
+			"%s: Failed to allocate cpumasks.", __func__);
 		return -1;
 	}
 
 	/* Deactivate mOS scheduler on LWK CPUs */
 	ret = mos_sched_deactivate(lwkcpus_req);
 	if (ret) {
-		pr_err("%s: Failed to deactivate mOS scheduler\n", __func__);
+		mos_ras(MOS_LWKCTL_FAILURE,
+			"%s: Failed to deactivate mOS scheduler.", __func__);
 		goto error;
 	}
 
@@ -175,7 +184,8 @@ int lwkcpu_partition_destroy(cpumask_var_t lwkcpus_req)
 			continue;
 
 		if (!irq_restore_affinity_linux(irq)) {
-			pr_warn("%s:WARN couldn't restore irq%d affinity\n",
+			mos_ras(MOS_LWKCTL_WARNING,
+				"%s: Could not restore irq%d affinity.",
 				__func__, irq);
 		}
 	}
@@ -186,7 +196,8 @@ int lwkcpu_partition_destroy(cpumask_var_t lwkcpus_req)
 		if (!cpumask_equal(lwkcpus_req, lwkcpus_shutdown)) {
 			cpumask_andnot(lwkcpus_up, lwkcpus_req,
 				       lwkcpus_shutdown);
-			pr_warn("%s: (!) Failed to shutdown %*pbl\n",
+			mos_ras(MOS_LWKCTL_FAILURE,
+				"%s: Failed to shutdown %*pbl.",
 				__func__, cpumask_pr_args(lwkcpus_up));
 		}
 		goto error;
@@ -195,7 +206,8 @@ int lwkcpu_partition_destroy(cpumask_var_t lwkcpus_req)
 	/* Exit mOS scheduler */
 	ret = mos_sched_exit();
 	if (ret) {
-		pr_err("%s: Failed to exit mOS scheduler\n", __func__);
+		mos_ras(MOS_LWKCTL_FAILURE,
+			"%s: Failed to exit mOS scheduler\n", __func__);
 		goto error;
 	}
 error:
@@ -213,14 +225,16 @@ int lwkmem_partition_create(char *spec)
 
 	rc = lwkmem_parse_args(spec, &__mos_lwkmem_nodes, __mos_lwkmem_size);
 	if (rc) {
-		pr_err("%s: Failed to parse LWKMEM specification: %s\n",
+		mos_ras(MOS_LWKCTL_FAILURE,
+			"%s: Failed to parse lwkmem specification: %s.",
 		       __func__, spec);
 		goto error;
 	}
 
 	rc = mos_mem_init(&__mos_lwkmem_nodes, __mos_lwkmem_size);
 	if (rc) {
-		pr_err("%s: Failed to initialize mOS memory management\n",
+		mos_ras(MOS_LWKCTL_FAILURE,
+			"%s: Failed to initialize mOS memory management.",
 			__func__);
 		goto error;
 	}
@@ -240,7 +254,8 @@ int lwkmem_partition_destroy(void)
 
 	rc = mos_mem_free();
 	if (rc)
-		pr_err("%s: Failed to exit mOS memory management!\n", __func__);
+		mos_ras(MOS_LWKCTL_FAILURE,
+			"%s: Failed to exit mOS memory management.", __func__);
 out:
 	clear_lwkmem_spec();
 	return rc;
@@ -274,7 +289,7 @@ void lwkctl_def_partition(void)
 			lwkctrl_cpu_profile_spec);
 		rc = lwk_config_lwkcpus(lwkctrl_cpus_spec,
 					lwkctrl_cpu_profile_spec);
-		pr_info("mOS: LWK creating default partition.. %s\n",
+		pr_info("LWK creating default partition.. %s\n",
 			rc ? "Failed!" : "Done");
 	}
 out:
@@ -299,14 +314,16 @@ static int __init lwkcpus(char *str)
 
 	strsize = snprintf(lwkctrl_cpus_spec, LWKCTRL_CPUS_SPECSZ, "%s", str);
 	if (strlen(str) > strsize)
-		pr_warn("lwkcpus specification truncation occurred in %s.\n",
+		mos_ras(MOS_LWKCTL_WARNING,
+			"lwkcpus specification truncation occurred in %s.",
 			__func__);
 
 	rc = lwkcpu_parse_args(str, mos_lwkcpus_arg, mos_sccpus_arg);
 
 	if (rc || cpumask_empty(mos_lwkcpus_arg))
-		pr_warn("No LWK CPUs found parsing param lwkcpus=%s\n",
-		 lwkctrl_cpus_spec);
+		mos_ras(MOS_LWKCTL_WARNING,
+			"No LWK CPUs found parsing param lwkcpus=%s.",
+			lwkctrl_cpus_spec);
 
 	if (rc) {
 		cpumask_clear(mos_lwkcpus_arg);
@@ -330,7 +347,8 @@ static int __init lwkcpu_profile(char *str)
 		strsize = snprintf(lwkctrl_cpu_profile_spec,
 				   LWKCTRL_CPU_PROFILE_SPECSZ, "%s", str);
 		if (strlen(str) > strsize) {
-			pr_warn("lwkcpu_profile specification truncation in %s.\n",
+			mos_ras(MOS_LWKCTL_WARNING,
+				"lwkcpu_profile specification truncation in %s.",
 				__func__);
 		}
 	}
@@ -349,8 +367,9 @@ static int __init lwkmem(char *str)
 
 	strsize = snprintf(lwkctrl_mem_spec, LWKCTRL_MEM_SPECSZ, "%s", str);
 	if (strsize >= LWKCTRL_MEM_SPECSZ)
-		pr_warn("lwkmem specification string truncation occurred in %s.\n",
-				__func__);
+		mos_ras(MOS_LWKCTL_WARNING,
+			"lwkmem specification string truncation occurred in %s.",
+			__func__);
 	return 0;
 }
 early_param("lwkmem", lwkmem);
@@ -371,7 +390,8 @@ int lwkmem_distribute_request(resource_size_t req, nodemask_t *mask,
 	int nid, nodes = nodes_weight(*mask);
 
 	if (!req || !nodes) {
-		pr_info("Can not distribute request : %s\n",
+		mos_ras(MOS_LWKCTL_FAILURE,
+			"Cannot distribute request : %s.",
 			!req ? "requested size is 0" :
 			       "requested nodemask is empty");
 		return -1;
@@ -424,7 +444,8 @@ static int lwkmem_parse_args(char *arg, nodemask_t *node_mask,
 			*(memstr++) = '\0';
 			rc = kstrtoint(nidstr, 0, &nid);
 			if (rc || nid < 0 || nid >= num_possible_nodes()) {
-				pr_warn("(!) invalid NUMA id: \"%s\"\n",
+				mos_ras(MOS_LWKCTL_WARNING,
+					"Invalid NUMA id: \"%s\".",
 					nidstr);
 				nid = NUMA_NO_NODE;
 			}
@@ -438,10 +459,9 @@ static int lwkmem_parse_args(char *arg, nodemask_t *node_mask,
 			rc = lwkmem_distribute_request(req, &node_possible_map,
 						node_size);
 			if (rc) {
-				pr_warn("%s(): could not distribute %lld B\n",
-					__func__, req);
-				pr_warn("%s(): to nodes %*pbl\n",
-					__func__,
+				mos_ras(MOS_LWKCTL_WARNING,
+					"%s(): could not distribute %lld to nodes %*pbl.",
+					__func__, req,
 					nodemask_pr_args(&node_possible_map));
 			} else {
 				nodes_or(*node_mask, *node_mask,
@@ -525,7 +545,8 @@ char *lwkmem_get_spec(void)
 
 	if (truncated) {
 		lwkctrl_mem_spec[LWKCTRL_MEM_SPECSZ - 1] = '\0';
-		pr_err("mOS: lwkmem specification truncated in %s()!\n", __func__);
+		mos_ras(MOS_LWKCTL_WARNING,
+			"lwkmem specification truncated in %s.", __func__);
 	}
 	return lwkctrl_mem_spec;
 }

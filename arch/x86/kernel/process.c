@@ -130,7 +130,7 @@ void exit_thread(struct task_struct *tsk)
 
 #ifdef CONFIG_MOS_FOR_HPC
 	if (is_mostask())
-		mos_exit_thread(current->pid, current->tgid);
+		mos_exit_thread();
 #endif
 
 	free_vm86(t);

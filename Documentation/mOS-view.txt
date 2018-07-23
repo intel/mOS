@@ -73,6 +73,8 @@ Sysfs:
     /sys/devices/system/node/node<N>/cpulist
     /sys/fs/cgroup/cpuset/cpuset.cpus
     /sys/fs/cgroup/cpuset/cpuset.effective_cpus
+    /sys/devices/pci*/*/local_cpulist
+    /sys/devices/pci*/*/local_cpus
 
 Tools used for testing:
     lscpu, htop, numactl, yod

@@ -70,7 +70,7 @@ int lwkcpu_up_multiple(cpumask_var_t request, cpumask_var_t booted)
 	int ret;
 
 	if (!request) {
-		pr_err("%s: Invalid argument\n", __func__);
+		mos_ras(MOS_LWKCTL_FAILURE, "%s: Invalid argument.", __func__);
 		return -1;
 	}
 
@@ -80,8 +80,8 @@ int lwkcpu_up_multiple(cpumask_var_t request, cpumask_var_t booted)
 	for_each_cpu(cpu, request) {
 		ret = lwkcpu_up(cpu);
 		if (ret) {
-			pr_err("%s: (!) Failed to boot cpu %d\n",
-				__func__, cpu);
+			mos_ras(MOS_LWKCTL_FAILURE,
+				"%s: Failed to boot CPU %d.", __func__, cpu);
 			return ret;
 		}
 
@@ -105,7 +105,7 @@ int lwkcpu_down_multiple(cpumask_var_t request, cpumask_var_t shutdown)
 	int ret;
 
 	if (!request) {
-		pr_err("%s: Invalid argument\n", __func__);
+		mos_ras(MOS_LWKCTL_FAILURE, "%s: Invalid argument.", __func__);
 		return -1;
 	}
 
@@ -115,7 +115,8 @@ int lwkcpu_down_multiple(cpumask_var_t request, cpumask_var_t shutdown)
 	for_each_cpu(cpu, request) {
 		ret = lwkcpu_down(cpu);
 		if (ret) {
-			pr_err("%s: (!) Failed to shutdown cpu %d\n",
+			mos_ras(MOS_LWKCTL_FAILURE,
+				"%s: Failed to shutdown CPU %d.",
 				__func__, cpu);
 			return ret;
 		}
@@ -139,7 +140,8 @@ int lwkcpu_reset(unsigned int cpu)
 	ret = lwkcpu_down(cpu);
 
 	if (ret) {
-		pr_err("%s: Failed to shutdown the CPU %d\n",
+		mos_ras(MOS_LWKCTL_FAILURE,
+			"%s: Failed to shut down CPU %d.",
 			__func__, cpu);
 		goto error;
 	}
@@ -147,7 +149,8 @@ int lwkcpu_reset(unsigned int cpu)
 	ret = lwkcpu_up(cpu);
 
 	if (ret) {
-		pr_err("%s: Failed to boot the CPU %d\n",
+		mos_ras(MOS_LWKCTL_FAILURE,
+			"%s: Failed to boot CPU %d.",
 			__func__, cpu);
 	}
 
@@ -157,49 +160,52 @@ error:
 
 /*
  * Parses LWK CPU partition specification provided in @arg and
- * returns the bitmask of LWK CPUs and SYSCALL CPUs
+ * returns the bitmask of LWK CPUs and Utility CPUs
  *
  * @arg, input string which has LWKCPU partition specification
  * @lwkcpus, bitmask of LWK CPUs after parsing @arg
- * @syscall_cpus, bitmask of SYSCALL CPUs after parsing @arg
+ * @utility_cpus, bitmask of utility CPUs after parsing @arg
  * @return, 0 on success
  * 	    -ve on failure
  */
 int lwkcpu_parse_args(char *arg, cpumask_t *lwkcpus,
-		      cpumask_t *syscall_cpus)
+		      cpumask_t *utility_cpus)
 {
 	char *s_to, *s_from;
 	int rc = -1;
 
 	cpumask_clear(lwkcpus);
-	cpumask_clear(syscall_cpus);
+	cpumask_clear(utility_cpus);
 	cpumask_clear(&to);
 	cpumask_clear(&from);
 
 	while ((s_to = strsep(&arg, ":"))) {
 		if (!(s_from = strchr(s_to, '.'))) {
-			pr_warn("%s Invalid CPU specification syntax. Value=%s\n",
-				__func__, s_to);
-			goto out;
-		}
-		*(s_from++) = '\0';
+			/* No syscall target defined */
+			s_from = s_to;
+			s_to = strchr(s_to, '\0');
+		} else
+			*(s_from++) = '\0';
 		if (cpulist_parse(s_to, &to) < 0) {
-			pr_warn("%s Invalid character in CPU specification. Value=%s\n",
+			mos_ras(MOS_LWKCTL_FAILURE,
+				"%s: Invalid character in CPU specification. Value=%s",
 				__func__, s_to);
 			goto out;
 		}
 		if (cpulist_parse(s_from, &from) < 0) {
-			pr_warn("%s Invalid character in CPU specification. Value=%s\n",
+			mos_ras(MOS_LWKCTL_FAILURE,
+				"%s: Invalid character in CPU specification. Value=%s.",
 				__func__, s_from);
 			goto out;
 		}
-		/* Only one syscall target cpu allowed per lwk cpu range */
-		if (cpumask_weight(&to) != 1) {
-			pr_warn("%s More than one syscall target CPU specified.\n",
+		/* Maximum of one utility CPU allowed per LWK CPU range */
+		if ((cpumask_weight(&to) > 1) && !cpumask_empty(&from)) {
+			mos_ras(MOS_LWKCTL_FAILURE,
+				"%s: More than one utility CPU was specified.",
 				__func__);
 				goto out;
 		}
-		cpumask_or(syscall_cpus, syscall_cpus, &to);
+		cpumask_or(utility_cpus, utility_cpus, &to);
 		cpumask_or(lwkcpus, lwkcpus, &from);
 	}
 	rc = 0;
@@ -222,8 +228,9 @@ int lwkcpu_state_init(char *profile)
 
 	if (strcmp(profile, LWKCPU_PROF_NOR) &&
 	    strcmp(profile, LWKCPU_PROF_DBG)) {
-		pr_err("%s: Invalid spec for LWKCPU state filtering\n",
-		       __func__);
+		mos_ras(MOS_LWKCTL_FAILURE,
+			"%s: Invalid lwkcpu_profile specification: %s",
+			__func__, profile);
 		return -1;
 	}
 
@@ -240,8 +247,9 @@ int lwkcpu_state_init(char *profile)
 	strsize = snprintf(lwkctrl_cpu_profile_spec,
 			   LWKCTRL_CPU_PROFILE_SPECSZ, "%s", profile);
 	if (strlen(profile) > strsize) {
-		pr_warn("lwkcpu_profile specification truncation occurred in %s.\n",
-			__func__);
+		mos_ras(MOS_LWKCTL_WARNING,
+			"%s: lwkcpu_profile specification truncation occurred: \"%s\"",
+			__func__, lwkctrl_cpu_profile_spec);
 	} else
 		pr_info("LWK CPU profile set to: %s\n",
 			lwkctrl_cpu_profile_spec);

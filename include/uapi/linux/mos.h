@@ -22,6 +22,11 @@ long mos_get_addr_info(unsigned long addr, unsigned long *phys_addr,
 
 /* mOS scheduler system calls */
 
+enum mos_mwait_sleep {
+	mos_mwait_sleep_normal,
+	mos_mwait_sleep_deep,
+};
+
 struct mos_clone_attr {
 	unsigned int size;
 	unsigned int flags;
@@ -73,6 +78,11 @@ long mos_set_clone_attr(struct mos_clone_attr *attr,
 			unsigned long *nodes,
 			struct mos_clone_result *rslt,
 			unsigned long location_key);
+
+long mos_mwait(unsigned int sleep,
+		unsigned long *location,
+		unsigned long previous_value,
+		unsigned int msec_timeout);
 
 /* other mOS system calls */
 
