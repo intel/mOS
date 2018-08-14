@@ -1521,11 +1521,6 @@ void unmap_page_range(struct mmu_gather *tlb,
 
 	BUG_ON(addr >= end);
 
-	if (is_lwkmem(vma)) {
-		unmap_lwkmem_range(tlb->mm, vma, addr, end);
-		return;
-	}
-
 	tlb_start_vma(tlb, vma);
 	pgd = pgd_offset(vma->vm_mm, addr);
 	do {
@@ -1576,7 +1571,9 @@ static void unmap_single_vma(struct mmu_gather *tlb,
 				__unmap_hugepage_range_final(tlb, vma, start, end, NULL);
 				i_mmap_unlock_write(vma->vm_file->f_mapping);
 			}
-		} else
+		} else if (is_lwkmem(vma) || is_lwkxpmem(vma))
+			unmap_lwkmem_range(tlb, vma, start, end, details);
+		else
 			unmap_page_range(tlb, vma, start, end, details);
 	}
 }

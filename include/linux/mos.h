@@ -110,6 +110,18 @@ enum allocate_site_t {
 	lwkmem_stack = 3,
 	lwkmem_site_last = 4
 };
+enum attachment_align_stats_t {
+	ALIGN_ELIGIBLE = 0,
+	ALIGN_NOT_ELIGIBLE,
+	ALIGN_SUCCESS,
+	ALIGN_SUCCESS_HP,
+	ALIGN_FAIL_MAPFIXED,
+	ALIGN_FAIL_LINUXVMA,
+	ALIGN_FAIL_SRCPGSZ,
+	ALIGN_FAIL_NOVM,
+	ALIGN_FAIL_ERROR,
+	ALIGN_STAT_END
+};
 
 struct mos_process_t {
 	struct list_head list;
@@ -190,6 +202,14 @@ struct mos_process_t {
 	bool trace_block_list_details;
 
 	unsigned int lwkmem_zeroes_check;
+	bool lwkmem_prot_none_delegation;
+
+	/* XPMEM counters */
+	bool report_xpmem_stats;
+	unsigned long src_pgmap[kind_last][kind_last];
+	unsigned long dst_pgmap[kind_last][kind_last];
+	unsigned long attachment_align_stats[ALIGN_STAT_END];
+
 #endif
 
 #ifdef CONFIG_MOS_SCHEDULER
@@ -239,12 +259,27 @@ extern void lwkctl_def_partition(void);
 #include <linux/page-flags.h>
 
 #define is_lwkmem(vma)  ((vma)->vm_flags & VM_LWK)
+#define is_lwkxpmem(vma) ((vma)->vm_flags & VM_LWK_XPMEM)
 #define _LWKPG          (0x4c574b4dul)
 #define is_lwkpg(page)  ((((page)->private) & 0xffffffff) == _LWKPG)
 #define _LWKPG_DIRTY    (0x100000000ul)
 #define is_lwkpg_dirty(page) (((page)->private) & _LWKPG_DIRTY)
 #define set_lwkpg_dirty(page) ((page)->private |= _LWKPG_DIRTY)
 #define clear_lwkpg_dirty(page) ((page)->private &= ~_LWKPG_DIRTY)
+
+struct vma_subregion {
+	/* Start and End of the sub-region */
+	unsigned long start;
+	unsigned long end;
+	/* Entry in the list of regions */
+	struct list_head list;
+};
+
+struct vma_xpmem_private {
+	void *private_data;
+	struct mutex subregions_lock;
+	struct list_head subregions;
+};
 
 extern struct page *lwkmem_user_to_page(struct mm_struct *mm,
 					unsigned long addr,
@@ -254,16 +289,54 @@ extern void lwkmem_available(unsigned long *totalraam, unsigned long *freeraam);
 extern unsigned long elf_map_to_lwkmem(unsigned long addr, unsigned long size,
 					int prot, int type);
 extern long elf_unmap_from_lwkmem(unsigned long addr, unsigned long size);
-extern void unmap_lwkmem_range(struct mm_struct *mm, struct vm_area_struct *vma,
-			unsigned long start, unsigned long end);
+extern void unmap_lwkmem_range(struct mmu_gather *tlb,
+			struct vm_area_struct *vma, unsigned long start,
+			unsigned long end, struct zap_details *details);
 extern void si_meminfo_node_mos(struct sysinfo *val, int nid);
+/*
+ * mOS memory management interfaces exported to support XPMEM
+ * device driver. These interfaces work only on LWK XPMEM VMAs.
+ */
+extern void set_xpmem_private_data(struct vm_area_struct *vma, void *data);
+extern void *get_xpmem_private_data(struct vm_area_struct *vma);
+extern struct vm_area_struct *create_lwkxpmem_vma(struct mm_struct *src_mm,
+					unsigned long src_start,
+					unsigned long dst_start,
+					unsigned long len,
+					unsigned long prot,
+					void *vm_private_data,
+					const struct vm_operations_struct *ops);
+extern int copy_lwkmem_to_lwkxpmem(struct vm_area_struct *src_vma,
+			unsigned long src_start,
+			struct vm_area_struct *dst_vma,
+			unsigned long dst_start, unsigned long len);
+extern void release_lwkxpmem_vma(struct vm_area_struct *vma);
 #else
 #define is_lwkmem(vma) 0
+#define is_lwkxpmem(vma) 0
 #define is_lwkpg(page) 0
-static inline void unmap_lwkmem_range(struct mm_struct *mm,
+static inline void unmap_lwkmem_range(struct mmu_gather *tlb,
 			struct vm_area_struct *vma, unsigned long start,
-			unsigned long end) {}
+			unsigned long end, struct zap_details *details) {}
 static void si_meminfo_node_mos(struct sysinfo *val, int nid) {}
+inline void set_xpmem_private_data(struct vm_area_struct *vma, void *data)
+		{ if (vma) vma->vm_private_data = data; }
+inline void *get_xpmem_private_data(struct vm_area_struct *vma)
+		{ return  vma ? vma->vm_private_data : NULL; }
+inline struct vm_area_struct *create_lwkxpmem_vma(struct mm_struct *src_mm,
+					unsigned long src_start,
+					unsigned long dst_start,
+					unsigned long len,
+					unsigned long prot,
+					void *vm_private_data,
+					const struct vm_operations_struct *ops)
+					{ return NULL; }
+inline int copy_lwkmem_to_lwkxpmem(struct vm_area_struct *src_vma,
+			unsigned long src_start,
+			struct vm_area_struct *dst_vma,
+			unsigned long dst_start, unsigned long len)
+			{ return -1; }
+inline void release_lwkxpmem_vma(struct vm_area_struct *vma) { }
 #endif /* CONFIG_MOS_LWKMEM */
 
 
@@ -292,6 +365,11 @@ extern int find_vma_links(struct mm_struct *mm, unsigned long addr,
 extern void vma_link(struct mm_struct *mm, struct vm_area_struct *vma,
 		     struct vm_area_struct *prev, struct rb_node **rb_link,
 		     struct rb_node *rb_parent);
+
+extern void unmap_page_range(struct mmu_gather *tlb,
+			     struct vm_area_struct *vma,
+			     unsigned long addr, unsigned long end,
+			     struct zap_details *details);
 #endif
 
 #else
@@ -304,7 +382,26 @@ static inline ssize_t cpumap_print_mos_view_cpumask(bool list,
 			char *buf, const struct cpumask *mask) { return -1; }
 static void si_meminfo_node_mos(struct sysinfo *val, int nid) {}
 #define is_lwkmem(vma) 0
+#define is_lwkxpmem(vma) 0
 #define is_lwkpg(page) 0
 
+inline void set_xpmem_private_data(struct vm_area_struct *vma, void *data)
+		{ if (vma) vma->vm_private_data = data; }
+inline void *get_xpmem_private_data(struct vm_area_struct *vma)
+		{ return  vma ? vma->vm_private_data : NULL; }
+inline struct vm_area_struct *create_lwkxpmem_vma(struct mm_struct *src_mm,
+					unsigned long src_start,
+					unsigned long dst_start,
+					unsigned long len,
+					unsigned long prot,
+					void *vm_private_data,
+					const struct vm_operations_struct *ops)
+					{ return NULL; }
+inline int copy_lwkmem_to_lwkxpmem(struct vm_area_struct *src_vma,
+			unsigned long src_start,
+			struct vm_area_struct *dst_vma,
+			unsigned long dst_start, unsigned long len)
+			{ return -1; }
+inline void release_lwkxpmem_vma(struct vm_area_struct *vma) { }
 #endif /* CONFIG_MOS_FOR_HPC */
 #endif /* _LINUX_MOS_H */

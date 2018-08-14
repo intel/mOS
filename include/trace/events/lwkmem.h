@@ -446,6 +446,295 @@ DEFINE_EVENT(mos_mem_block_event, mos_mem_block_released,
 	TP_ARGS(va, vlen, pa, plen, knd, nblks, stride, nid, tgid)
 );
 
+TRACE_EVENT(mos_lwkpage_dirty_error,
+	TP_PROTO(unsigned long pfn),
+	TP_ARGS(pfn),
+	TP_STRUCT__entry(__field(unsigned long, pfn)),
+	TP_fast_assign(__entry->pfn = pfn;),
+	TP_printk("pfn %ld was dirty during allocation!", __entry->pfn)
+);
+
+TRACE_EVENT(mos_build_lwkxpmem_pagetbl,
+
+	TP_PROTO(unsigned long vma_start, unsigned long vma_end,
+		 unsigned long vstart, unsigned long vend,
+		 unsigned long pfn_start, unsigned long pfn_end,
+		 unsigned long page_type, int status),
+
+	TP_ARGS(vma_start, vma_end, vstart, vend, pfn_start, pfn_end,
+		page_type, status),
+
+	TP_STRUCT__entry(
+		__field(unsigned long, vma_start)
+		__field(unsigned long, vma_end)
+		__field(unsigned long, vstart)
+		__field(unsigned long, vend)
+		__field(unsigned long, pfn_start)
+		__field(unsigned long, pfn_end)
+		__field(unsigned long, page_type)
+		__field(int, status)
+	),
+
+	TP_fast_assign(
+		__entry->vma_start = vma_start;
+		__entry->vma_end = vma_end;
+		__entry->vstart = vstart;
+		__entry->vend = vend;
+		__entry->pfn_start = pfn_start;
+		__entry->pfn_end = pfn_end;
+		__entry->page_type = page_type;
+		__entry->status = status;
+	),
+
+	TP_printk("vma=[%lx-%lx) range=[%lx-%lx) pfn=[%ld-%ld) knd %ld rc=%d",
+		__entry->vma_start,
+		__entry->vma_end,
+		__entry->vstart,
+		__entry->vend,
+		__entry->pfn_start,
+		__entry->pfn_end,
+		__entry->page_type,
+		__entry->status)
+);
+
+TRACE_EVENT(mos_clear_lwkxpmem_pagetbl,
+
+	TP_PROTO(unsigned long vstart, unsigned long vend),
+
+	TP_ARGS(vstart, vend),
+
+	TP_STRUCT__entry(
+		__field(unsigned long, vstart)
+		__field(unsigned long, vend)
+	),
+
+	TP_fast_assign(
+		__entry->vstart = vstart;
+		__entry->vend = vend;
+	),
+
+	TP_printk("range=[%lx-%lx)",
+		__entry->vstart,
+		__entry->vend)
+);
+
+TRACE_EVENT(mos_insert_vma_subregion,
+
+	TP_PROTO(unsigned long vma_start, unsigned long vma_end,
+		 unsigned long vma_sub_start, unsigned long vma_sub_end,
+		 int status),
+
+	TP_ARGS(vma_start, vma_end, vma_sub_start, vma_sub_end, status),
+
+	TP_STRUCT__entry(
+		__field(unsigned long, vma_start)
+		__field(unsigned long, vma_end)
+		__field(unsigned long, vma_sub_start)
+		__field(unsigned long, vma_sub_end)
+		__field(int, status)
+	),
+
+	TP_fast_assign(
+		__entry->vma_start = vma_start;
+		__entry->vma_end = vma_end;
+		__entry->vma_sub_start = vma_sub_start;
+		__entry->vma_sub_end = vma_sub_end;
+		__entry->status = status;
+	),
+
+	TP_printk("vma=[%lx-%lx) vma_sub=[%lx-%lx) rc=%d",
+		__entry->vma_start,
+		__entry->vma_end,
+		__entry->vma_sub_start,
+		__entry->vma_sub_end,
+		__entry->status)
+);
+
+DECLARE_EVENT_CLASS(mos_lwkxpmem_range,
+
+	TP_PROTO(unsigned long vma_start, unsigned long vma_end,
+		 unsigned long vstart, unsigned long vend,
+		 unsigned long status),
+
+	TP_ARGS(vma_start, vma_end, vstart, vend, status),
+
+	TP_STRUCT__entry(
+		__field(unsigned long, vma_start)
+		__field(unsigned long, vma_end)
+		__field(unsigned long, vstart)
+		__field(unsigned long, vend)
+		__field(int, status)
+	),
+
+	TP_fast_assign(
+		__entry->vma_start = vma_start;
+		__entry->vma_end = vma_end;
+		__entry->vstart = vstart;
+		__entry->vend = vend;
+		__entry->status = status;
+	),
+
+	TP_printk("vma=[%lx-%lx) range=[%lx-%lx) rc=%d",
+		__entry->vma_start,
+		__entry->vma_end,
+		__entry->vstart,
+		__entry->vend,
+		__entry->status)
+);
+
+DEFINE_EVENT(mos_lwkxpmem_range, mos_remove_vma_subregions,
+
+	TP_PROTO(unsigned long vma_start, unsigned long vma_end,
+		 unsigned long vstart, unsigned long vend,
+		 unsigned long status),
+
+	TP_ARGS(vma_start, vma_end, vstart, vend, status)
+);
+
+DEFINE_EVENT(mos_lwkxpmem_range, mos_unmap_lwkxpmem_range,
+
+	TP_PROTO(unsigned long vma_start, unsigned long vma_end,
+		 unsigned long vstart, unsigned long vend,
+		 unsigned long status),
+
+	TP_ARGS(vma_start, vma_end, vstart, vend, status)
+);
+
+TRACE_EVENT(mos_copy_lwkmem_to_lwkxpmem,
+
+	TP_PROTO(unsigned long src_vma_start, unsigned long src_vma_end,
+		 unsigned long src_start, unsigned long dst_vma_start,
+		 unsigned long dst_vma_end, unsigned long dst_start,
+		 unsigned long len, int status),
+
+	TP_ARGS(src_vma_start, src_vma_end, src_start,
+		dst_vma_start, dst_vma_end, dst_start,
+		len, status),
+
+	TP_STRUCT__entry(
+		__field(unsigned long, src_vma_start)
+		__field(unsigned long, src_vma_end)
+		__field(unsigned long, src_start)
+		__field(unsigned long, dst_vma_start)
+		__field(unsigned long, dst_vma_end)
+		__field(unsigned long, dst_start)
+		__field(unsigned long, len)
+		__field(int, status)
+	),
+
+	TP_fast_assign(
+		__entry->src_vma_start = src_vma_start;
+		__entry->src_vma_end = src_vma_end;
+		__entry->src_start = src_start;
+		__entry->dst_vma_start = dst_vma_start;
+		__entry->dst_vma_end = dst_vma_end;
+		__entry->dst_start = dst_start;
+		__entry->len = len;
+		__entry->status = status;
+	),
+
+	TP_printk("src vma=[%lx-%lx) range=[%lx-%lx) dst vma[%lx-%lx) range[%lx-%lx) rc=%d",
+		__entry->src_vma_start,
+		__entry->src_vma_end,
+		__entry->src_start,
+		__entry->src_start + __entry->len,
+		__entry->dst_vma_start,
+		__entry->dst_vma_end,
+		__entry->dst_start,
+		__entry->dst_start + __entry->len,
+		__entry->status)
+);
+
+TRACE_EVENT(mos_create_lwkxpmem_vma,
+
+	TP_PROTO(unsigned long src_start, unsigned long dst_start,
+		 unsigned long len, unsigned long prot, void *vma_private,
+		 const void *vma_ops, unsigned long vaddr),
+
+	TP_ARGS(src_start, dst_start, len, prot, vma_private, vma_ops, vaddr),
+
+	TP_STRUCT__entry(
+		__field(unsigned long, src_start)
+		__field(unsigned long, dst_start)
+		__field(unsigned long, len)
+		__field(unsigned long, prot)
+		__field(void *, vma_private)
+		__field(const void *, vma_ops)
+		__field(unsigned long, vaddr)
+	),
+
+	TP_fast_assign(
+		__entry->src_start = src_start;
+		__entry->dst_start = dst_start;
+		__entry->len = len;
+		__entry->prot = prot;
+		__entry->vma_private = vma_private;
+		__entry->vma_ops = vma_ops;
+		__entry->vaddr = vaddr;
+	),
+
+	TP_printk("src=[%lx-%lx) dst=[%lx-%lx) prot=%s private=%p ops=%p vaddr=%lx",
+		__entry->src_start,
+		__entry->src_start + __entry->len,
+		__entry->dst_start,
+		__entry->dst_start + __entry->len,
+		show_mprotect_prot(__entry->prot),
+		__entry->vma_private,
+		__entry->vma_ops,
+		__entry->vaddr)
+);
+
+TRACE_EVENT(mos_release_lwkxpmem_vma,
+
+	TP_PROTO(unsigned long vma_start, unsigned long vma_end,
+		 bool is_lwkxpmem),
+
+	TP_ARGS(vma_start, vma_end, is_lwkxpmem),
+
+	TP_STRUCT__entry(
+		__field(unsigned long, vma_start)
+		__field(unsigned long, vma_end)
+		__field(bool, is_lwkxpmem)
+	),
+
+	TP_fast_assign(
+		__entry->vma_start = vma_start;
+		__entry->vma_end = vma_end;
+		__entry->is_lwkxpmem = is_lwkxpmem;
+	),
+
+	TP_printk("vma=[%lx-%lx) [%s]",
+		__entry->vma_start,
+		__entry->vma_end,
+		__entry->is_lwkxpmem ? "LWKXPMEM" : "Linux")
+);
+
+TRACE_EVENT(mos_unmapped_region,
+
+	TP_PROTO(unsigned long addr, unsigned long len,
+		 unsigned long flags, int tgid),
+
+	TP_ARGS(addr, len, flags, tgid),
+
+	TP_STRUCT__entry(
+		__field(unsigned long, addr)
+		__field(unsigned long, len)
+		__field(unsigned long, flags)
+		__field(int, tgid)
+	),
+
+	TP_fast_assign(
+		__entry->addr = addr;
+		__entry->len = len;
+		__entry->flags = flags;
+		__entry->tgid = tgid;
+	),
+
+	TP_printk("addr=%lx len=%ld flags=%lx tgid=%d",
+		__entry->addr, __entry->len,
+		__entry->flags, __entry->tgid)
+);
+
 #endif /* _TRACE_LWKMEM_H */
 
 /* This part must be outside protection */

@@ -41,7 +41,7 @@
 #define STRBUF_LEN		(256)
 #define kaddr_to_pfn(va)	(__pa(va) >> PAGE_SHIFT)
 
-static size_t lwkmem_n_nodes;
+static size_t lwkmem_n_online_nodes;
 
 #define ADDR_MASK 0x000ffffffffff000
 #define PG2M_MASK 0x000fffffffe00000
@@ -84,6 +84,17 @@ static inline void lwkmem_page_init(struct page *p)
 	SetPageMlocked(p);
 	p->private = _LWKPG;
 	init_page_count(p);
+	if (unlikely(is_lwkpg_dirty(p))) {
+		/*
+		 * Its highly unusual that we get here, unless something
+		 * went wrong before during unmapping of page table.
+		 */
+		trace_mos_lwkpage_dirty_error(page_to_pfn(p));
+		pr_debug("%s(): pfn was dirty: %ld\n",
+			 __func__, page_to_pfn(p));
+		memset((void *) page_to_virt(p), 0, PAGE_SIZE);
+		clear_lwkpg_dirty(p);
+	}
 }
 
 static inline void lwkmem_page_deinit(struct page *p)
@@ -164,8 +175,10 @@ static unsigned long lwkmem_check_for_zero(unsigned long addr,
 		for (i = 0, N = size / sizeof(unsigned long); i < N; i++) {
 			if (wrd[i]) {
 				if (!warned) {
-					pr_warn("(!) Non-zero bytes detected at %p (%lx) ==> %lx [%s]\n",
-						wrd + i, addr, wrd[i], msg);
+					mos_ras(MOS_LWKMEM_PROCESS_WARNING,
+						"%s: Non-zero bytes have been detected at %p (%lx) ==> %lx [%s].",
+						__func__, wrd + i, addr, wrd[i],
+						msg);
 					warned = true;
 					rc = rc ? rc : addr;
 				}
@@ -377,8 +390,9 @@ static uint64_t __init _lwkmem_designate_by_nid(
 			g = memblock_virt_alloc_try_nid_nopanic(try_size,
 				block_size, 0, BOOTMEM_ALLOC_ACCESSIBLE, nid);
 			if (!g) {
-				pr_warn("Designating a block of %lld bytes failed\n",
-					try_size);
+				mos_ras(MOS_LWKMEM_BOOT_WARNING,
+					"%s: Designating a block of %lld bytes failed.",
+					__func__, try_size);
 				goto allocerr;
 			}
 
@@ -400,8 +414,9 @@ static uint64_t __init _lwkmem_designate_by_nid(
 	}
 
 	if (lwk_mem_needed > 0)
-		pr_warn("Could not designate %lld bytes of memory in NUMA domain %d\n",
-			lwk_mem_requested, nid);
+		mos_ras(MOS_LWKMEM_BOOT_WARNING,
+			"%s: Could not designate %lld bytes of memory in NUMA domain %d.",
+			__func__, lwk_mem_requested, nid);
 
  allocerr:
 	return lwk_mem_designated;
@@ -429,10 +444,10 @@ static int __init mos_lwkmem_setup(char *s)
 
 	/* Determine the number of NUMA domains. */
 	for_each_online_node(nid)
-		if (lwkmem_n_nodes < (nid + 1))
-			lwkmem_n_nodes = nid + 1;
+		if (lwkmem_n_online_nodes < (nid + 1))
+			lwkmem_n_online_nodes = nid + 1;
 
-	pr_info("There are %ld on-line NUMA domains.\n", lwkmem_n_nodes);
+	pr_info("There are %ld on-line NUMA domains.\n", lwkmem_n_online_nodes);
 
 	memblock_dbg("Early memblock info ---------------------------------------\n");
 	memblock_dump_all();
@@ -449,9 +464,10 @@ static int __init mos_lwkmem_setup(char *s)
 		} else {
 			*(memstr++) = '\0';
 			rc = kstrtoint(nidstr, 0, &nid);
-			if (rc || nid < 0 || nid >= lwkmem_n_nodes) {
-				pr_warn("(!) invalid NUMA id: \"%s\"\n",
-					nidstr);
+			if (rc || nid < 0 || nid >= lwkmem_n_online_nodes) {
+				mos_ras(MOS_LWKMEM_BOOT_WARNING,
+					"%s: Invalid NUMA domain: \"%s\".",
+					__func__, nidstr);
 				nid = NUMA_NO_NODE;
 			}
 		}
@@ -460,7 +476,7 @@ static int __init mos_lwkmem_setup(char *s)
 		total_requested += requested;
 
 		if (nid == NUMA_NO_NODE) {
-			requested /= lwkmem_n_nodes;
+			requested /= lwkmem_n_online_nodes;
 			for_each_online_node(nid) {
 				designated =
 					_lwkmem_designate_by_nid(requested, nid);
@@ -477,8 +493,9 @@ static int __init mos_lwkmem_setup(char *s)
 	}
 
 	if (failures > 0)
-		pr_warn("Only designated %lld of %lld bytes of LWK memory.\n",
-			total_designated, total_requested);
+		mos_ras(MOS_LWKMEM_BOOT_WARNING,
+			"%s: Only designated %lld of %lld bytes of LWK memory.",
+			__func__, total_designated, total_requested);
 	else
 		pr_info("Designated %lld bytes of LWK memory.\n",
 			total_designated);
@@ -487,15 +504,6 @@ static int __init mos_lwkmem_setup(char *s)
 }
 
 __setup("lwkmem=", mos_lwkmem_setup);
-
-/* deprecated */
-static int __init mos_lwkmem_debug_setup(char *s)
-{
-	pr_warn("(!) The lwkmem_debug kernel argument is obsolete.\n");
-	return 0;
-}
-
-__setup("lwkmem_debug=", mos_lwkmem_debug_setup);
 
 static int lwkmem_process_init(struct mos_process_t *mosp)
 {
@@ -520,6 +528,7 @@ static int lwkmem_process_init(struct mos_process_t *mosp)
 	mosp->trace_block_list_addr = 0;
 	mosp->trace_block_list_details = false;
 	mosp->lwkmem_zeroes_check = 0;
+	mosp->lwkmem_prot_none_delegation = false;
 
 	/* Initialize all memory preferences */
 	default_order = mosp->memory_preference[lwkmem_mmap].lower_type_order;
@@ -559,6 +568,7 @@ static int lwkmem_process_init(struct mos_process_t *mosp)
 			mosp->domain_order_index[m][k] = 0;
 		mosp->domain_info_len[m] = 0;
 	}
+	init_xpmem_stats(mosp);
 
 	return 0;
 }
@@ -612,7 +622,8 @@ static int lwkmem_max_pg_size_cb(const char *val, struct mos_process_t *mosp)
 	return 0;
 
  err:
-	pr_err("(!) Invalid maximum page size: %s\n", val);
+	mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+		"%s: Invalid maximum page size: %s", __func__, val);
 	return -EINVAL;
 }
 
@@ -637,7 +648,8 @@ static int lwkmem_heap_pg_size_cb(const char *val, struct mos_process_t *mosp)
 	return 0;
 
  err:
-	pr_err("(!) Invalid LWK heap page size: %s\n", val);
+	mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+		"%s: Invalid LWK heap page size: %s", __func__, val);
 	return -EINVAL;
 }
 
@@ -673,7 +685,8 @@ static int lwkmem_memory_preferences_cb(const char *val,
 		pr_debug("(*) %s:%d scope=%s thresh=%s order=%s\n", __func__, __LINE__, scope_s, thresh_s, order_s);
 
 		if (pref_s) {
-			pr_err("%s: Extraneous characters after %s:%s:%s\n",
+			mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+				"%s: Extraneous characters after %s:%s:%s",
 				 __func__, scope_s, thresh_s, order_s);
 			goto invalid;
 		}
@@ -682,16 +695,18 @@ static int lwkmem_memory_preferences_cb(const char *val,
 			order_s = thresh_s;
 			thresh = 1;
 		} else if (kstrtoul(thresh_s, 0, &thresh)) {
-			pr_err("%s: Illegal threshold: %s\n",
-			       __func__, thresh_s);
+			mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+				"%s: Illegal threshold: %s",
+				__func__, thresh_s);
 			goto invalid;
 		}
 
 		scope = lwkmem_index_of(scope_s, lwkmem_site_str,
 				       sizeof(lwkmem_site_str), false);
 		if (scope < 0) {
-			pr_err("%s: Illegal scope: %s\n",
-			       __func__, scope_s);
+			mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+				"%s: Illegal scope: %s",
+				__func__, scope_s);
 			goto invalid;
 		}
 
@@ -708,16 +723,18 @@ static int lwkmem_memory_preferences_cb(const char *val,
 				continue;
 
 			if (t >= lwkmem_type_last) {
-				pr_err("%s: overflow in order string\n",
-				       __func__);
+				mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+					"%s: overflow in order string.",
+					__func__);
 				goto invalid;
 			}
 
 			order[t] = lwkmem_index_of(mtype_s, lwkmem_type_str,
 						   lwkmem_type_last, false);
 			if (order[t] < 0) {
-				pr_err("%s: Illegal memory type: %s\n",
-				       __func__, mtype_s);
+				mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+					"%s: Illegal memory type: %s",
+					__func__, mtype_s);
 			}
 
 			t++;
@@ -730,7 +747,8 @@ static int lwkmem_memory_preferences_cb(const char *val,
 
  invalid:
 	kfree(opt);
-	pr_err("(!) Illegal value (%s) detected in %s.\n", val, __func__);
+	mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+		"%s: Illegal value detected: %s", __func__, val);
 	return -EINVAL;
 }
 
@@ -761,7 +779,8 @@ static int lwkmem_aligned_mmap_cb(const char *val, struct mos_process_t *mosp)
 			if (rc)
 				goto invalid;
 			if (opt && *opt != '\0')
-				pr_warn("%s: Ignoring extraneous arguments\n",
+				mos_ras(MOS_LWKMEM_PROCESS_WARNING,
+					"%s: Ignoring extraneous arguments.",
 					__func__);
 		}
 	}
@@ -777,7 +796,8 @@ static int lwkmem_aligned_mmap_cb(const char *val, struct mos_process_t *mosp)
 
  invalid:
 	kfree(start);
-	pr_err("(!) Illegal value (%s) detected in %s.\n", val, __func__);
+	mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+		"%s: Illegal value detected: %s", __func__, val);
 	return -EINVAL;
 }
 
@@ -813,7 +833,8 @@ static int lwkmem_brk_clear_len_cb(const char *val, struct mos_process_t *mosp)
 	return 0;
 
  invalid:
-	pr_err("(!) Illegal value (%s) detected in %s.\n", val, __func__);
+	mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+		"%s: Illegal value detected: %s", __func__, val);
 	return -EINVAL;
 }
 
@@ -830,6 +851,14 @@ static int lwkmem_load_elf_disable_cb(const char *val,
 {
 	mosp->lwkmem_load_elf_segs = false;
 	pr_debug("(*) lwkmem_load_elf_segs set to false\n");
+	return 0;
+}
+
+static int lwkmem_prot_none_delegation_enable_cb(const char *val,
+				      struct mos_process_t *mosp)
+{
+	mosp->lwkmem_prot_none_delegation = true;
+	pr_debug("(*) %s PROT_NONE delegation enabled.\n", __func__);
 	return 0;
 }
 
@@ -859,7 +888,8 @@ static int lwkmem_interleave_cb(const char *val, struct mos_process_t *mosp)
 	return 0;
 
  invalid:
-	pr_err("(!) Illegal value (%s) detected in %s.\n", val, __func__);
+	mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+		"%s: Illegal value detected: %s", __func__, val);
 	return -EINVAL;
 }
 
@@ -901,8 +931,9 @@ static int lwkmem_trace_block_lists_cb(const char *val,
 
 invalid:
 	kfree(dup);
-	pr_err("(!) Illegal value (%s) for lwkmem-dump-block-list option.\n", val ? val :
-	       "null");
+	mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+		"%s: Illegal value detected: %s",
+		__func__, val ? val : "null");
 	return -EINVAL;
 }
 
@@ -943,9 +974,19 @@ static int lwkmem_zeroes_check_cb(const char *val, struct mos_process_t *mosp)
 	return 0;
 
  invalid:
-	pr_err("(!) Illegal value (%s) detected in %s\n", val, __func__);
+	mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+		"%s: Illegal value (%s) detected.",
+		__func__, val);
 	kfree(dupd);
 	return -EINVAL;
+}
+
+static int lwkmem_xpmem_stats_cb(const char *val, struct mos_process_t *mosp)
+{
+	mosp->report_xpmem_stats = true;
+	pr_debug("(*) lwkmem-xpmem-stats\n");
+
+	return 0;
 }
 
 void insert_granule(struct mos_lwk_mem_granule *g, struct list_head *head)
@@ -985,8 +1026,9 @@ static unsigned long lwkmem_get_dynamic_memory(int nid, unsigned long size,
 	/* Create a list of contig physical memory ranges that we can offline */
 	spin_lock_irqsave(&zone_movable->lock, flags);
 	if (zone_is_empty(zone_movable)) {
-		pr_warn("Node %d: No ZONE_MOVABLE memory! can't have LWKMEM\n",
-			nid);
+		mos_ras(MOS_LWKCTL_FAILURE,
+			"%s: Node %d has no ZONE_MOVABLE memory and cannot host LWK memory.",
+			__func__, nid);
 		spin_unlock_irqrestore(&zone_movable->lock, flags);
 		goto out;
 	}
@@ -1058,10 +1100,22 @@ static unsigned long lwkmem_get_dynamic_memory(int nid, unsigned long size,
 		pr_info("Node %d: offlining va 0x%p pa 0x%lx pfn %ld-%ld:%ld\n",
 			nid, curr->base, __pa(curr->base), start_pfn,
 			start_pfn + nr_pages - 1, nr_pages);
-		rc = offline_pages(start_pfn, nr_pages);
+
+		do {
+			/* We don't need a timeout here. Linux kernel 4.15
+			 * onwards offline_pages() doesn't implement timeout
+			 * anymore. It repeats until it sees an error -EINTR,
+			 * -EBUSY or -ENOMEM based on the error condition.
+			 * So we can safely retry here upon -EAGAIN which is
+			 * the correct behavior even with the future rebases.
+			 */
+			rc = offline_pages(start_pfn, nr_pages);
+		} while (rc == -EAGAIN);
+
 		if (rc) {
-			pr_err("Node %d: offline va 0x%p pages %ld: rc %d\n",
-				nid, curr->base, nr_pages, rc);
+			mos_ras(MOS_LWKCTL_FAILURE,
+				"%s: Could not offline pages for node %d.  Address:0x%p Count:%ld: status:%d.",
+				__func__, nid, curr->base, nr_pages, rc);
 			total_size -= curr->length;
 		} else {
 			while (nr_pages--) {
@@ -1149,12 +1203,17 @@ int mos_mem_init(nodemask_t *nodes, resource_size_t *requests)
 		return -EINVAL;
 
 	pr_info("Initializing memory management\n");
-	lwkmem_n_nodes = 0;
+	lwkmem_n_online_nodes = 0;
 	nodes_clear(mask);
 	nodes_or(mask, mask, *nodes);
 
 	WARN(!list_empty(&mos_lwk_memory_list),
 	     "LWK memory list is not empty");
+
+	/* Determine the number of NUMA domains. */
+	for_each_online_node(n)
+		if (lwkmem_n_online_nodes < (n + 1))
+			lwkmem_n_online_nodes = n + 1;
 
 	for_each_node_mask(n, *nodes) {
 		node_clear(n, mask);
@@ -1172,16 +1231,14 @@ int mos_mem_init(nodemask_t *nodes, resource_size_t *requests)
 				sz_dist, nodemask_pr_args(&mask));
 			if (lwkmem_distribute_request(sz_dist, &mask,
 						      requests)) {
-				pr_err("Could not distribute req %lld bytes!\n",
-					sz_dist);
+				mos_ras(MOS_LWKCTL_FAILURE,
+					"%s: Could not distribute the request for %lld bytes of LWK memory.",
+					__func__, sz_dist);
 				sz_req += sz_dist;
 			}
 			/* Update request with what is actually allocated */
 			requests[n] = sz;
 		}
-
-		if (sz && ((n + 1) > lwkmem_n_nodes))
-			lwkmem_n_nodes = n + 1;
 
 		sz_alloc += sz;
 		sz_req += requests[n];
@@ -1191,7 +1248,9 @@ int mos_mem_init(nodemask_t *nodes, resource_size_t *requests)
 			node_clear(n, *nodes);
 	}
 	if (sz_alloc != sz_req)
-		pr_warn("Could not allocate all requested memory\n");
+		mos_ras(MOS_LWKCTL_FAILURE,
+			"%s: Could not allocate all requested LWK memory.  Requested:%lld Allocated:%lld",
+			__func__, sz_req, sz_alloc);
 
 	pr_warn("Requested %lld MB Allocated %lld MB\n",
 		sz_req >> 20, sz_alloc >> 20);
@@ -1212,9 +1271,10 @@ int mos_mem_free(void)
 	mem_hotplug_begin();
 	list_for_each_entry_safe(curr, next, &mos_lwk_memory_list, list) {
 		if (curr->owner != -1) {
-			pr_warn("Freeing block in use(!):  ");
-			pr_warn("\t[%pK-%pK], 0x%llx bytes, owner %d nid %d\n",
-				curr->base, curr->base + curr->length - 1,
+			mos_ras(MOS_LWKCTL_FAILURE,
+				"%s: Block is in use.  block:[%pK-%pK] length:0x%llx owner:%d node:%d",
+				__func__, curr->base,
+				curr->base + curr->length - 1,
 				curr->length, curr->owner, curr->nid);
 		}
 		list_del(&curr->list);
@@ -1229,8 +1289,9 @@ int mos_mem_free(void)
 			curr->nid, curr->base, __pa(curr->base), start_pfn,
 			start_pfn + nr_pages - 1,  nr_pages);
 		if (online_pages(start_pfn, nr_pages, MMOP_ONLINE_KEEP)) {
-			pr_err("Node %d: online va 0x%p pages %lu failed!\n",
-			       curr->nid, curr->base, nr_pages);
+			mos_ras(MOS_LWKCTL_FAILURE,
+				"%s: Could not online pages.  node:%d address:0x%p pages:%lu",
+				__func__, curr->nid, curr->base, nr_pages);
 		}
 		kfree(curr);
 	}
@@ -1268,6 +1329,10 @@ static void mos_register_lwkmem_callbacks(void)
 				     lwkmem_trace_block_lists_cb);
 	mos_register_option_callback("lwkmem-zeroes-check",
 				     lwkmem_zeroes_check_cb);
+	mos_register_option_callback("lwkmem-prot-none-delegation-enable",
+				     lwkmem_prot_none_delegation_enable_cb);
+	mos_register_option_callback("lwkmem-xpmem-stats",
+				     lwkmem_xpmem_stats_cb);
 
 }
 
@@ -1352,13 +1417,16 @@ static struct blk_list *create_and_link_block(struct lwk_process_granule *pgran,
 	addr = block_addr(newb);
 
 	if (addr != roundup(addr, kind_size[knd]))
-		pr_err("(!) block list %#016llx [%s] is not aligned (%#llX)\n",
-		       addr, kind_str[knd], kind_size[knd]-1);
+		mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+			"%s: Block list %#016llx [%s] is not aligned (%#llX).",
+			__func__, addr, kind_str[knd], kind_size[knd]-1);
 
 	if (pgran->offset > pgran->granule->length) {
-		pr_err("(!) block list %#016llx [%s] overflows granule [%#016llx-%#016llX]\n",
-		       addr, kind_str[knd], (uint64_t)pgran->granule->base,
-		       (uint64_t)pgran->granule->base + pgran->granule->length);
+		mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+			"%s: Block list %#016llx [%s] overflows granule [%#016llx-%#016llX).",
+			__func__, addr, kind_str[knd],
+			(uint64_t)pgran->granule->base,
+			(uint64_t)pgran->granule->base + pgran->granule->length);
 	}
 
 	trace_mos_mem_block_reserved(0, 0, addr, length, knd, newb->num_blks,
@@ -1520,8 +1588,9 @@ void lwkmem_release(struct mos_process_t *mos_p)
 
 	/* There is a problem, if lwkmem_list is empty */
 	if (list_empty(&(mos_p->lwkmem_list))) {
-		pr_warn("lwkmem_release() process %d has no memory!\n",
-			current->pid);
+		mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+			"%s: Process %d has no LWK memory.",
+			__func__, current->pid);
 		return;
 	}
 
@@ -1581,6 +1650,7 @@ void lwkmem_release(struct mos_process_t *mos_p)
 			kfree(elt);
 		}
 	}
+	show_xpmem_stats(mos_p);
 }
 
 /*
@@ -1598,13 +1668,13 @@ static void lwkmem_globalmem(unsigned long *totalram, unsigned long *freeram,
 {
 	unsigned long total[MAX_NUMNODES] = {0};
 	unsigned long res[MAX_NUMNODES] = {0};
-	int n = ARRAY_SIZE(total);
+	size_t n = ARRAY_SIZE(total);
 
 	if (!totalram || !freeram)
 		return;
 
-	lwkmem_get(total, (size_t *) &n);
-	lwkmem_reserved_get(res, (size_t *) &n);
+	lwkmem_get(total, &n);
+	lwkmem_reserved_get(res, &n);
 	*totalram = *freeram = 0;
 
 	if (nid == NUMA_NO_NODE) {
@@ -2105,9 +2175,9 @@ void print_pgd(pgd_t *cr3, unsigned long addr)
  * Each lwkmem vma covers a physically contigous range of memory of a given
  * page size specified by knd. The memory range starts at phys.
  */
-static int build_pagetbl(enum lwkmem_kind_t knd, struct vm_area_struct *vma,
-			 unsigned long phys, unsigned long addr,
-			 unsigned long end, unsigned int stride)
+int build_pagetbl(enum lwkmem_kind_t knd, struct vm_area_struct *vma,
+		  unsigned long phys, unsigned long addr, unsigned long end,
+		  unsigned int stride)
 {
 	unsigned long i, nr_pages;
 	struct mm_struct *mm = current->mm;
@@ -2127,14 +2197,18 @@ static int build_pagetbl(enum lwkmem_kind_t knd, struct vm_area_struct *vma,
 		p4d = p4d_alloc(mm, pgd, addr);
 
 		if (!p4d) {
-			pr_err("p4d_alloc() failed on line %d\n", __LINE__);
+			mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+				"%s: Page table allocation failure: P4D",
+				__func__);
 			rc = -ENOMEM;
 			goto pagetbl_err;
 		}
 
 		pud = pud_alloc(mm, p4d, addr);
 		if (!pud) {
-			pr_err("pud_alloc() failed on line %d\n", __LINE__);
+			mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+				"%s: Page table allocation failure: PUD",
+				__func__);
 			rc = -ENOMEM;
 			goto pagetbl_err;
 		}
@@ -2164,18 +2238,21 @@ static int build_pagetbl(enum lwkmem_kind_t knd, struct vm_area_struct *vma,
 			/* *pud = entry */
 			set_pud(pud, entry);
 
-			/* Initialize pages and add mapping. */
-			p = pud_page(entry);
-			prep_compound_page(p, PUD_SHIFT - PAGE_SHIFT);
-			lwkpage_add_rmap(p, vma, addr & PUD_MASK);
+			if (!is_lwkxpmem(vma)) {
+				/* Initialize pages and add mapping. */
+				p = pud_page(entry);
+				prep_compound_page(p, PUD_SHIFT - PAGE_SHIFT);
+				lwkpage_add_rmap(p, vma, addr & PUD_MASK);
 
-			nr_pages = 1 << (PUD_SHIFT - PAGE_SHIFT);
-			for (i = 0; i < nr_pages; i++)
-				lwkmem_page_init(p + i);
+				nr_pages = 1 << (PUD_SHIFT - PAGE_SHIFT);
+				for (i = 0; i < nr_pages; i++)
+					lwkmem_page_init(p + i);
+			}
 
 			spin_unlock(ptl);
 
-			if (lwkmem_zeroes_check_enabled(ZCHECK_ALLOCATE))
+			if (!is_lwkxpmem(vma) &&
+			    lwkmem_zeroes_check_enabled(ZCHECK_ALLOCATE))
 				lwkmem_check_for_zero(addr, kind_size[knd], mm,
 						      "alloc");
 
@@ -2184,8 +2261,9 @@ static int build_pagetbl(enum lwkmem_kind_t knd, struct vm_area_struct *vma,
 
 			pmd = pmd_alloc(mm, pud, addr);
 			if (!pmd) {
-				pr_err("pmd_alloc() failed on line %d\n",
-					__LINE__);
+				mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+					"%s: Page table allocation failure: PMD",
+					__func__);
 				rc = -ENOMEM;
 				goto pagetbl_err;
 			}
@@ -2206,19 +2284,22 @@ static int build_pagetbl(enum lwkmem_kind_t knd, struct vm_area_struct *vma,
 			/* *pmd = entry */
 			set_pmd_at(mm, addr, pmd, entry);
 
-			/* Initialize pages and add mapping. */
-			p = pmd_page(entry);
+			if (!is_lwkxpmem(vma)) {
+				/* Initialize pages and add mapping. */
+				p = pmd_page(entry);
 
-			prep_compound_page(p, HPAGE_PMD_ORDER);
-			lwkpage_add_rmap(p, vma, addr & HPAGE_PMD_MASK);
+				prep_compound_page(p, HPAGE_PMD_ORDER);
+				lwkpage_add_rmap(p, vma, addr & HPAGE_PMD_MASK);
 
-			nr_pages = 1 << HPAGE_PMD_ORDER;
-			for (i = 0; i < nr_pages; i++)
-				lwkmem_page_init(p + i);
+				nr_pages = 1 << HPAGE_PMD_ORDER;
+				for (i = 0; i < nr_pages; i++)
+					lwkmem_page_init(p + i);
+			}
 
 			spin_unlock(ptl);
 
-			if (lwkmem_zeroes_check_enabled(ZCHECK_ALLOCATE))
+			if (!is_lwkxpmem(vma) &&
+			    lwkmem_zeroes_check_enabled(ZCHECK_ALLOCATE))
 				lwkmem_check_for_zero(addr, kind_size[knd], mm,
 						      "alloc");
 
@@ -2227,16 +2308,18 @@ static int build_pagetbl(enum lwkmem_kind_t knd, struct vm_area_struct *vma,
 
 			pmd = pmd_alloc(mm, pud, addr);
 			if (!pmd) {
-				pr_err("pmd_alloc() failed on line %d\n",
-					__LINE__);
+				mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+					"%s: Page table allocation failure: PMD",
+					__func__);
 				rc = -ENOMEM;
 				goto pagetbl_err;
 			}
 
 			pte = pte_alloc_map_lock(mm, pmd, addr, &ptl);
 			if (!pte) {
-				pr_err("pte_alloc_map_lock() failed on line %d\n",
-					__LINE__);
+				mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+					"%s: Page table allocation failure: PTE",
+					__func__);
 				rc = -ENOMEM;
 				goto pagetbl_err;
 			}
@@ -2253,20 +2336,25 @@ static int build_pagetbl(enum lwkmem_kind_t knd, struct vm_area_struct *vma,
 			/* *pte = entry */
 			set_pte_at(mm, addr, pte, entry);
 
-			/* Initialize page and add mapping. */
-			p = pte_page(entry);
-			ClearPageHead(p);
-			clear_compound_head(p);
-			lwkpage_add_rmap(p, vma, addr);
-			lwkmem_page_init(p);
+			if (!is_lwkxpmem(vma)) {
+				/* Initialize page and add mapping. */
+				p = pte_page(entry);
+				ClearPageHead(p);
+				clear_compound_head(p);
+				lwkpage_add_rmap(p, vma, addr);
+				lwkmem_page_init(p);
+			}
 			pte_unmap_unlock(pte, ptl);
 
-			if (lwkmem_zeroes_check_enabled(ZCHECK_ALLOCATE))
+			if (!is_lwkxpmem(vma) &&
+			    lwkmem_zeroes_check_enabled(ZCHECK_ALLOCATE))
 				lwkmem_check_for_zero(addr, kind_size[knd], mm,
 						      "alloc");
 
 		} else {
-			pr_err("Other page sizes not supported yet!\n");
+			mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+				"%s: Page table allocation failure: Page size not supported (%d)",
+				__func__, knd);
 			rc = -ENOMEM;
 			goto pagetbl_err;
 		}
@@ -2315,8 +2403,9 @@ static long build_lwkvma(enum lwkmem_kind_t knd, unsigned long addr,
 			/* Supposed to map at 0. Let Linux do that. */
 			return -ENOSYS;
 		if ((addr & (lwk_page_size[knd] - 1)) != 0) {
-			pr_err("Hint addr 0x%lx not aligned with %s page\n",
-				addr, kind_str[knd]);
+			mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+				"%s: Hint address 0x%lx not aligned with %s page.",
+				__func__, addr, kind_str[knd]);
 			return -ENOSYS;
 		}
 	} else {
@@ -2382,9 +2471,9 @@ static long build_lwkvma(enum lwkmem_kind_t knd, unsigned long addr,
 	/* find_vma_links() finds the place where this vm entry should go */
 	rc = find_vma_links(mm, addr, addr + len, &prev, &rb_link, &rb_parent);
 	if (rc) {
-		pr_err("%s: find_vma_links(%p, 0x%lx, 0x%lx, ...)=%i\n",
-		       __func__, mm, addr, addr + len, rc);
-		do_munmap(mm, addr, addr + len, NULL);
+		mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+			"%s: find_vma_links(%p, 0x%lx, 0x%lx, ...)=%i",
+			__func__, mm, addr, addr + len, rc);
 		goto out;
 	}
 
@@ -2395,8 +2484,9 @@ static long build_lwkvma(enum lwkmem_kind_t knd, unsigned long addr,
 		/* Get us some memory to store our vm_area_struct structure */
 		*vma = kmem_cache_zalloc(vm_area_cachep, GFP_KERNEL);
 		if (!vma) {
-			pr_err("kmem_cache_zalloc() failed on line %d\n",
-				__LINE__);
+			mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+				"%s: kmem_cache_zalloc() failed to allocate a VMA.",
+				__func__);
 			goto out;
 		}
 
@@ -2623,8 +2713,9 @@ static long allocate_blocks(unsigned long addr, int64_t len,
 			}
 
 			if (!elt) {
-				pr_err("INTERNAL ERROR: %s block list is empty!\n",
-				       kind_str[k]);
+				mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+					"%s: Block list for %s pages is empty.",
+					__func__, kind_str[k]);
 				new_addr = -ENOMEM;
 				goto alloc_err;
 			}
@@ -2717,7 +2808,8 @@ static long allocate_blocks(unsigned long addr, int64_t len,
 		trace_block_lists(mosp);
 
 	if (total != 0) {
-		pr_err("%s: INTERNAL ERROR: %lld bytes unallocated.\n",
+		mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+			"%s: %lld bytes were not allocated.",
 			__func__, total);
 		new_addr = -ENOMEM;
 		goto alloc_err;
@@ -3057,7 +3149,8 @@ static long allocate_blocks_interleaved(unsigned long addr, int64_t len,
 	return base_addr;
 
  alloc_error:
-	pr_err("(!) %s failed.\n", __func__);
+	mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+		"%s: Request failed.", __func__);
 	if (base_addr && (len - total > 0LL))
 		deallocate_blocks(base_addr, len - total, mosp, current->mm);
 
@@ -3083,14 +3176,15 @@ static int _lwkmem_get(unsigned long *lwkm, size_t *n,
 
 	rc = 0;
 
-	if (*n < lwkmem_n_nodes) {
-		pr_warn("(!) lwkmem request buffer too small: %ld but need %ld\n",
-			*n, lwkmem_n_nodes);
+	if (*n < lwkmem_n_online_nodes) {
+		mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+			"%s: Request array length too small.  actual:%ld expected:%ld.",
+			__func__, *n, lwkmem_n_online_nodes);
 		rc = -EINVAL;
 		goto out;
 	}
 
-	memset(lwkm, 0, lwkmem_n_nodes * sizeof(unsigned long));
+	memset(lwkm, 0, lwkmem_n_online_nodes * sizeof(unsigned long));
 
 	mutex_lock(&lwkmem_mutex);
 
@@ -3100,14 +3194,15 @@ static int _lwkmem_get(unsigned long *lwkm, size_t *n,
 			if (filter(g))
 				lwkm[g->nid] += g->length;
 		} else {
-			pr_warn("(!) NID out of bounds: %pS-%lld-%d-%d\n",
-				g->base, g->length, g->nid, g->owner);
+			mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+				"%s: Invalid NID. granule addr:%pS length:%lld nid:%d owner:%d",
+				__func__, g->base, g->length, g->nid, g->owner);
 			rc = -EINVAL;
 			goto unlock;
 		}
 	}
 
-	*n = lwkmem_n_nodes;
+	*n = lwkmem_n_online_nodes;
 
  unlock:
 	mutex_unlock(&lwkmem_mutex);
@@ -3141,13 +3236,15 @@ int lwkmem_request(struct mos_process_t *mos_p, unsigned long *req, size_t n)
 	mos_p->lwkmem = 0;
 
 	if (list_empty(&mos_lwk_memory_list)) {
-		pr_err("%s: No memory in mos_lwk_memory_list!\n", __func__);
+		mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+			"%s: The LWK memory list is empty.", __func__);
 		return -EINVAL;
 	}
 
 	/* There should be no memory reserved for this process yet */
 	if (!list_empty(&(mos_p->lwkmem_list))) {
-		pr_err("%s: Process %d already has some memory!\n",
+		mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+			"%s: The LWK memory list for process %d is not empty.",
 			__func__, current->pid);
 		return -EINVAL;
 	}
@@ -3319,7 +3416,7 @@ unsigned long next_lwkmem_address(unsigned long len, struct mos_process_t *mosp)
  * look up kernel virtual address from user pfn.
  */
 static void clear_user_lwkpg(struct mm_struct *mm, unsigned long uva,
-				   int pte_dirty)
+			     int pte_dirty)
 {
 	unsigned int size = 0;
 	struct page *page = 0;
@@ -3342,6 +3439,20 @@ static void clear_user_lwkpg(struct mm_struct *mm, unsigned long uva,
 
 	nr_pages = size / PAGE_SIZE;
 	while (nr_pages--) {
+		/*
+		 * When huge pages are XPMEM shared. It is possible that only
+		 * parts of the huge page are attached/mapped with different
+		 * lower sized TLBs in the non-owner process. In that case only
+		 * a portion of the original huge page which was shared may get
+		 * dirtied. We mark all base pages corresponding to the dirtied
+		 * shared region as dirty during page table clearing of the
+		 * non-owner process. So here we catch such base pages and
+		 * clear them.
+		 */
+		if (is_lwkpg_dirty(page)) {
+			memset((void *) page_to_virt(page), 0, PAGE_SIZE);
+			clear_lwkpg_dirty(page);
+		}
 		page->mapping = NULL;
 		page_mapcount_reset(page);
 		clear_compound_head(page);
@@ -3354,7 +3465,8 @@ static void clear_user_lwkpg(struct mm_struct *mm, unsigned long uva,
 	return;
 
  warn:
-	pr_warn("(!) %s: did not clear memory @ %lx size=%x mm=%p pg=%p\n",
+	mos_ras(MOS_LWKMEM_PROCESS_WARNING,
+		"%s: Did not clear memory. address:%lx size:%x mm:%p page:%p",
 		__func__, uva, size, mm, page);
 }
 
@@ -3368,7 +3480,7 @@ static void clear_user_lwkpg(struct mm_struct *mm, unsigned long uva,
  * address range @addr to @end is contig i.e with stride=1.
  */
 int unmap_pagetbl(enum lwkmem_kind_t k, unsigned long addr, unsigned long end,
-		  unsigned int stride, struct mm_struct *mm)
+		  unsigned int stride, struct mm_struct *mm, bool lwkxpmem)
 {
 	pgd_t *pgd;
 	p4d_t *p4d;
@@ -3380,7 +3492,8 @@ int unmap_pagetbl(enum lwkmem_kind_t k, unsigned long addr, unsigned long end,
 	unsigned long remain = end - addr;
 
 	if (mm == NULL) {
-		pr_err("(!) %s: no mm context!\n", __func__);
+		mos_ras(MOS_LWKMEM_PROCESS_WARNING,
+			"%s: no mm context.", __func__);
 		return -EINVAL;
 	}
 
@@ -3388,8 +3501,9 @@ int unmap_pagetbl(enum lwkmem_kind_t k, unsigned long addr, unsigned long end,
 
 		pgd = pgd_offset(mm, addr);
 		if (!pgd_present(*pgd)) {
-			pr_warn("(!) %s() [%s map]: pgd not present addr %lx\n",
-				__func__, kind_str[k], addr);
+			mos_ras(MOS_LWKMEM_PROCESS_WARNING,
+				"%s: PGD not present for address:%lx size:%s",
+				__func__, addr, kind_str[k]);
 			continue;
 		}
 
@@ -3401,8 +3515,9 @@ int unmap_pagetbl(enum lwkmem_kind_t k, unsigned long addr, unsigned long end,
 		pud = pud_offset(p4d, addr);
 
 		if (!pud_present(*pud)) {
-			pr_warn("(!) %s() [%s map]: pud not present addr %lx\n",
-				__func__, kind_str[k], addr);
+			mos_ras(MOS_LWKMEM_PROCESS_WARNING,
+				"%s: PUD not present for address:%lx size:%s",
+				 __func__, addr, kind_str[k]);
 			continue;
 		}
 
@@ -3423,16 +3538,18 @@ int unmap_pagetbl(enum lwkmem_kind_t k, unsigned long addr, unsigned long end,
 				pmd_clear(pmd);
 				flush_tlb_mm_range(mm, addr, addr+size, 0);
 			} else
-				pr_err("(!)%s()[%s map]: pmd not present %lx\n",
-					__func__, kind_str[k], addr);
+				mos_ras(MOS_LWKMEM_PROCESS_WARNING,
+					"%s: PMD not present for address:%lx size:%s",
+					__func__, addr, kind_str[k]);
 			spin_unlock(ptl);
 		} else if (size == SZ_4K) {
 			pmd = pmd_offset(pud, addr);
 			if (pmd_present(*pmd)) {
 				pte = pte_offset_map_lock(mm, pmd, addr, &ptl);
 				if (!pte) {
-					pr_warn("(!) %s - 4K PTE fail at %lx",
-						__func__, addr);
+					mos_ras(MOS_LWKMEM_PROCESS_WARNING,
+						"%s: PTE not found for address:%lx size:%s",
+						__func__, kind_str[k], addr);
 					continue;
 				}
 				if (pte_present(*pte)) {
@@ -3442,14 +3559,17 @@ int unmap_pagetbl(enum lwkmem_kind_t k, unsigned long addr, unsigned long end,
 					flush_tlb_mm_range(mm, addr,
 						addr+size, 0);
 				} else
-					pr_err("(!)%s() pte not present %lx\n",
-						__func__, addr);
+					mos_ras(MOS_LWKMEM_PROCESS_WARNING,
+						"%s: PTE not present for address:%lx size:%s",
+						__func__, addr, kind_str[k]);
 				pte_unmap_unlock(pte, ptl);
 			} else
-				pr_err("(!)%s()[%s map] pmd not present %lx\n",
-					__func__, kind_str[k], addr);
+				mos_ras(MOS_LWKMEM_PROCESS_WARNING,
+					"%s: PMD not present for address:%lx size:%s",
+					__func__, addr, kind_str[k]);
 		} else {
-			pr_err("(!) Page size %lu not supported.\n", size);
+			mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+				"%s: Page size %lu not supported.", size);
 			return -EINVAL;
 		}
 	}
@@ -3464,8 +3584,10 @@ struct blk_list *split_block(struct blk_list *bl, enum lwkmem_kind_t k,
 	unsigned long blks = offset / kind_size[k];
 
 	if (unlikely((blks >= bl->num_blks) || (offset & (kind_size[k] - 1)))) {
-		pr_err("(!) %s cannot split block [%#016lx,%lld] at offset %lx (%ld)\n",
-		       __func__, block_addr(bl), bl->num_blks, offset, blks);
+		mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+			"%s: Cannot split block.  size:%s address:%#016lx count:%lld offset:%lx blocks:%ld",
+			__func__, kind_str[k], block_addr(bl), bl->num_blks,
+			offset, blks);
 		return NULL;
 	}
 
@@ -3507,7 +3629,9 @@ static long deallocate_block(unsigned long addr, unsigned long len,
 				block_sz = bl->num_blks * kind_size[k];
 
 				if (bl->stride != 1) {
-					pr_warn("(!) %s assumes stride of 1\n", __func__);
+					mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+						"%s: Stride must be 1.",
+						__func__);
 					return -1;
 				}
 
@@ -3516,7 +3640,8 @@ static long deallocate_block(unsigned long addr, unsigned long len,
 					continue;
 
 				if (addr & (kind_size[k] - 1)) {
-					pr_warn("(!) %s addr=%lx is not %s aligned\n",
+					mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+						"%s: Address is not left aligned.  addr:%lx size:%s",
 						__func__, addr, kind_str[k]);
 					return -1;
 				}
@@ -3525,8 +3650,9 @@ static long deallocate_block(unsigned long addr, unsigned long len,
 				right = (addr + len) >= (bl->vma_addr + block_sz);
 
 				if (!right && ((addr + len) & (kind_size[k] - 1))) {
-					pr_warn("(!) %s addr+len=%lx+%ld is not %s aligned\n",
-						__func__, addr, len,
+					mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+						"%s: Address is not right aligned. Addr+length=%lx+%ld=%lx size:%s",
+						__func__, addr, len, addr + len,
 						kind_str[k]);
 					return -1;
 				}
@@ -3589,7 +3715,8 @@ static long deallocate_block(unsigned long addr, unsigned long len,
 
 				free_sz = freebl->num_blks * kind_size[k];
 				rc = unmap_pagetbl(k, freebl->vma_addr,
-					   freebl->vma_addr + free_sz, 1, mm);
+					   freebl->vma_addr + free_sz, 1, mm,
+					   false);
 
 				if (rc)
 					goto out;
@@ -3706,7 +3833,7 @@ static long deallocate_blocks_interleaved(unsigned long addr, unsigned long len,
 
 				rc = unmap_pagetbl(k, freed->vma_addr,
 					   freed->vma_addr + block_size_virt(freed, k),
-					   freed->stride, mm);
+					   freed->stride, mm, false);
 
 				if (rc)
 					goto err;
@@ -3741,7 +3868,8 @@ static long deallocate_blocks_interleaved(unsigned long addr, unsigned long len,
 	return 0;
 
  err:
-	pr_err("(!) %s failed.\n", __func__);
+	mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+		"%s: Failed.", __func__);
 	return -1;
 }
 

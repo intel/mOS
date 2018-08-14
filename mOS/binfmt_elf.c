@@ -39,7 +39,8 @@ unsigned long elf_map_to_lwkmem(unsigned long addr, unsigned long size,
 	mosp = current->mos_process;
 
 	if (!mosp) {
-		pr_warn("(!) %s(): %d is not an mOS process.\n",
+		mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+			"%s: pid %d is not an mOS process.",
 			__func__, current->pid);
 		map_addr = -EINVAL;
 		goto out;

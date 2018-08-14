@@ -23,6 +23,7 @@
 #include <linux/slab.h>
 #include <linux/mempolicy.h>
 #include <linux/ftrace.h>
+#include <asm/tlb.h>
 #include "lwkmem.h"
 
 #define CREATE_TRACE_POINTS
@@ -61,30 +62,47 @@ static struct vm_area_struct *mos_find_vma(struct mm_struct *mm,
  * with exact overlap in the address range being requested.
  *
  */
-void unmap_lwkmem_range(struct mm_struct *mm, struct vm_area_struct *vma,
-			unsigned long start, unsigned long end)
+void unmap_lwkmem_range(struct mmu_gather *tlb, struct vm_area_struct *vma,
+			unsigned long start, unsigned long end,
+			struct zap_details *details)
 {
+	struct mm_struct *mm = tlb->mm;
 	struct mos_process_t *mosp = current->mos_process;
 
-	if (!mosp) {
-		pr_warn("(!) %s(): pid %d is not an mOS process.\n",
-			__func__, current->pid);
-		return;
-	}
-
 	if (!vma || start > end) {
-		pr_warn("(!) %s(): pid %d Invalid args.\n",
-			__func__, current->pid);
+		mos_ras(MOS_LWKMEM_PROCESS_WARNING,
+			"%s: Invalid arguments.  pid:%d vma:%p start:%lx end:%lx.",
+			__func__, current->pid, vma, start, end);
 		return;
 	}
 
 	if (start == end)
 		return;
 
+	if (is_lwkxpmem(vma)) {
+		if (unmap_lwkxpmem_range(vma, start, end)) {
+			pr_err("%s():ERR Unmapping LWKXPMEM[%lx-%lx][%lx-%lx]",
+			       __func__, vma->vm_start, vma->vm_end,
+			       start, end);
+		} else {
+			/* Unmap Linux part of LWKXPMEM VMA if any. */
+			unmap_page_range(tlb, vma, start, end, details);
+		}
+		goto out;
+	}
+
+	if (!mosp) {
+		mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+			"%s: pid %d is not an mOS process.",
+			__func__, current->pid);
+		return;
+	}
+
 	if (unlikely(!is_lwkmem(vma))) {
 		list_vmas(mm);
-		pr_warn("(!) %s() pid %d: 0x%016lx-0x%016lx is not lwk vma\n",
-			__func__, current->pid, start, end);
+		mos_ras(MOS_LWKMEM_PROCESS_WARNING,
+			"%s: Memory range[0x%016lx,0x%016lx) is not in an LWK VMA. pid=%d.",
+			__func__, start, end, current->pid);
 		return;
 	}
 
@@ -92,7 +110,8 @@ void unmap_lwkmem_range(struct mm_struct *mm, struct vm_area_struct *vma,
 	 * alert if we see an unsupported use case.
 	 */
 	if (vma->vm_start != start || vma->vm_end != end) {
-		pr_warn("WARN:%s() vma %016lx-%016lx region %016lx-%016lx\n",
+		mos_ras(MOS_LWKMEM_PROCESS_WARNING,
+			"%s: Partial unmapping is not supported.  VMA: [%016lx,%016lx) region: [%016lx,%016lx)",
 			__func__, vma->vm_start, vma->vm_end, start, end);
 		return;
 	}
@@ -102,6 +121,7 @@ void unmap_lwkmem_range(struct mm_struct *mm, struct vm_area_struct *vma,
 	 * but we are no worse off than we were before.
 	 */
 	deallocate_blocks(start, end-start, mosp, mm);
+out:
 	trace_mos_munmap(start, end-start, 0, current->tgid);
 }
 
@@ -118,14 +138,26 @@ asmlinkage long lwk_sys_mmap_pgoff(unsigned long addr, unsigned long len,
 	mosp = current->mos_process;
 	/* Let Linux deal with this, if it is not a mOS task */
 
-	if (!mosp || (mosp->lwkmem <= 0) || !(flags & MAP_ANONYMOUS)) {
+	if (!mosp || (mosp->lwkmem <= 0) ||
+	    !(flags & MAP_ANONYMOUS) || (flags & MAP_SHARED)) {
+		ret = -ENOSYS;
+		goto out;
+	}
+
+	if (prot == PROT_NONE && mosp->lwkmem_prot_none_delegation) {
 		ret = -ENOSYS;
 		goto out;
 	}
 
 	/* Alignment test from arch/x86/kernel/sys_x86_64.c */
-	if (pgoff & ~PAGE_MASK) {
+	if ((pgoff & ~PAGE_MASK) || (len == 0)) {
 		ret = -EINVAL;
+		goto out;
+	}
+
+	if (len > TASK_SIZE ||
+	    ((flags & MAP_FIXED) && (addr > TASK_SIZE - len))) {
+		ret = -ENOMEM;
 		goto out;
 	}
 
@@ -134,30 +166,98 @@ asmlinkage long lwk_sys_mmap_pgoff(unsigned long addr, unsigned long len,
 		goto out;
 	}
 
-	if (addr) {
+	if (unlikely(addr && (flags & MAP_FIXED))) {
+		unsigned long a0, a1, b0, b1;
+		int nlinux = 0, nlwk = 0;
+
+		a0 = addr;
+		a1 = addr + len;
+
+		while (a0 < a1) {
+
+			vma = find_vma_intersection(current->mm, a0, a1);
+
+			if (!vma)
+				break;
+
+			b0 = max(vma->vm_start, a0);
+			b1 = min(vma->vm_end, a1);
+
+			/* Unmap overlapping LWK VMAs.  And also, unmap any
+			 * private, anonymous, inaccessible VMAs if we are
+			 * in reclamation mode.  Let Linux handle the other
+			 * cases.
+			 */
+			if (is_lwkmem(vma) || (mosp->lwkmem_prot_none_delegation &&
+			       !vma->vm_file &&
+			       !(vma->vm_flags & (VM_MAYSHARE | VM_READ | VM_WRITE | VM_EXEC)))) {
+
+				nlwk++;
+
+				trace_mos_unmapped_region(b0, b1 - b0,
+					  vma->vm_flags, current->tgid);
+
+				if (do_munmap(current->mm, b0, b1 - b0, NULL)) {
+					mos_ras(MOS_LWKMEM_PROCESS_WARNING,
+						"%s: Could not unmap [%lx,%lx)",
+						__func__, b0, b1);
+					ret = -ENOMEM;
+					goto done;
+				}
+			} else
+				nlinux++;
+
+			a0 = vma->vm_end;
+		}
+
+		/* If we are delgating to Linux, ensure that all overlapping
+		 * VMAs were Linux VMAs.
+		 */
+
+		if (nlinux > 0) {
+
+			if (nlwk > 0) {
+				mos_ras(MOS_LWKMEM_PROCESS_WARNING,
+					"%s: Mixed VMA types detected in mmap [%lx,%lx) Linux:%d LWK:%d",
+					__func__, addr, addr + len, nlinux, nlwk);
+				ret = -ENOMEM;
+			} else {
+				ret = -ENOSYS;
+			}
+			goto done;
+		}
+
+	} else if (unlikely(addr)) {
 		vma = mos_find_vma(current->mm, addr);
+
 		if (vma && !is_lwkmem(vma)) {
 			up_write(&current->mm->mmap_sem);
 			ret = -ENOSYS;
-			goto out;
+			goto done;
 		}
 	}
 
 	if (mosp->lwkmem_mmap_aligned_threshold > 0) {
 		if (len >= mosp->lwkmem_mmap_aligned_threshold) {
-			addr = next_lwkmem_address(len, mosp);
-			ret = allocate_blocks_fixed(addr, len, prot,
+			if (!(flags & MAP_FIXED))
+				addr = next_lwkmem_address(len, mosp);
+
+			if (addr <= TASK_SIZE - len) {
+				ret = allocate_blocks_fixed(addr, len, prot,
 					flags | MAP_FIXED, lwkmem_mmap);
-		} else {
-			opts = allocate_options_factory(lwkmem_mmap, len,
-					flags, mosp);
-			if (opts) {
-				ret = opts->allocate_blocks(addr, len,
-						prot, flags, pgoff, opts);
-				kfree(opts);
-			} else
-				ret = -ENOMEM;
+				goto done;
+			}
+			addr = addr_in;
 		}
+
+		opts = allocate_options_factory(lwkmem_mmap, len,
+				flags, mosp);
+		if (opts) {
+			ret = opts->allocate_blocks(addr, len,
+					prot, flags, pgoff, opts);
+			kfree(opts);
+		} else
+			ret = -ENOMEM;
 	} else {
 		/* Packed virtual memory */
 		len = round_up(len, PAGE_SIZE);
@@ -169,14 +269,14 @@ asmlinkage long lwk_sys_mmap_pgoff(unsigned long addr, unsigned long len,
 			ret = allocate_blocks_fixed(addr, len, prot,
 					flags | MAP_FIXED, lwkmem_mmap);
 	}
-
+done:
 	up_write(&current->mm->mmap_sem);
 
 	if (unlikely(ret == 0)) {
-		pr_warn("%s - out of LWK memory\n", __func__);
+		mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+			"%s: Out of LWK memory.", __func__);
 		ret = -ENOMEM;
 	}
-
 out:
 	trace_mos_mmap(addr_in, len_in, prot, flags, ret, current->tgid);
 	return ret;
@@ -226,14 +326,17 @@ asmlinkage long lwk_sys_brk(unsigned long brk)
 	mosp = current->mos_process;
 
 	if (!mosp) {
-		pr_warn("(!) %s(): pid %d is not an mOS process.\n",
+		mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+			"%s: pid %d is not an mOS process.",
 			__func__, current->pid);
 		ret = -ENOSYS;
 		goto out;
 	}
 
 	if (mosp->yod_mm == mm) {
-		pr_warn("(> %4d) Yod calling %s()\n", current->pid, __func__);
+		mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+			"%s: yod MM error. pid=%d.",
+			__func__, current->pid, __func__);
 		ret = -ENOSYS;
 		goto out;
 	}
@@ -258,13 +361,11 @@ asmlinkage long lwk_sys_brk(unsigned long brk)
 		heap_addr = roundup(mm->brk, mosp->heap_page_size);
 
 		/* A couple of sanity checks */
-		if (brk != 0)
-			pr_warn("(> %4d) Why is brk(%ld) not 0?\n",
-				current->pid, brk);
-
-		if (mm->start_brk != mm->brk)   {
-			pr_warn("(> %4d) start_brk 0x%lx != brk 0x%lx Should not be\n",
-				 current->pid, mm->start_brk, mm->brk);
+		if ((brk != 0) || (mm->start_brk != mm->brk)) {
+			mos_ras(MOS_LWKMEM_PROCESS_WARNING,
+				"%s: Unexpected initial state. brk:%lx start-brk:%lx mm-brk:%lx pid:%d.",
+				__func__, brk, mm->start_brk, mm->brk,
+				current->pid);
 		}
 
 		ret = allocate_blocks_fixed(heap_addr, mosp->heap_page_size,
@@ -276,8 +377,9 @@ asmlinkage long lwk_sys_brk(unsigned long brk)
 			 * brk_end to the intended heap address.  Any subsequent
 			 * attempts to extend the heap will likely fail below.
 			 */
-			pr_warn("(! %4d) No LWK memory for heap at %lx (rc=%ld)\n",
-				current->pid, heap_addr, ret);
+			mos_ras(MOS_LWKMEM_PROCESS_WARNING,
+				"%s: No LWK memory for heap at %lx (rc=%ld). pid:%d",
+				__func__, heap_addr, ret, current->pid);
 			ret = mosp->brk = mosp->brk_end = heap_addr;
 		} else {
 			ret = mosp->brk = heap_addr;
@@ -326,8 +428,10 @@ asmlinkage long lwk_sys_brk(unsigned long brk)
 				 * runtime is to return the existing brk address
 				 * (see man page for brk).
 				 */
-				pr_warn("(! %4d) Could not expand LWK heap to %lx (rc=%ld)\n",
-					current->pid, mosp->brk_end, ret);
+				mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+					"%s: Could not expand LWK heap to %lx (rc=%ld). pid:%d",
+					__func__, mosp->brk_end, ret,
+					current->pid);
 				ret = mosp->brk;
 				up_write(&mm->mmap_sem);
 				goto out;
@@ -351,14 +455,16 @@ asmlinkage long lwk_sys_brk(unsigned long brk)
 	if (clear_len && clear_addr) {
 		/* Clear only the newly requested amount */
 		if (clear_user((void *) clear_addr, clear_len))
-			pr_warn("WARN:%s() failed to clear mem 0x%p [%ld]\n",
+			mos_ras(MOS_LWKMEM_PROCESS_WARNING,
+				"%s: Failed to clear memory at 0x%p [%ld]",
 				__func__, clear_addr, clear_len);
 	}
 
  out:
 	if (brk && ret != brk)
-		pr_warn("(! %4d) ret=%lx CPU=%d\n",
-			current->pid, ret, smp_processor_id());
+		mos_ras(MOS_LWKMEM_PROCESS_WARNING,
+			"%s: Requested brk:%lx but returning %lx.",
+			__func__, brk, ret);
 	if (brk || first_brk)
 		trace_mos_brk(ret, clear_len, clear_addr, current->tgid);
 
@@ -392,7 +498,8 @@ asmlinkage long lwk_sys_madvise(unsigned long addr, size_t len,
 	mos_p = current->mos_process;
 
 	if (!mos_p) {
-		pr_warn("(!) %s(): pid %d is not an mOS process.\n",
+		mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+			"%s: pid %d is not an mOS process.",
 			__func__, current->pid);
 		ret = -ENOSYS;
 		goto out;
@@ -403,7 +510,9 @@ asmlinkage long lwk_sys_madvise(unsigned long addr, size_t len,
 	up_read(&current->mm->mmap_sem);
 
 	if (!vma) {
-		pr_warn("(!) %s() no vma for pid %d\n", __func__, current->pid);
+		mos_ras(MOS_LWKMEM_PROCESS_WARNING,
+			"%s: No VMA found.  pid:%d addr:%lx.",
+			__func__, current->pid, addr);
 		ret = -ENOSYS;
 		goto out;
 	}
@@ -430,7 +539,8 @@ asmlinkage long lwk_sys_mbind(unsigned long start, unsigned long len,
 	long ret = -ENOSYS;
 
 	if (!mosp) {
-		pr_warn("(!) %s(): pid %d is not an mOS process.\n",
+		mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+			"%s: pid %d is not an mOS process.",
 			__func__, current->pid);
 		goto out;
 	}
@@ -531,31 +641,97 @@ asmlinkage long lwk_sys_munlockall(void)
 	return -ENOSYS;
 }
 
-asmlinkage long lwk_sys_mprotect(unsigned long start, size_t len,
+asmlinkage long lwk_sys_mprotect(unsigned long start, size_t len_in,
 		unsigned long prot)
 {
 	struct vm_area_struct *vma;
 	struct mos_process_t *mosp = current->mos_process;
+	bool read_lock_held = false;
+	bool write_lock_held = false;
 	long ret = -ENOSYS;
+	size_t len = round_up(len_in, PAGE_SIZE);
 
 	if (!mosp) {
-		pr_warn("(!) %s(): pid %d is not an mOS process.\n",
+		mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+			"%s: pid %d is not an mOS process.",
 			__func__, current->pid);
 		goto out;
 	}
 
 	down_read(&current->mm->mmap_sem);
+	read_lock_held = true;
 	vma = mos_find_vma(current->mm, start);
-	up_read(&current->mm->mmap_sem);
-	if (vma && is_lwkmem(vma)) {
+
+	if (!vma)
+		goto out;
+
+	if (is_lwkmem(vma)) {
 		/* We ignore PROT_NONE and also PROT_EXEC/PROT_READ bits. */
 		if ((prot == PROT_NONE) || (prot & (PROT_EXEC | PROT_READ)))
 			ret = 0;
 
+	} else {
+		if (vma->vm_flags & (VM_READ | VM_WRITE | VM_EXEC | VM_MAYSHARE) ||
+		    vma->vm_file || !mosp->lwkmem_prot_none_delegation)
+			goto out;
+
+		/* We need to unmap and then allocate LWK memory, so escalate
+		 * the MM semaphore to a write lock.
+		 */
+		up_read(&current->mm->mmap_sem);
+		read_lock_held = false;
+
+		if (down_write_killable(&current->mm->mmap_sem)) {
+			ret = -EINTR;
+			goto out;
+		}
+
+		write_lock_held = true;
+
+		/* Get the VMA again, ensuring that it is still appropriate
+		 * for LWK reclamation:
+		 */
+
+		vma = mos_find_vma(current->mm, start);
+
+		if (is_lwkmem(vma)) {
+			/* We ignore PROT_NONE and PROT_EXEC/PROT_READ bits. */
+			if ((prot == PROT_NONE) ||
+			    (prot & (PROT_EXEC | PROT_READ)))
+				ret = 0;
+			goto out;
+		}
+
+		if (vma->vm_flags & (VM_READ | VM_WRITE | VM_EXEC | VM_MAYSHARE) ||
+		    vma->vm_file)
+			goto out;
+
+		trace_mos_unmapped_region(start, len, vma->vm_flags, current->tgid);
+
+		if (do_munmap(current->mm, start, len, NULL)) {
+			mos_ras(MOS_LWKMEM_PROCESS_WARNING,
+				"%s: Could not unmap [%lx,%lx)",
+				__func__, start, start + len);
+			ret = -ENOMEM;
+			goto out;
+		}
+
+		ret = allocate_blocks_fixed(start, len, prot,
+			    MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
+			    lwkmem_mmap);
+
+		ret = (ret == start) ? 0 : -ENOMEM;
 	}
 
  out:
-	trace_mos_mprotect(start, len, prot, ret, current->tgid);
+
+	if (read_lock_held)
+		up_read(&current->mm->mmap_sem);
+
+	if (write_lock_held)
+		up_write(&current->mm->mmap_sem);
+
+	trace_mos_mprotect(start, len_in, prot, ret, current->tgid);
 	return ret;
 }
 
@@ -578,7 +754,8 @@ asmlinkage long lwk_sys_mremap(unsigned long addr, unsigned long old_len,
 	mos_p = current->mos_process;
 
 	if (!mos_p) {
-		pr_warn("(!) %s(): pid %d is not an mOS process.\n",
+		mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+			"%s: pid %d is not an mOS process.",
 			__func__, current->pid);
 		ret = -EFAULT;
 		goto trace;
@@ -596,7 +773,8 @@ asmlinkage long lwk_sys_mremap(unsigned long addr, unsigned long old_len,
 	}
 
 	if (new_len <= old_len) {
-		pr_err("%s() : mremap shrank region.\n", __func__);
+		mos_ras(MOS_LWKMEM_PROCESS_WARNING,
+			"%s: Attempted to shrink region via mremap.", __func__);
 		ret = addr;
 		goto out;
 	}
@@ -606,7 +784,8 @@ asmlinkage long lwk_sys_mremap(unsigned long addr, unsigned long old_len,
 	 */
 
 	if ((flags & MREMAP_FIXED) && (addr != new_addr)) {
-		pr_warn("%s() : unsupported relocation flags:%lx old:%lx new:%lx\n",
+		mos_ras(MOS_LWKMEM_PROCESS_WARNING,
+			"%s: Unsupported relocation flags:%lx old:%lx new:%lx\n",
 			__func__, flags, addr, new_addr);
 		ret = -EINVAL;
 		goto out;
@@ -625,7 +804,8 @@ asmlinkage long lwk_sys_mremap(unsigned long addr, unsigned long old_len,
 		clear_addr = (void *) ret;
 		ret = addr;
 	} else {
-		pr_warn("%s() : unexpected remap %lx -> %lx\n",
+		mos_ras(MOS_LWKMEM_PROCESS_WARNING,
+			"%s: Unexpected remap %lx -> %lx\n",
 			__func__, addr + old_len, ret);
 		ret = -EFAULT;
 	}
@@ -735,7 +915,9 @@ asmlinkage long lwk_sys_mos_get_addr_info(unsigned long addr,
 
 	mosp = current->mos_process;
 	if (!mosp)   {
-		pr_warn("(!) %s() not an mOS pid %d\n", __func__, current->pid);
+		mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+			"%s: pid %d is not an mOS process.",
+			__func__, current->pid);
 		return -ENOSYS;
 	}
 
@@ -753,7 +935,9 @@ asmlinkage long lwk_sys_mos_get_addr_info(unsigned long addr,
 	} else if (size == SZ_4K)   {
 		knd = kind_4k;
 	} else   {
-		pr_alert("%s() Unknown page size %d\n", __func__, size);
+		mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+			"%s: Unknown page size %d.",
+			__func__, size);
 		rc = -EINVAL;
 		goto out;
 	}
@@ -805,24 +989,14 @@ found_it:
 		goto out;
 	}
 
-	if (put_user(page_to_phys(phys_page), phys_addr))   {
-		pr_alert("%s() put_user(addr) failed\n", __func__);
+	if (put_user(page_to_phys(phys_page), phys_addr) ||
+	    put_user(size, page_size) ||
+	    put_user(numa, numa_domain)) {
+		mos_ras(MOS_LWKMEM_PROCESS_ERROR,
+			"%s: put_user() failed.", __func__);
 		rc = -EACCES;
 		goto out;
 	}
-
-	if (put_user(size, page_size))   {
-		pr_alert("%s() put_user(size) failed\n", __func__);
-		rc = -EACCES;
-		goto out;
-	}
-
-	if (put_user(numa, numa_domain))   {
-		pr_alert("%s() put_user(numa_domain) failed\n", __func__);
-		rc = -EACCES;
-		goto out;
-	}
-
 out:
 	pr_debug("%s() v_addr 0x%lx = p_addr 0x%llx, page size %d, numa domain %d\n",
 		 __func__, addr, phys_page ? page_to_phys(phys_page) : 0, size, numa);

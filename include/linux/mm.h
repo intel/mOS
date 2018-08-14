@@ -25,7 +25,6 @@
 #include <linux/err.h>
 #include <linux/page_ref.h>
 #include <linux/memremap.h>
-#include <linux/mos.h>
 
 struct mempolicy;
 struct anon_vma;
@@ -241,8 +240,9 @@ extern unsigned int kobjsize(const void *objp);
 #endif
 
 #ifdef CONFIG_MOS_LWKMEM
-#define VM_LWK    BIT(63)
-#define VM_LWK_1G BIT(62)
+#define VM_LWK		BIT(63)
+#define VM_LWK_1G	BIT(62)
+#define VM_LWK_XPMEM	BIT(61)
 #endif
 
 #if defined(CONFIG_X86_INTEL_MPX)

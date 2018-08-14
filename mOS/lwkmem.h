@@ -104,4 +104,14 @@ extern void lwkpage_add_rmap(struct page *page, struct vm_area_struct *vma,
 		unsigned long address);
 extern void lwkpage_remove_rmap(struct page *page);
 
+extern int build_pagetbl(enum lwkmem_kind_t knd, struct vm_area_struct *vma,
+			 unsigned long phys_addr, unsigned long vstart,
+			 unsigned long vend, unsigned int stride);
+extern int unmap_pagetbl(enum lwkmem_kind_t k, unsigned long vstart,
+			 unsigned long vend, unsigned int stride,
+			 struct mm_struct *mm, bool lwkxpmem);
+extern int unmap_lwkxpmem_range(struct vm_area_struct *vma, unsigned long start,
+				unsigned long end);
+extern void init_xpmem_stats(struct mos_process_t *mosp);
+extern void show_xpmem_stats(struct mos_process_t *mosp);
 #endif /* _LWKMEM_H_ */

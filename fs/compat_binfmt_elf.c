@@ -125,9 +125,6 @@
 #define init_elf_binfmt		init_compat_elf_binfmt
 #define exit_elf_binfmt		exit_compat_elf_binfmt
 
-#ifdef CONFIG_MOS_LWKMEM
-#undef CONFIG_MOS_LWKMEM
-#endif
 
 /*
  * We share all the actual code with the native (64-bit) version.
