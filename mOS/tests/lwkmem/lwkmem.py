@@ -141,12 +141,13 @@ class Yod(Base):
                     '--type', 'anonymous', '--num', -1, '--size', size)
         self.update_lwk_state()
         # first test allocation sizes that hit the TLB sizes
-        combos = [(31 * GiB, 1 * GiB),
+        combos = [(sum(self.lwkmem), 1 * GiB),
                   (3 * GiB, 2 * MiB),
                   (3 * MiB, 4 * KiB)]
         for reserved, size in combos:
             reserved = min(reserved, sum(self.lwkmem))
             subtest(reserved, size)
+
         # do some random reservation and allocation sizes
         for i in range(10 - len(combos)):
             # constrain size so test doesn't take too long
@@ -253,6 +254,16 @@ class Yod(Base):
     def test_munmap_segments(self):
         self._test_munmap_segments(extra_yod_args='')
 
+    def test_mmap_map_fixed(self):
+        for map_size in [4*KiB, 8*KiB, 64*KiB, 2*MiB, 8*MiB, 64*MiB, 1*GiB, 2*GiB, 4*GiB, 8*GiB]:
+            for page_size in [4*KiB, 2*MiB, 1*GiB]:
+                if map_size >= page_size:
+                    yod(self, '--aligned-mmap', '0', './mapfixed', '-s', map_size, '-p', page_size)
+                    yod(self, './mapfixed', '-s', map_size, '-p', page_size)
+                    for alignment in [8*KiB, 256*KiB, 2*MiB, 1*GiB]:
+                        if alignment >= map_size:
+                            yod(self, '--aligned-mmap', '{}:{}'.format(map_size, alignment), './mapfixed', '-s', map_size, '-p', page_size)
+
     # These other variants of unmap_segments are interesting but probably
     # not worth running all the time.  We annotate them as such.
     @unittest.skipUnless(ARGS.all_tests, 'Level 2 test.')
@@ -262,6 +273,12 @@ class Yod(Base):
     @unittest.skipUnless(ARGS.all_tests, 'Level 2 test.')
     def test_munmap_segments_4k_interleave(self):
         self._test_munmap_segments(extra_yod_args='-o lwkmem-interleave=4k', page_sizes=[2*MiB])
+
+    def test_mmap_reclamation(self):
+        with self.subTest('default'):
+            yod(self, './protnone', '-v')
+        with self.subTest('enabled'):
+            yod(self, '-o', 'lwkmem-prot-none-delegation-enable', './protnone', '-v')
 
 class Options(Base):
     require = [YOD, 'options']

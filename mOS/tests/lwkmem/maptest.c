@@ -431,6 +431,9 @@ static long long get_lwkmem_free(void)
 
 	fclose(fptr);
 
+	if (verbose)
+		printf("There are %lld bytes of free memory.\n", rc);
+
 	return rc;
 }
 
@@ -444,6 +447,7 @@ static struct allocation *create_mappings(enum mapping_type type,
 	long long min_size = (type == ANONYMOUS ? page_size : 1);
 	struct allocation *head = NULL, *prev = NULL, *node;
 	unsigned *last_data = NULL;
+	unsigned long total_bytes_allocated = 0;
 
 	if (*num_mappings == 0 || size <= 0) {
 		printf("(E) Specify both number and size of allocations.\n");
@@ -526,6 +530,7 @@ static struct allocation *create_mappings(enum mapping_type type,
 		}
 
 		remainder -= node->size;
+		total_bytes_allocated += node->size;
 
 		/* Color this node. */
 		for (j = 0; j < node->size; j += page_size)
@@ -537,6 +542,9 @@ static struct allocation *create_mappings(enum mapping_type type,
 			last_data = node->data;
 		}
 	}
+
+	if (verbose)
+		printf("%ld total bytes allocated.\n", total_bytes_allocated);
 
 	/* Walk the list, ensuring that the coloring is correct. */
 	for (i = 1, node = head; i <= *num_mappings; i++, node++)
