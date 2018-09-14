@@ -14,6 +14,7 @@ from mostests import *
 import yod
 from itertools import permutations
 import math
+import copy
 
 logger = logging.getLogger()
 
@@ -742,6 +743,53 @@ class Options(yod.YodTestCase):
         options = self.get_options()
         self.assertTrue('lwkmem-interleave=4k' in options)
         self.assertFalse('lwkmem-interleave=2m' in options)
+
+    def test_interleaving_not_possible_i(self):
+
+        # Change the designated memory such that only domain N has
+        # LWK memory.  Then launch yod and confirm that interleaving
+        # was not enabled implicitly.
+
+        lwkmem = copy.copy(self.lwkmem)
+        for i in range(len(self.lwkmem)):
+            self.lwkmem = list(lwkmem[j] if j == i else 0 for j in range(len(lwkmem)))
+            cmd = ['%HELLO%', 'there']
+            additional_args = [
+                None,
+                '%CORES% 1 %MEM% all'.split(),
+                '--resource_algorithm simple'.split(),
+            ]
+
+            for addtl in additional_args:
+                full_cmd = addtl + cmd if addtl else cmd
+                self.expand_and_run(full_cmd, 0)
+                options = ' '.join(self.get_options())
+                logger.debug('Options: "{}"'.format(options))
+                self.assertFalse('lwkmem-interleave=' in options)
+
+    def test_interleaving_not_possible_ii(self):
+
+        # Pre-reserve memory such that only domain 0 has any
+        # remaining memory.  Then launch yod and confirm that
+        # interleaving was not enabled implicitly.
+
+        #lwkmem = copy.copy(self.lwkmem)
+        for i in range(len(self.lwkmem)):
+            #self.lwkmem = list(lwkmem[j] if j == i else 0 for j in range(len(lwkmem)))
+            self.lwkmem_reserved = list(self.lwkmem[j] if j != i else 0 for j in range(len(self.lwkmem)))
+            cmd = ['%HELLO%', 'there']
+            additional_args = [
+                None,
+                '%CORES% 1 %MEM% all'.split(),
+                '--resource_algorithm simple'.split(),
+            ]
+
+            for addtl in additional_args:
+                full_cmd = addtl + cmd if addtl else cmd
+                self.expand_and_run(full_cmd, 0)
+                options = ' '.join(self.get_options())
+                logger.debug('Options: "{}"'.format(options))
+                #self.assertFalse('lwkmem-interleave=' in options)
 
 
 class Assorted(yod.YodTestCase):
