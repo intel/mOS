@@ -217,12 +217,12 @@ POSSIBLE_CPUS = cpulist(get_file('/sys/devices/system/cpu/possible'))
 ONLINE_CPUS = cpulist(get_file('/sys/devices/system/cpu/online'))
 CONFIG_NR_CPUS = int(get_file('/sys/devices/system/cpu/kernel_max')) + 1
 MAX_CPUS = max(POSSIBLE_CPUS) + 1
-# these CPUs receive offloads from other CPUs
-SYSCALL_CPUS = cpulist(get_file('/sys/kernel/mOS/lwkcpus_syscall'))
-# these CPUs offload syscalls to other CPUs
+# these are the Utility CPUs and may host syscall execution from LWK CPUs
+UTILITY_CPUS = cpulist(get_file('/sys/kernel/mOS/utility_cpus'))
+# these are the light-weight kernel CPUs
 LWK_CPUS = cpulist(get_file('/sys/kernel/mOS/lwkcpus'))
 # these CPUs neither offload nor receive offloads
-NORMAL_CPUS = ONLINE_CPUS - LWK_CPUS - SYSCALL_CPUS
+NORMAL_CPUS = ONLINE_CPUS - LWK_CPUS - UTILITY_CPUS
 
 # helpers for running programs (without/with yod)
 

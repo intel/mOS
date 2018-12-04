@@ -41,10 +41,14 @@ class Basics(TestCase):
         'lwkmem_reserved':          statmode('r--r--r--'),
         'lwkmem_domain_info':       statmode('-w--w--w-'),
         'lwk_options':              statmode('-w--w--w-'),
-        'lwkcpus_syscall':          statmode('r--r--r--'),
-        'lwkcpus_syscall_mask':     statmode('r--r--r--'),
+        'utility_cpus':             statmode('r--r--r--'),
+        'utility_cpus_mask':        statmode('r--r--r--'),
         'lwk_util_threads':         statmode('-w--w--w-'),
         'lwkprocesses':             statmode('r--r--r--'),
+        'ras/config':               statmode('rw-rw-rw-'),
+        'ras/inject':               statmode('-w--w--w-'),
+        'ras/jobid':                statmode('rw-rw-rw-'),
+        'ras/location':             statmode('rw-rw-rw-'),
         }
 
     def test_permissions(self):
@@ -71,7 +75,7 @@ class Basics(TestCase):
     def test_lwkcpus(self):
         # Verify lwkcpus file matches the kernel boot arguments.
         logger.debug('kernel cmdline: lwkcpus=%s syscpus=%s normcpus=%s',
-                     LWK_CPUS, SYSCALL_CPUS, NORMAL_CPUS)
+                     LWK_CPUS, UTILITY_CPUS, NORMAL_CPUS)
         actual = cpulist(get_file(os.path.join(self.sysfs, 'lwkcpus')))
         self.assertEqual(LWK_CPUS, actual,
                          'lwkcpus should have expected value')

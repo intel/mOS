@@ -14,6 +14,7 @@
 #
 
 import argparse
+import datetime
 import subprocess
 import sys
 import logging
@@ -274,6 +275,7 @@ def main():
     failures = list()
 
     logging.info('Running {} tests ...'.format(len(test_list) if test_list is not None else 'all'))
+    start_time = datetime.datetime.now()
 
     keys = list(test_partition.keys())
     random.seed()
@@ -293,7 +295,10 @@ def main():
 
         teardown()
 
+    end_time = datetime.datetime.now()
     logging.info('There were {} failures.'.format(len(failures)))
+    logging.info('Total elapsed time: {}'.format(end_time - start_time))
+
 
     if (len(failures) > 0):
         logging.info('Failing tests:\n  {}'.format('\n  '.join(failures)))
