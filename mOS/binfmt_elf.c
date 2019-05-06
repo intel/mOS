@@ -15,6 +15,7 @@
 #include <linux/printk.h>
 #include <linux/mos.h>
 #include <linux/ftrace.h>
+#include <linux/mman.h>
 #include "lwkmem.h"
 
 #include <trace/events/lwkmem.h>
@@ -57,6 +58,14 @@ unsigned long elf_map_to_lwkmem(unsigned long addr, unsigned long size,
 	if (down_write_killable(&current->mm->mmap_sem)) {
 		map_addr = -EINTR;
 		goto out;
+	}
+
+	if (type & MAP_FIXED_NOREPLACE) {
+		if (find_vma_intersection(current->mm, addr, addr + size)) {
+			map_addr = -EEXIST;
+			goto out;
+		}
+		type |= MAP_FIXED;
 	}
 
 	map_addr = allocate_blocks_fixed(addr, size, prot, type,

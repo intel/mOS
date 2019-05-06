@@ -39,7 +39,8 @@ static int64_t kind_size[kind_last] = {SZ_4K, SZ_4M, SZ_1G};
 #endif
 
 #define inc_att_align_stats_cond(s, c) do {\
-		if (unlikely(current->mos_process->report_xpmem_stats && (c))) \
+		if (unlikely(is_mostask() && \
+		    current->mos_process->report_xpmem_stats && (c))) \
 			current->mos_process->attachment_align_stats[s]++;\
 	} while (0)
 #define inc_att_align_stats(stats) inc_att_align_stats_cond(stats, true)
@@ -144,7 +145,7 @@ static int build_lwkxpmem_pagetbl(struct vm_area_struct *vma,
 	while (max_k > kind_4k && !IS_ALIGNED(vstart, kind_size[max_k]))
 		max_k--;
 
-	if (unlikely(current->mos_process->report_xpmem_stats))
+	if (unlikely(is_mostask() && current->mos_process->report_xpmem_stats))
 		current->mos_process->dst_pgmap[k][max_k]++;
 
 	rc = build_pagetbl(max_k, vma, __pfn_to_phys(pfn_start),
@@ -169,7 +170,7 @@ static inline void clear_pte_range(struct mm_struct *mm, pmd_t *pmd,
 {
 	spinlock_t *ptl;
 	pte_t *start_pte, *pte;
-	unsigned long pfn;
+	unsigned long pfn, orig_start = start;
 
 	start_pte = pte_offset_map_lock(mm, pmd, start, &ptl);
 	for (pte = start_pte; start != end; start += PAGE_SIZE, pte++) {
@@ -187,7 +188,7 @@ static inline void clear_pte_range(struct mm_struct *mm, pmd_t *pmd,
 			pte_clear(mm, start, pte);
 		}
 	}
-	flush_tlb_mm_range(mm, start, end, 0, true);
+	flush_tlb_mm_range(mm, orig_start, end, PAGE_SHIFT, true);
 	pte_unmap_unlock(start_pte, ptl);
 }
 
@@ -224,7 +225,8 @@ static inline void clear_pmd_range(struct mm_struct *mm, pud_t *pud,
 					set_pages_dirty(pfn_start, pfn_end);
 				}
 				pmd_clear(pmd);
-				flush_tlb_mm_range(mm, start, next, 0, true);
+				flush_tlb_mm_range(mm, start, next,
+					PMD_SHIFT, true);
 			}
 			spin_unlock(ptl);
 		} else
@@ -265,7 +267,8 @@ static inline void clear_pud_range(struct mm_struct *mm, p4d_t *p4d,
 					set_pages_dirty(pfn_start, pfn_end);
 				}
 				pud_clear(pud);
-				flush_tlb_mm_range(mm, start, next, 0, true);
+				flush_tlb_mm_range(mm, start, next,
+					PUD_SHIFT, true);
 			}
 			spin_unlock(ptl);
 		} else
@@ -291,7 +294,7 @@ static void clear_lwkxpmem_pagetbl(struct mm_struct *mm, unsigned long start,
 				   unsigned long end)
 {
 	pgd_t *pgd;
-	unsigned long next;
+	unsigned long next, orig_start = start;
 
 	for (pgd = pgd_offset(mm, start); start != end; start = next, pgd++) {
 		next = pgd_addr_end(start, end);
@@ -299,7 +302,7 @@ static void clear_lwkxpmem_pagetbl(struct mm_struct *mm, unsigned long start,
 			continue;
 		clear_p4d_range(mm, pgd, start, next);
 	}
-	trace_mos_clear_lwkxpmem_pagetbl(start, end);
+	trace_mos_clear_lwkxpmem_pagetbl(orig_start, end);
 }
 
 #ifdef MOSXPMEM_DEBUG
@@ -651,7 +654,8 @@ static int copy_one_lwkvma(struct vm_area_struct *src_vma,
 			scale = kind_size[max_k] / PAGE_SIZE;
 		}
 
-		if (unlikely(current->mos_process->report_xpmem_stats))
+		if (unlikely(is_mostask() &&
+		    current->mos_process->report_xpmem_stats))
 			current->mos_process->src_pgmap[src_k][max_k]++;
 
 		rc = build_lwkxpmem_pagetbl(dst_vma, dst_start,
@@ -684,7 +688,7 @@ int copy_lwkmem_to_lwkxpmem(struct vm_area_struct *src_vma,
 	if (!src_vma || !dst_vma) {
 		pr_err("%s(): ERR Invalid VMA, src = %p dst = %p\n",
 			__func__, src_vma, dst_vma);
-		goto out;
+		return rc;
 	}
 
 	if (offset_in_page(src_start) || offset_in_page(dst_start) ||

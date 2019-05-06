@@ -140,16 +140,9 @@ static void
 xpmem_invalidate_page(struct mmu_notifier *mn, struct mm_struct *mm,
 		      unsigned long start)
 {
-	struct mmu_notifier_range range;
-
 	if (offset_in_page(start) != 0)
 		start -= offset_in_page(start);
-
-	memset(&range, 0, sizeof(range));
-	range->start = start;
-	range->end = start + PAGE_SIZE;
-	range->mm = mm;
-	xpmem_invalidate_range(mn, &range);
+	xpmem_invalidate_range(mn, mm, start, start + PAGE_SIZE)
 }
 #endif
 

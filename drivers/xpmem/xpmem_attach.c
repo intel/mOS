@@ -162,13 +162,21 @@ out:
 	       "[0x%lx - 0x%lx]\n", vma->vm_start, vma->vm_end);
 	force_sig(SIGKILL);
 }
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 17, 0)
 static vm_fault_t xpmem_fault_handler(struct vm_fault *vmf)
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+static int xpmem_fault_handler(struct vm_fault *vmf)
 #else
 static int xpmem_fault_handler(struct vm_area_struct *vma, struct vm_fault *vmf)
 #endif
 {
-	int ret, att_locked = 0;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 17, 0)
+	vm_fault_t ret;
+#else
+	int ret;
+#endif
+	int error, att_locked = 0;
 	int seg_tg_mmap_sem_locked = 0, vma_verification_needed = 0;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 10, 0)
 	u64 vaddr = (u64)(uintptr_t) vmf->address;
@@ -229,17 +237,17 @@ static int xpmem_fault_handler(struct vm_area_struct *vma, struct vm_fault *vmf)
 	 * potential for a deadlock, which we attempt to avoid in what follows.
 	 */
 
-	ret = xpmem_seg_down_read(seg_tg, seg, 1, 0);
-	if (ret == -EAGAIN) {
+	error = xpmem_seg_down_read(seg_tg, seg, 1, 0);
+	if (error == -EAGAIN) {
 		/* to avoid possible deadlock drop current->mm->mmap_sem */
 		up_read(&current->mm->mmap_sem);
-		ret = xpmem_seg_down_read(seg_tg, seg, 1, 1);
+		error = xpmem_seg_down_read(seg_tg, seg, 1, 1);
 		down_read(&current->mm->mmap_sem);
 		vma_verification_needed = 1;
 	}
-	if (ret != 0) {
+	if (error != 0) {
 		XPMEM_DEBUG("vaddr %llx, could not lock segment err %x",
-			     vaddr, ret);
+			     vaddr, error);
 		goto out_1;
 	}
 
@@ -296,8 +304,8 @@ static int xpmem_fault_handler(struct vm_area_struct *vma, struct vm_fault *vmf)
 	seg_vaddr = (att->vaddr & PAGE_MASK) + (vaddr - att->at_vaddr);
 	XPMEM_DEBUG("vaddr = %llx, seg_vaddr = %llx", vaddr, seg_vaddr);
 
-	ret = xpmem_ensure_valid_PFN(seg, seg_vaddr, &src_vma);
-	if (ret != 0) {
+	error = xpmem_ensure_valid_PFN(seg, seg_vaddr, &src_vma);
+	if (error != 0) {
 		XPMEM_DEBUG("Failed to pin pages at owner addr %llx",
 			    seg_vaddr);
 		goto out_2;
@@ -579,20 +587,38 @@ xpmem_attach(struct file *file, xpmem_apid_t apid, off_t offset, size_t size,
 		}
 		at_vaddr = vma->vm_start;
 	} else {
-		at_vaddr = vm_mmap(file, vaddr, size, prot_flags,
-				   flags, offset);
-		if (IS_ERR((void *)(uintptr_t) at_vaddr)) {
-			ret = at_vaddr;
+		int retry_count = 5;
+
+		while (retry_count != 0) {
+			at_vaddr = vm_mmap(file, vaddr, size, prot_flags,
+					   flags, offset);
+			if (IS_ERR((void *)(uintptr_t) at_vaddr)) {
+				ret = at_vaddr;
+				goto out_3;
+			}
+			down_write(&current->mm->mmap_sem);
+			vma = find_vma(current->mm, at_vaddr);
+			if (vma && at_vaddr >= vma->vm_start) {
+				set_xpmem_private_data(vma, att);
+				vma->vm_flags |= VM_DONTCOPY | VM_DONTDUMP |
+						 VM_IO | VM_DONTEXPAND |
+						 VM_PFNMAP;
+				vma->vm_ops = &xpmem_vm_ops;
+				up_write(&current->mm->mmap_sem);
+				break;
+			}
+			/*
+			 * Retry to obtain a free virtual memory map, as the
+			 * maping was deleted before we locked mm.
+			 */
+			up_write(&current->mm->mmap_sem);
+			retry_count--;
+		}
+
+		if (retry_count == 0) {
+			ret = -ENOMEM;
 			goto out_3;
 		}
-		down_write(&current->mm->mmap_sem);
-		vma = find_vma(current->mm, at_vaddr);
-		up_write(&current->mm->mmap_sem);
-
-		set_xpmem_private_data(vma, att);
-		vma->vm_flags |= VM_DONTCOPY | VM_DONTDUMP | VM_IO |
-				 VM_DONTEXPAND | VM_PFNMAP;
-		vma->vm_ops = &xpmem_vm_ops;
 	}
 
 	att->at_vaddr = at_vaddr;
@@ -889,16 +915,23 @@ xpmem_clear_PTEs_of_att(struct xpmem_attachment *att, u64 start, u64 end,
 		 */
 		if (from_mmu)
 			vma = att->at_vma;
-		else
+		else {
 			vma = find_vma(att->mm, att->at_vaddr);
+			if (vma && att->at_vaddr < vma->vm_start)
+				vma = NULL;
+		}
 
-		/* NTH: is this a viable alternative to zap_page_range(). The
-		 * benefit of zap_vma_ptes is that it is exported by default. */
-		zap_vma_ptes (vma, unpin_at, invalidate_len);
+		if (vma) {
+			/* NTH: is this a viable alternative to
+			 * zap_page_range(). The benefit of zap_vma_ptes
+			 * is that it is exported by default.
+			 */
+			zap_vma_ptes(vma, unpin_at, invalidate_len);
 
-		/* Only clear the flag if all pages were zapped */
-		if (offset_start == 0 && att->at_size == invalidate_len)
-			att->flags &= ~XPMEM_FLAG_VALIDPTEs;
+			/* Only clear the flag if all pages were zapped */
+			if (offset_start == 0 && att->at_size == invalidate_len)
+				att->flags &= ~XPMEM_FLAG_VALIDPTEs;
+		}
 	}
 out:
 	if (from_mmu) {
