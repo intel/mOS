@@ -28,6 +28,7 @@
 #include <linux/hugetlb.h>
 #include <linux/memory.h>
 #include <linux/ftrace.h>
+#include <linux/percpu-rwsem.h>
 #include <asm/setup.h>
 #include <asm/tlbflush.h>
 #include "lwkmem.h"
@@ -42,6 +43,7 @@
 #define kaddr_to_pfn(va)	(__pa(va) >> PAGE_SHIFT)
 
 static size_t lwkmem_n_online_nodes;
+DEFINE_STATIC_PERCPU_RWSEM(lwkmem_gsem);
 
 #define ADDR_MASK 0x000ffffffffff000
 #define PG2M_MASK 0x000fffffffe00000
@@ -455,7 +457,8 @@ static int __init mos_lwkmem_setup(char *s)
 	memblock_dump_all();
 	memblock_dump_free();
 
-	s = strcpy(tmp, s);
+	tmp[COMMAND_LINE_SIZE-1] = '\0';
+	s = strncpy(tmp, s, COMMAND_LINE_SIZE-1);
 
 	while ((nidstr = strsep(&s, ","))) {
 
@@ -531,6 +534,7 @@ static int lwkmem_process_init(struct mos_process_t *mosp)
 	mosp->trace_block_list_details = false;
 	mosp->lwkmem_zeroes_check = 0;
 	mosp->lwkmem_prot_none_delegation = false;
+	mosp->lwkmem_prot_exec_disable = false;
 
 	/* Initialize all memory preferences */
 	default_order = mosp->memory_preference[lwkmem_mmap].lower_type_order;
@@ -658,7 +662,7 @@ static int lwkmem_heap_pg_size_cb(const char *val, struct mos_process_t *mosp)
 static int lwkmem_memory_preferences_cb(const char *val,
 				 struct mos_process_t *mosp)
 {
-	char *opt, *pref_s, *scope_s, *thresh_s, *order_s, *mtype_s;
+	char *opt = 0, *pref_s, *scope_s, *thresh_s, *order_s, *mtype_s;
 	unsigned long thresh;
 	enum allocate_site_t scope;
 	struct memory_preference_t *mpref;
@@ -703,8 +707,8 @@ static int lwkmem_memory_preferences_cb(const char *val,
 			goto invalid;
 		}
 
-		scope = lwkmem_index_of(scope_s, lwkmem_site_str,
-				       sizeof(lwkmem_site_str), false);
+		scope = lwkmem_index_of(scope_s, lwkmem_site_str, lwkmem_site_last, false);
+
 		if (scope < 0) {
 			mos_ras(MOS_LWKMEM_PROCESS_ERROR,
 				"%s: Illegal scope: %s",
@@ -991,6 +995,14 @@ static int lwkmem_xpmem_stats_cb(const char *val, struct mos_process_t *mosp)
 	return 0;
 }
 
+static int lwkmem_prot_exec_disable_cb(const char *val,
+				      struct mos_process_t *mosp)
+{
+	mosp->lwkmem_prot_exec_disable = true;
+	pr_debug("(*) lwkmem-prot-exec-disable\n");
+	return 0;
+}
+
 void insert_granule(struct mos_lwk_mem_granule *g, struct list_head *head)
 {
 	struct mos_lwk_mem_granule *e;
@@ -1190,74 +1202,6 @@ collect_err:
 
 } /* end of mos_collect_bootmem() */
 
-int mos_mem_init(nodemask_t *nodes, resource_size_t *requests)
-{
-	int n;
-	resource_size_t sz, sz_req, sz_alloc, sz_dist;
-	nodemask_t mask;
-
-	sz_req = 0;
-	sz_alloc = 0;
-
-	if (lwkmem_static_enabled)
-		return -EINVAL;
-
-	pr_info("Initializing memory management\n");
-	lwkmem_n_online_nodes = 0;
-	nodes_clear(mask);
-	nodes_or(mask, mask, *nodes);
-
-	WARN(!list_empty(&mos_lwk_memory_list),
-	     "LWK memory list is not empty");
-
-	/* Determine the number of NUMA domains. */
-	for_each_online_node(n)
-		if (lwkmem_n_online_nodes < (n + 1))
-			lwkmem_n_online_nodes = n + 1;
-
-	for_each_node_mask(n, *nodes) {
-		node_clear(n, mask);
-		if (!requests[n]) {
-			node_clear(n, *nodes);
-			continue;
-		}
-		sz = lwkmem_get_dynamic_memory(n, requests[n],
-					       &mos_lwk_memory_list);
-		pr_info("Node %d: Requested %lld MB Allocated %lld MB\n",
-			n, requests[n] >> 20, sz >> 20);
-		if (sz != requests[n]) {
-			sz_dist = requests[n] - sz;
-			pr_info("Unallocated %lld bytes req to node(s):%*pbl\n",
-				sz_dist, nodemask_pr_args(&mask));
-			if (lwkmem_distribute_request(sz_dist, &mask,
-						      requests)) {
-				mos_ras(MOS_LWKCTL_FAILURE,
-					"%s: Could not distribute the request for %lld bytes of LWK memory.",
-					__func__, sz_dist);
-				sz_req += sz_dist;
-			}
-			/* Update request with what is actually allocated */
-			requests[n] = sz;
-		}
-
-		sz_alloc += sz;
-		sz_req += requests[n];
-
-		/* Clear the node bit on which we could not allocate */
-		if (!sz)
-			node_clear(n, *nodes);
-	}
-	if (sz_alloc != sz_req)
-		mos_ras(MOS_LWKCTL_FAILURE,
-			"%s: Could not allocate all requested LWK memory.  Requested:%lld Allocated:%lld",
-			__func__, sz_req, sz_alloc);
-
-	pr_warn("Requested %lld MB Allocated %lld MB\n",
-		sz_req >> 20, sz_alloc >> 20);
-
-	return sz_alloc ? 0 : -ENOMEM;
-}
-
 int mos_mem_free(void)
 {
 	struct mos_lwk_mem_granule *curr, *next;
@@ -1299,6 +1243,88 @@ int mos_mem_free(void)
 	return 0;
 }
 
+int mos_mem_init(nodemask_t *nodes, resource_size_t *requests, bool precise)
+{
+	int n;
+	int rc = 0;
+	resource_size_t sz, sz_req, sz_alloc, sz_dist;
+	nodemask_t mask;
+
+	sz_req = 0;
+	sz_alloc = 0;
+
+	if (lwkmem_static_enabled)
+		return -EINVAL;
+
+	pr_info("Initializing memory management. precise=%s\n",
+			precise ? "yes" : "no");
+	lwkmem_n_online_nodes = 0;
+	nodes_clear(mask);
+	nodes_or(mask, mask, *nodes);
+
+	WARN(!list_empty(&mos_lwk_memory_list),
+	     "LWK memory list is not empty");
+
+	/* Determine the number of NUMA domains. */
+	for_each_online_node(n)
+		if (lwkmem_n_online_nodes < (n + 1))
+			lwkmem_n_online_nodes = n + 1;
+
+	for_each_node_mask(n, *nodes) {
+		node_clear(n, mask);
+		if (!requests[n]) {
+			node_clear(n, *nodes);
+			continue;
+		}
+		sz = lwkmem_get_dynamic_memory(n, requests[n],
+					       &mos_lwk_memory_list);
+		if (sz == requests[n])
+			pr_info("Node %d: Requested %lld MB Allocated %lld MB\n",
+				n, requests[n] >> 20, sz >> 20);
+		else {
+			sz_dist = requests[n] - sz;
+			if (precise) {
+				mos_ras(MOS_LWKCTL_FAILURE,
+				    "%s: Node %d: requested %lld MB Allocated %lld MB.",
+				    __func__, n, requests[n] >> 20, sz >> 20);
+				sz_req += sz_dist;
+			} else {
+				pr_info("Unallocated %lld bytes req to node(s):%*pbl\n",
+					sz_dist, nodemask_pr_args(&mask));
+				if (nodes_empty(mask) ||
+				    lwkmem_distribute_request(sz_dist, &mask,
+								requests)) {
+					mos_ras(MOS_LWKCTL_WARNING,
+					    "%s: Could not distribute the request for %lld bytes of LWK memory.",
+					    __func__, sz_dist);
+					sz_req += sz_dist;
+				}
+			}
+			/* Update request with what is actually allocated */
+			requests[n] = sz;
+		}
+		sz_alloc += sz;
+		sz_req += requests[n];
+
+		/* Clear the node bit on which we could not allocate */
+		if (!sz)
+			node_clear(n, *nodes);
+	}
+	if (sz_alloc == sz_req)
+		pr_info("Requested %lld MB Allocated %lld MB\n",
+			sz_req >> 20, sz_alloc >> 20);
+	else {
+		if (precise)
+			mos_mem_free();
+		mos_ras(precise ? MOS_LWKCTL_FAILURE : MOS_LWKCTL_WARNING,
+			"%s: Could not allocate all requested LWK memory.  Requested:%lld Allocated:%lld",
+			__func__, sz_req, sz_alloc);
+		rc = (!sz_alloc || precise) ? -ENOMEM : 0;
+	}
+
+	return rc;
+}
+
 static void mos_register_lwkmem_callbacks(void)
 {
 	mos_register_process_callbacks(&lwkmem_callbacks);
@@ -1331,7 +1357,8 @@ static void mos_register_lwkmem_callbacks(void)
 				     lwkmem_prot_none_delegation_enable_cb);
 	mos_register_option_callback("lwkmem-xpmem-stats",
 				     lwkmem_xpmem_stats_cb);
-
+	mos_register_option_callback("lwkmem-prot-exec-disable",
+				     lwkmem_prot_exec_disable_cb);
 }
 
 static int __init __mos_collect_bootmem(void)
@@ -1593,38 +1620,75 @@ void lwkmem_release(struct mos_process_t *mos_p)
 	}
 
 	if (mos_p->report_blks_allocated) {
-		int n, rc;
+		int n, idx, rc = 0;
 		enum lwkmem_kind_t k;
-		char str[MAX_NUMNODES*16];
+		int len = MAX_NUMNODES*16;
+		char *str = kzalloc(len, GFP_KERNEL);
 
-		/* Output process memory information header. */
-		pr_info("PID %u memory usage:\n", mos_p->tgid);
-		rc = snprintf(str, sizeof(str), "mem/nid\t");
-		for_each_node_mask(n, node_online_map)
-			rc += snprintf((str+rc), sizeof(str)-rc, "%8u ", n);
-		pr_info("%s\n", str);
+		if (str) {
+			/* Output process memory information header. */
+			pr_info("PID %u memory usage:\n", mos_p->tgid);
+			idx = rc = snprintf(str, len, "mem/nid\t");
+			if (rc < 0)
+				goto skip_report;
 
-		/* Output block usage data. */
-		for (k = kind_4k; k < kind_last; k++) {
-			rc = snprintf(str, sizeof(str), "%s\t", kind_str[k]);
-			for_each_node_mask(n, node_online_map)
-				rc += snprintf((str+rc), sizeof(str)-rc, "%8lu ",
-						mos_p->blks_allocated[k][n]);
+			for_each_node_mask(n, node_online_map) {
+				rc = snprintf((str+idx), len-idx, "%8u ", n);
+				if (rc < 0)
+					goto skip_report;
+				idx += rc;
+			}
 			pr_info("%s\n", str);
+
+			/* Output block usage data. */
+			for (k = kind_4k; k < kind_last; k++) {
+				idx = rc = snprintf(str, len, "%s\t",
+						    kind_str[k]);
+				if (rc < 0)
+					goto skip_report;
+				for_each_node_mask(n, node_online_map) {
+					rc = snprintf((str+idx), len-idx,
+						"%8lu ",
+						mos_p->blks_allocated[k][n]);
+					if (rc < 0)
+						goto skip_report;
+					idx += rc;
+				}
+				pr_info("%s\n", str);
+			}
+
+			pr_info("PID %u max memory usage by domain:\n",
+				mos_p->tgid);
+			idx = rc = snprintf(str, len, "mem/nid\t");
+			if (rc < 0)
+				goto skip_report;
+
+			for_each_node_mask(n, node_online_map) {
+				rc = snprintf((str+idx), len-idx, "%8u ", n);
+				if (rc < 0)
+					goto skip_report;
+				idx += rc;
+			}
+			pr_info("%s\n", str);
+
+			/* Output block usage data. */
+			idx = rc = snprintf(str, len, "Max:\t");
+			if (rc < 0)
+				goto skip_report;
+
+			for_each_node_mask(n, node_online_map) {
+				rc = snprintf((str+idx), len-idx, "%8lu ",
+					       mos_p->max_allocated[n]);
+				if (rc < 0)
+					goto skip_report;
+				idx += rc;
+			}
+			pr_info("%s\n", str);
+skip_report:
+			if (rc < 0)
+				pr_err("Output error %d in snprintf()\n", rc);
+			kfree(str);
 		}
-
-		pr_info("PID %u max memory usage by domain:\n", mos_p->tgid);
-		rc = snprintf(str, sizeof(str), "mem/nid\t");
-		for_each_node_mask(n, node_online_map)
-			rc += snprintf((str+rc), sizeof(str)-rc, "%8u ", n);
-		pr_info("%s\n", str);
-
-		/* Output block usage data. */
-		rc = snprintf(str, sizeof(str), "Max:\t");
-		for_each_node_mask(n, node_online_map)
-			rc += snprintf((str+rc), sizeof(str)-rc, "%8lu ",
-				       mos_p->max_allocated[n]);
-		pr_info("%s\n", str);
 	}
 
 	/* Reset the granules that were assigned to this process in the
@@ -1664,15 +1728,27 @@ void lwkmem_release(struct mos_process_t *mos_p)
 static void lwkmem_globalmem(unsigned long *totalram, unsigned long *freeram,
 			     int nid)
 {
-	unsigned long total[MAX_NUMNODES] = {0};
-	unsigned long res[MAX_NUMNODES] = {0};
-	size_t n = ARRAY_SIZE(total);
+	numa_nodes_t total;
+	numa_nodes_t res;
+	size_t n = MAX_NUMNODES;
 
 	if (!totalram || !freeram)
 		return;
 
-	lwkmem_get(total, &n);
-	lwkmem_reserved_get(res, &n);
+	if (!zalloc_numa_nodes_array(&total))
+		return;
+
+	if (!zalloc_numa_nodes_array(&res)) {
+		free_numa_nodes_array(total);
+		return;
+	}
+
+	if (lwkmem_get(total, &n))
+		goto out;
+
+	if (lwkmem_reserved_get(res, &n))
+		goto out;
+
 	*totalram = *freeram = 0;
 
 	if (nid == NUMA_NO_NODE) {
@@ -1686,6 +1762,10 @@ static void lwkmem_globalmem(unsigned long *totalram, unsigned long *freeram,
 	}
 	*totalram >>= PAGE_SHIFT;
 	*freeram  >>= PAGE_SHIFT;
+
+out:
+	free_numa_nodes_array(total);
+	free_numa_nodes_array(res);
 }
 
 /*
@@ -2406,6 +2486,10 @@ static long build_lwkvma(enum lwkmem_kind_t knd, unsigned long addr,
 				__func__, addr, kind_str[knd]);
 			return -ENOSYS;
 		}
+
+		if ((mmap_flags & MAP_FIXED_NOREPLACE) &&
+		    find_vma_intersection(mm, addr, addr + len))
+			return -EEXIST;
 	} else {
 		struct vm_unmapped_area_info info;
 
@@ -2434,6 +2518,9 @@ static long build_lwkvma(enum lwkmem_kind_t knd, unsigned long addr,
 		calc_vm_flag_bits(mmap_flags) | mm->def_flags | VM_MAYREAD |
 		VM_MAYWRITE | VM_MAYEXEC | VM_READ | VM_WRITE | VM_ACCOUNT |
 		VM_LWK;
+
+	if (likely(!current->mos_process->lwkmem_prot_exec_disable))
+		vm_flags |= VM_EXEC;
 
 	if (knd != kind_4k)
 		vm_flags |= VM_HUGEPAGE;
@@ -2470,18 +2557,18 @@ static long build_lwkvma(enum lwkmem_kind_t knd, unsigned long addr,
 	rc = find_vma_links(mm, addr, addr + len, &prev, &rb_link, &rb_parent);
 	if (rc) {
 		mos_ras(MOS_LWKMEM_PROCESS_ERROR,
-			"%s: find_vma_links(%p, 0x%lx, 0x%lx, ...)=%i",
-			__func__, mm, addr, addr + len, rc);
+			"%s: Could not insert LWK VMA at [%lx,%lx) length=%ld rc=%i",
+			__func__, addr, addr + len, len, rc);
 		goto out;
 	}
 
 	/* See if we can merge with an existing VMA */
 	*vma = vma_merge(mm, prev, addr, addr + len, vm_flags, NULL,
-			 NULL, pgoff, NULL, prev->vm_userfaultfd_ctx);
+			 NULL, pgoff, NULL, NULL_VM_UFFD_CTX);
 	if (!*vma) {
 		/* Get us some memory to store our vm_area_struct structure */
 		*vma = kmem_cache_zalloc(vm_area_cachep, GFP_KERNEL);
-		if (!vma) {
+		if (!*vma) {
 			mos_ras(MOS_LWKMEM_PROCESS_ERROR,
 				"%s: kmem_cache_zalloc() failed to allocate a VMA.",
 				__func__);
@@ -2515,8 +2602,6 @@ out:
 	return rc ? rc : addr;
 
 } /* end of build_lwkvma() */
-
-static DEFINE_MUTEX(lwkmem_mutex);
 
 /**
  * For the given block size, obtains a free block of a larger size and
@@ -3184,7 +3269,7 @@ static int _lwkmem_get(unsigned long *lwkm, size_t *n,
 
 	memset(lwkm, 0, lwkmem_n_online_nodes * sizeof(unsigned long));
 
-	mutex_lock(&lwkmem_mutex);
+	percpu_down_read(&lwkmem_gsem);
 
 	list_for_each_entry(g, &mos_lwk_memory_list, list) {
 
@@ -3203,7 +3288,7 @@ static int _lwkmem_get(unsigned long *lwkm, size_t *n,
 	*n = lwkmem_n_online_nodes;
 
  unlock:
-	mutex_unlock(&lwkmem_mutex);
+	percpu_up_read(&lwkmem_gsem);
 
  out:
 	return rc;
@@ -3247,7 +3332,7 @@ int lwkmem_request(struct mos_process_t *mos_p, unsigned long *req, size_t n)
 		return -EINVAL;
 	}
 
-	mutex_lock(&lwkmem_mutex);
+	percpu_down_write(&lwkmem_gsem);
 
 	for (i = 0; i < n ; i++) {
 		if (req[i] == 0)
@@ -3321,7 +3406,7 @@ int lwkmem_request(struct mos_process_t *mos_p, unsigned long *req, size_t n)
 	dump_granule_list(&mos_lwk_memory_list);
 
  unlock:
-	mutex_unlock(&lwkmem_mutex);
+	percpu_up_write(&lwkmem_gsem);
 	return rc;
 }
 
@@ -3399,12 +3484,9 @@ unsigned long next_lwkmem_address(unsigned long len, struct mos_process_t *mosp)
 
 	unsigned long addr;
 
-	mutex_lock(&lwkmem_mutex);
 	addr = mosp->lwkmem_next_addr;
 	mosp->lwkmem_next_addr = roundup(mosp->lwkmem_next_addr + len,
 					 mosp->lwkmem_mmap_alignment);
-	mutex_unlock(&lwkmem_mutex);
-
 	return addr;
 }
 
@@ -3435,6 +3517,9 @@ static void clear_user_lwkpg(struct mm_struct *mm, unsigned long uva,
 		clear_lwkpg_dirty(page);
 	}
 
+	ClearPageDirty(page);
+	ClearPageHead(page);
+
 	nr_pages = size / PAGE_SIZE;
 	while (nr_pages--) {
 		/*
@@ -3456,7 +3541,7 @@ static void clear_user_lwkpg(struct mm_struct *mm, unsigned long uva,
 		clear_compound_head(page);
 		page++;
 	}
-			
+
 	if (lwkmem_zeroes_check_enabled(ZCHECK_FREE))
 		lwkmem_check_for_zero(uva, size, mm, "free");
 
@@ -3506,7 +3591,7 @@ int unmap_pagetbl(enum lwkmem_kind_t k, unsigned long addr, unsigned long end,
 		}
 
 		p4d = p4d_offset(pgd, addr);
-		
+
 		if (!p4d_present(*p4d))
 			continue;
 
@@ -3525,7 +3610,8 @@ int unmap_pagetbl(enum lwkmem_kind_t k, unsigned long addr, unsigned long end,
 			clear_user_lwkpg(mm, addr,
 			       (pud_flags(*pud) & _PAGE_DIRTY) != 0);
 			pud_clear(pud);
-			flush_tlb_mm_range(mm, addr, addr+size, 0, true);
+			flush_tlb_mm_range(mm, addr, addr+size,
+				PUD_SHIFT, true);
 			spin_unlock(ptl);
 		} else if (size == SZ_2M) {
 			pmd = pmd_offset(pud, addr);
@@ -3534,7 +3620,8 @@ int unmap_pagetbl(enum lwkmem_kind_t k, unsigned long addr, unsigned long end,
 				clear_user_lwkpg(mm, addr,
 				       pmd_dirty(*pmd) != 0);
 				pmd_clear(pmd);
-				flush_tlb_mm_range(mm, addr, addr+size, 0, true);
+				flush_tlb_mm_range(mm, addr, addr+size,
+					PMD_SHIFT, true);
 			} else
 				mos_ras(MOS_LWKMEM_PROCESS_WARNING,
 				    "%s: PMD not present for address:%lx size:%s",
@@ -3546,8 +3633,8 @@ int unmap_pagetbl(enum lwkmem_kind_t k, unsigned long addr, unsigned long end,
 				pte = pte_offset_map_lock(mm, pmd, addr, &ptl);
 				if (!pte) {
 					mos_ras(MOS_LWKMEM_PROCESS_WARNING,
-					    "%s: PTE not found for address:%lx size:%s",
-					    __func__, kind_str[k], addr);
+						"%s: PTE not found for address:%lx size:%s",
+						__func__, addr, kind_str[k]);
 					continue;
 				}
 				if (pte_present(*pte)) {
@@ -3555,7 +3642,7 @@ int unmap_pagetbl(enum lwkmem_kind_t k, unsigned long addr, unsigned long end,
 					       pte_dirty(*pte) != 0);
 					pte_clear(mm, addr, pte);
 					flush_tlb_mm_range(mm, addr,
-						addr+size, 0, true);
+						addr+size, PAGE_SHIFT, true);
 				} else
 					mos_ras(MOS_LWKMEM_PROCESS_WARNING,
 					    "%s: PTE not present for address:%lx size:%s",
@@ -3567,7 +3654,7 @@ int unmap_pagetbl(enum lwkmem_kind_t k, unsigned long addr, unsigned long end,
 				    __func__, addr, kind_str[k]);
 		} else {
 			mos_ras(MOS_LWKMEM_PROCESS_ERROR,
-				"%s: Page size %lu not supported.", size);
+				"%s: Page size %lu not supported.", __func__, size);
 			return -EINVAL;
 		}
 	}

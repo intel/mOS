@@ -851,6 +851,7 @@ retry:
 				 * LWK page.
 				 */
 				set_lwkpg_dirty(page);
+				SetPageDirty(page);
 
 				if (ctx.page_mask == SZ_2M)
 					ctx.page_mask = HPAGE_PMD_NR - 1;
@@ -2296,6 +2297,9 @@ static void gup_pgd_range(unsigned long addr, unsigned long end,
 	unsigned long next;
 	pgd_t *pgdp;
 
+	if (is_mostask())
+		return;
+
 	pgdp = pgd_offset(current->mm, addr);
 	do {
 		pgd_t pgd = READ_ONCE(*pgdp);
@@ -2348,14 +2352,6 @@ int __get_user_pages_fast(unsigned long start, int nr_pages, int write,
 	unsigned long len, end;
 	unsigned long flags;
 	int nr = 0;
-#ifdef CONFIG_MOS_LWKMEM
-	int ret;
-
-	down_read(&current->mm->mmap_sem);
-	ret = get_user_pages(start, nr_pages, 0, pages, NULL);
-	up_read(&current->mm->mmap_sem);
-	return ret;
-#endif /* CONFIG_MOS_LWKMEM */
 
 	start = untagged_addr(start) & PAGE_MASK;
 	len = (unsigned long) nr_pages << PAGE_SHIFT;
@@ -2447,7 +2443,6 @@ int get_user_pages_fast(unsigned long start, int nr_pages,
 	if (unlikely(!access_ok((void __user *)start, len)))
 		return -EFAULT;
 
-#ifndef CONFIG_MOS_LWKMEM
 	if (IS_ENABLED(CONFIG_HAVE_FAST_GUP) &&
 	    gup_fast_permitted(start, end)) {
 		local_irq_disable();
@@ -2455,7 +2450,6 @@ int get_user_pages_fast(unsigned long start, int nr_pages,
 		local_irq_enable();
 		ret = nr;
 	}
-#endif
 
 	if (nr < nr_pages) {
 		/* Try to get the remaining pages with get_user_pages */

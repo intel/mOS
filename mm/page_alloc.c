@@ -7135,13 +7135,14 @@ static void __init find_zone_movable_pfns_for_nodes(void)
 				usable_startpfn;
 		}
 
-		if (required_kernelcore || required_movablecore) {
+		if (required_kernelcore ||
+		    required_movablecore ||
+		    required_kernelcore_percent ||
+		    required_movablecore_percent) {
 			usable_nodes -= nodes_weight(movable_nodes);
 			if (usable_nodes > 0 &&
-			    totalpages > movable_node_pages) {
-				totalpages -= movable_node_pages;
+			    totalpages > movable_node_pages)
 				goto core_options;
-			}
 		}
 		goto out2;
 	}
@@ -7188,6 +7189,7 @@ core_options:
 		required_movablecore = (totalpages * 100 * required_movablecore_percent) /
 					10000UL;
 
+	totalpages -= movable_node_pages;
 	/*
 	 * If movablecore= was specified, calculate what size of
 	 * kernelcore that corresponds so that memory usable for
@@ -7221,8 +7223,12 @@ core_options:
 	 * If kernelcore was not specified or kernelcore size is larger
 	 * than totalpages, there is no ZONE_MOVABLE.
 	 */
-	if (!required_kernelcore || required_kernelcore >= totalpages)
-		goto out;
+	if (!required_kernelcore || required_kernelcore >= totalpages) {
+		if (movable_node_is_enabled())
+			goto out2;
+		else
+			goto out;
+	}
 
 	/* usable_startpfn is the lowest possible pfn ZONE_MOVABLE can be at */
 	usable_startpfn = arch_zone_lowest_possible_pfn[movable_zone];

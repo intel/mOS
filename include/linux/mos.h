@@ -204,6 +204,7 @@ struct mos_process_t {
 
 	unsigned int lwkmem_zeroes_check;
 	bool lwkmem_prot_none_delegation;
+	bool lwkmem_prot_exec_disable;
 
 	/* XPMEM counters */
 	bool report_xpmem_stats;

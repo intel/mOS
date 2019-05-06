@@ -166,7 +166,15 @@ asmlinkage long lwk_sys_mmap_pgoff(unsigned long addr, unsigned long len,
 		goto out;
 	}
 
-	if (unlikely(addr && (flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)))) {
+	if (flags & MAP_FIXED_NOREPLACE) {
+		if (find_vma_intersection(current->mm, addr, addr + len)) {
+			ret = -EEXIST;
+			goto out;
+		}
+		flags |= MAP_FIXED;
+	}
+
+	if (unlikely(addr && (flags & MAP_FIXED))) {
 		unsigned long a0, a1, b0, b1;
 		int nlinux = 0, nlwk = 0;
 
@@ -239,7 +247,7 @@ asmlinkage long lwk_sys_mmap_pgoff(unsigned long addr, unsigned long len,
 
 	if (mosp->lwkmem_mmap_aligned_threshold > 0) {
 		if (len >= mosp->lwkmem_mmap_aligned_threshold) {
-			if (!(flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)))
+			if (!(flags & (MAP_FIXED)))
 				addr = next_lwkmem_address(len, mosp);
 
 			if (addr <= TASK_SIZE - len) {
@@ -262,7 +270,7 @@ asmlinkage long lwk_sys_mmap_pgoff(unsigned long addr, unsigned long len,
 		/* Packed virtual memory */
 		len = round_up(len, PAGE_SIZE);
 		addr = get_unmapped_area(NULL, addr, len, pgoff,
-				flags & (MAP_FIXED | MAP_FIXED_NOREPLACE));
+				flags & MAP_FIXED);
 		if (offset_in_page(addr))
 			ret = addr;
 		else
@@ -322,9 +330,8 @@ asmlinkage long lwk_sys_brk(unsigned long brk)
 	}
 
 	if (mosp->yod_mm == mm) {
-		mos_ras(MOS_LWKMEM_PROCESS_ERROR,
-			"%s: yod MM error. pid=%d.",
-			__func__, current->pid, __func__);
+		mos_ras(MOS_LWKMEM_PROCESS_ERROR, "%s: yod MM error. pid=%d.",
+			__func__, current->pid);
 		ret = -ENOSYS;
 		goto out;
 	}
@@ -793,8 +800,8 @@ asmlinkage long lwk_sys_mremap(unsigned long addr, unsigned long old_len,
 		ret = addr;
 	} else {
 		mos_ras(MOS_LWKMEM_PROCESS_WARNING,
-			"%s: Unexpected remap %lx -> %lx\n",
-			__func__, addr + old_len, ret);
+			"%s: remap failed: address=0x%lx old_size=%ld new_size=%ld",
+			__func__, addr, old_len, new_len);
 		ret = -EFAULT;
 	}
 

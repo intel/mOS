@@ -3204,7 +3204,7 @@ void hugetlb_report_meminfo(struct seq_file *m)
 									1024);
 	}
 
-	seq_printf(m, "Hugetlb:        %8lu kB\n", total / 1024);
+	seq_printf(m, "Hugetlb:        %8lu kB\n", lwk_only ? 0 : total / 1024);
 }
 
 int hugetlb_report_node_meminfo(int nid, char *buf)

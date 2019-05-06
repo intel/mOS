@@ -205,7 +205,7 @@ static void *alloc_file(size_t size, double *t, int verbose)
 {
 #define INIT_BLOCK_SIZE	(2048)
 	void *ptr;
-	char ftemplate[] = "SomeFileXXXXXX";
+	char ftemplate[] = "/tmp/SomeFileXXXXXX";
 	char init_block[INIT_BLOCK_SIZE];
 	int tmp_fd;
 	int i;
