@@ -1,0 +1,23 @@
+# Multi Operating System (mOS)
+# Copyright (c) 2016 - 2019, Intel Corporation.
+#
+# This program is free software; you can redistribute it and/or modify it
+# under the terms and conditions of the GNU General Public License,
+# version 2, as published by the Free Software Foundation.
+#
+# This program is distributed in the hope it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
+# more details.
+
+hostprogs-$(CONFIG_MOS_LWKMEM) := lwkprocess maptest heaptest alignmenttest options get_addr_test munmap mapfixed xpmem xpmem_invalid_usage xpmem_mem_types protnone
+HOSTLOADLIBES_get_addr_test := -lmos -lnuma -lpthread
+
+xpmem-objs := xpmem.o xpmem_utils.o
+xpmem_invalid_usage-objs := xpmem_invalid_usage.o xpmem_utils.o
+xpmem_mem_types-objs := xpmem_mem_types.o xpmem_utils.o
+HOSTLOADLIBES_xpmem := -lxpmem
+HOSTLOADLIBES_xpmem_invalid_usage := -lxpmem
+HOSTLOADLIBES_xpmem_mem_types := -lxpmem
+
+always := $(hostprogs-y)

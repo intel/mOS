@@ -282,6 +282,15 @@ static struct mempolicy *mpol_new(unsigned short mode, unsigned short flags,
 	return policy;
 }
 
+static inline int mpol_migrate_prep(void)
+{
+#ifdef CONFIG_MOS_FOR_HPC
+	if (current->mos_process)
+		return migrate_prep_local();
+#endif
+	return migrate_prep();
+}
+
 /* Slow path of a mpol destructor. */
 void __mpol_put(struct mempolicy *p)
 {
@@ -1007,7 +1016,7 @@ int do_migrate_pages(struct mm_struct *mm, const nodemask_t *from,
 	int err;
 	nodemask_t tmp;
 
-	err = migrate_prep();
+	err = mpol_migrate_prep();
 	if (err)
 		return err;
 
@@ -1206,7 +1215,7 @@ static long do_mbind(unsigned long start, unsigned long len,
 
 	if (flags & (MPOL_MF_MOVE | MPOL_MF_MOVE_ALL)) {
 
-		err = migrate_prep();
+		err = mpol_migrate_prep();
 		if (err)
 			goto mpol_out;
 	}

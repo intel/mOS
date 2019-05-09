@@ -43,6 +43,7 @@
 #include <linux/uaccess.h>
 #include <asm/param.h>
 #include <asm/page.h>
+#include <linux/mos.h>
 
 #ifndef user_long_t
 #define user_long_t long
@@ -699,6 +700,11 @@ static int load_elf_binary(struct linux_binprm *bprm)
 	} *loc;
 	struct arch_elf_state arch_state = INIT_ARCH_ELF_STATE;
 	loff_t pos;
+	int data_bss_on_lwkmem = 0;
+#ifdef CONFIG_MOS_LWKMEM
+	unsigned long lwkmem_start = 0;
+	unsigned long lwkmem_size = 0;
+#endif
 
 	loc = kmalloc(sizeof(*loc), GFP_KERNEL);
 	if (!loc) {
@@ -888,7 +894,7 @@ static int load_elf_binary(struct linux_binprm *bprm)
 		if (elf_ppnt->p_type != PT_LOAD)
 			continue;
 
-		if (unlikely (elf_brk > elf_bss)) {
+		if (unlikely((elf_brk > elf_bss) && !data_bss_on_lwkmem)) {
 			unsigned long nbyte;
 	            
 			/* There was a PT_LOAD segment with p_memsz > p_filesz
@@ -987,12 +993,75 @@ static int load_elf_binary(struct linux_binprm *bprm)
 			}
 		}
 
-		error = elf_map(bprm->file, load_bias + vaddr, elf_ppnt,
-				elf_prot, elf_flags, total_size);
-		if (BAD_ADDR(error)) {
-			retval = IS_ERR((void *)error) ?
-				PTR_ERR((void*)error) : -EINVAL;
-			goto out_free_dentry;
+#ifdef CONFIG_MOS_LWKMEM
+		/* For mOS tasks try loading initialized and uninitialized RW
+		 * segments to LWKMEM.
+		 */
+		data_bss_on_lwkmem = 0;
+		if ((is_mostask() != 0)  && (load_addr_set != 0) &&
+			current->mos_process->lwkmem_load_elf_segs &&
+			!(elf_ppnt->p_flags & PF_X) &&
+			(elf_ppnt->p_flags & PF_W)) {
+			/*
+			 * Map this segment as anonymous mapping on to LWKMEM,
+			 * but corresponding data will be initialized from the
+			 * application binary file. This code assumes that the
+			 * underlying LWKMEM pages are pinned and are not evic-
+			 * -ted/swapped.
+			 */
+			elf_flags |= MAP_ANONYMOUS;
+			lwkmem_start = ELF_PAGESTART(load_bias + vaddr);
+			lwkmem_size = elf_ppnt->p_memsz +
+					ELF_PAGEOFFSET(elf_ppnt->p_vaddr);
+			lwkmem_size = ELF_PAGEALIGN(lwkmem_size);
+
+			error = elf_map_to_lwkmem(lwkmem_start, lwkmem_size,
+					elf_prot, elf_flags);
+			if (!BAD_ADDR(error)) {
+				loff_t pos = elf_ppnt->p_offset;
+				/*
+				 * Read data for all initialized sections from
+				 * the binary which are part of this segment to
+				 * LWKMEM pages
+				 */
+				retval = vfs_read(bprm->file,
+						(void __user *)(load_bias +
+								vaddr),
+						elf_ppnt->p_filesz,
+						&pos);
+
+				if (retval != elf_ppnt->p_filesz) {
+					long rc;
+					pr_err("%s: (!) .data read failed!",
+							 __func__);
+					lwkmem_start = ELF_PAGESTART(error);
+					rc = elf_unmap_from_lwkmem(lwkmem_start,
+							lwkmem_size);
+					if (rc < 0) {
+						pr_err(".. Unmap failed %ld",
+						       rc);
+					}
+					pr_err(", Fallback to Linux memory\n");
+				} else {
+					data_bss_on_lwkmem = 1;
+				}
+			} else {
+				pr_err("%s: (!) data+bss to LWKMEM failed(%ld)",
+					__func__, error);
+				pr_err("... Fallback to Linux memory\n");
+			}
+		}
+#endif
+
+		/* Fall back to Linux memory if LWKMEM is not available */
+		if (!data_bss_on_lwkmem) {
+			error = elf_map(bprm->file, load_bias + vaddr, elf_ppnt,
+					elf_prot, elf_flags, total_size);
+			if (BAD_ADDR(error)) {
+				retval = IS_ERR((void *)error) ?
+					PTR_ERR((void *)error) : -EINVAL;
+				goto out_free_dentry;
+			}
 		}
 
 		if (!load_addr_set) {
@@ -1052,12 +1121,26 @@ static int load_elf_binary(struct linux_binprm *bprm)
 	 * mapping in the interpreter, to make sure it doesn't wind
 	 * up getting placed where the bss needs to go.
 	 */
-	retval = set_brk(elf_bss, elf_brk, bss_prot);
-	if (retval)
-		goto out_free_dentry;
-	if (likely(elf_bss != elf_brk) && unlikely(padzero(elf_bss))) {
-		retval = -EFAULT; /* Nobody gets to see this, but.. */
-		goto out_free_dentry;
+
+	if (!data_bss_on_lwkmem) {
+		retval = set_brk(elf_bss, elf_brk, bss_prot);
+		if (retval)
+			goto out_free_dentry;
+
+		if (likely(elf_bss != elf_brk) && unlikely(padzero(elf_bss))) {
+			retval = -EFAULT; /* Nobody gets to see this, but.. */
+			goto out_free_dentry;
+		}
+	} else {
+		current->mm->start_brk = ELF_PAGEALIGN(elf_brk);
+		current->mm->brk = current->mm->start_brk;
+
+		/* Clear padding + bss section */
+		if (likely(elf_bss != elf_brk))
+			if (clear_user((void __user *) elf_bss, elf_brk-elf_bss)) {
+				pr_err("Could not clear .bss.\n");
+				goto out_free_dentry;
+			}
 	}
 
 	if (elf_interpreter) {

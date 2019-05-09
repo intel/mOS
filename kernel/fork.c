@@ -104,6 +104,10 @@
 #define CREATE_TRACE_POINTS
 #include <trace/events/task.h>
 
+#ifdef CONFIG_MOS_MOVE_SYSCALLS
+void mos_linux_duped(struct task_struct *p);
+#endif
+
 /*
  * Minimum number of threads to boot the kernel
  */
@@ -546,6 +550,10 @@ static struct task_struct *dup_task_struct(struct task_struct *orig, int node)
 	if (err)
 		goto free_stack;
 
+#ifdef CONFIG_MOS_MOVE_SYSCALLS
+	mos_linux_duped(tsk);
+#endif
+
 #ifdef CONFIG_SECCOMP
 	/*
 	 * We must handle setting up seccomp filters once we're under
@@ -654,6 +662,13 @@ static __latent_entropy int dup_mmap(struct mm_struct *mm,
 		if (!tmp)
 			goto fail_nomem;
 		*tmp = *mpnt;
+#ifdef CONFIG_MOS_LWKMEM
+		/* Copied LWK memory areas are not LWK memory. */
+		if (is_lwkmem(tmp)) {
+			tmp->vm_ops = NULL;
+			tmp->vm_flags &= ~(VM_LWK | VM_LWK_1G);
+		}
+#endif
 		INIT_LIST_HEAD(&tmp->anon_vma_chain);
 		retval = vma_dup_policy(mpnt, tmp);
 		if (retval)
@@ -719,6 +734,42 @@ static __latent_entropy int dup_mmap(struct mm_struct *mm,
 
 		if (retval)
 			goto out;
+#ifdef CONFIG_MOS_LWKMEM
+		/* If source memory was LWK memory then 'pre-fault' each
+		 * page to break the sharing of LWK pages between mOS and
+		 * Linux.  The copy is made in the Linux memory so that
+		 * the original LWK memory pages are left alone.
+		 */
+		if (is_lwkmem(mpnt)) {
+			unsigned long addr = tmp->vm_start;
+			unsigned int size = 1;
+			struct page *last_page = NULL;
+
+			for (; addr < tmp->vm_end; addr += size) {
+				struct page *page;
+
+				page = lwkmem_user_to_page(tmp->vm_mm, addr,
+							   &size);
+				if (page && page == last_page)
+					continue;
+				else {
+					int rc;
+
+					if (page)
+						last_page = page;
+					else
+						size = 1;
+
+					rc = handle_mm_fault(tmp, addr,
+						FAULT_FLAG_WRITE |
+						FAULT_FLAG_KILLABLE);
+					WARN_ONCE(rc && rc != VM_FAULT_WRITE,
+						  "address %lx failed, rc=%i\n",
+						  addr, rc);
+				}
+			}
+		}
+#endif
 	}
 	/* a new mm has just been created */
 	retval = arch_dup_mmap(oldmm, mm);
@@ -1818,10 +1869,31 @@ static __latent_entropy struct task_struct *copy_process(
 	}
 
 #ifdef CONFIG_MOS_FOR_HPC
-	p->mos_flags = current->mos_flags;
-	p->mos_process = current->mos_process;
-	if (current->mos_process)
-		atomic_inc(&current->mos_process->alive);
+	if (clone_flags & CLONE_THREAD) {
+		/* A copy of an LWK thread is also an LWK thread. */
+		p->mos_flags = current->mos_flags;
+		p->mos_process = current->mos_process;
+		if (current->mos_process)
+			atomic_inc(&current->mos_process->alive);
+	} else {
+		/* A copy of an LWK process is not an LWK process. */
+		p->mos_flags = current->mos_flags & ~MOS_IS_LWK_PROCESS;
+		p->mos_process = NULL;
+
+		/* All Linux processes inherit the mOS view from its parent.
+		 * The child process can override its view later by writing to
+		 * its /proc/self/mos_view or by some other process writing to
+		 * /proc/<pid>/mos_view
+		 *
+		 * This rule is not applicable to LWK processes. The child
+		 * process starts off with the default view and does not in-
+		 * -herit view from its parent LWK process.
+		 *
+		 * No need to lock child process since it is not yet active.
+		 */
+		if (is_mostask())
+			SET_MOS_VIEW(p, MOS_VIEW_DEFAULT);
+	}
 #endif
 
 	p->nr_dirtied = 0;

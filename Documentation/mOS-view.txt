@@ -95,3 +95,68 @@ Notes:
 
   - mOS view interpretation is only applicable to userspace and does not hold
     within the kernel.
+
+Tool - mosview:
+---------------
+mosview is the userspace tool that can be used to,
+
+  - Run a user command in the specified mOS view
+      ex: To run lscpu in mOS view 'all'
+          mosview -s all lscpu
+
+  - Set mOS view of a running process
+      ex: To set mOS view of a running process to 'lwk' view,
+          mosview -s lwk -p <pid>
+
+  - Print the mOS view of a running process
+      ex: mosview -p <pid>
+
+mOS view for memory:
+--------------------
+
+Based on the mOS view process interpret procfs and sysfs files related to
+memory resources.
+
+Reading the following files interpret mOS views,
+
+Procfs:
+-------
+    /proc/meminfo
+
+Sysfs:
+------
+    /sys/devices/system/node/node<N>/meminfo
+
+Tools used for testing:
+      free, numactl, yod
+
+Note on meminfo fields:
+-----------------------
+
+    The patch interprets mOS view for only following sub-fields
+    of meminfo,
+
+    MemTotal,
+    MemFree,
+    MemAvailable,
+    MemUsed
+
+    For Linux tasks,
+
+    In mOS view,
+      linux: Shows only Linux physical memory usage (above mentioned fields).
+             Rest of the sub-fields show Linux usage.
+
+      lwk: Shows only LWK global physical memory usage,
+           MemTotal - Total designated physical memory.
+           MemFree - Total unreserved physical memory.
+           MemAvailable - Total unreserved physical memory.
+           MemUsed - Total reserved physical memory.
+
+           Rest of the sub-fields are set to zero.
+
+      all: Shows Linux usage and LWK global physical memory usage. LWK memory
+           stats described above in 'lwk' view are computed and added to
+           corresponding Linux values.
+
+           Rest of the sub-fields show Linux usage.

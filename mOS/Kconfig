@@ -55,4 +55,38 @@ comment "!RCU_FAST_NO_HZ recommended for mOS"
 comment "RCU_NOCB_CPU_ALL recommended for mOS"
 	depends on !RCU_NOCB_CPU_ALL
 
+config MOS_LWKMEM
+        bool "Enable the optional lwkmem component"
+        depends on MOS_FOR_HPC
+        ---help---
+          Enable the alternative Light-Weight Kernel memory component.
+
+          Unless you operate a top-500 supercomputer, say N.
+config MOS_SCHEDULER
+	bool "Enable mOS scheduler"
+	depends on MOS_FOR_HPC
+	---help---
+	  When threads are affinitized to a LWK CPU, the scheduling
+	  is under the control of the mOS scheduler.
+
+	  This feature remains disabled unless you specify which CPUs
+	  are designated as LWK CPUs with the lwkcpus kernel
+	  command line option.
+config MOS_MOVE_SYSCALLS
+	bool "Run system calls on subset of CPUs"
+	depends on MOS_FOR_HPC
+	---help---
+	  Affinitize threads onto a "utility CPU" upon entry to many
+	  system calls, reverting the affinity mask once the system call
+	  is complete. In effect, system call processing is only
+	  performed on utility CPUs, while userspace processing is
+	  unconstrained.
+
+	  This feature remains disabled unless you specify which CPUs
+	  should move syscalls onto which other CPUs with the
+	  lwkcpus kernel command line option or with the creation of an
+          lwk partition using the lwkctl command.
+
+	  Unless you operate a top-500 supercomputer, say N.
+
 endif	# if MOS_FOR_HPC

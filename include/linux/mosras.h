@@ -83,6 +83,49 @@ static inline int mos_ras(...)
 
 /* Events for the LWK memory component have the range 1001100000-101199999 */
 
+/**
+ * EventType: 1001100000
+ * Severity:  Error
+ * Component: lwkmem
+ * Msg:       A process level fatal error occurred in LWK memory.
+ * ControlOperation: KillJobOnNode
+ */
+#define MOS_LWKMEM_PROCESS_ERROR "mOSLwkmemProcessError"
+
+/**
+ * EventType: 1001100001
+ * Severity:  Warning
+ * Component: lwkmem
+ * Msg:       A process level warning occurred in LWK memory.
+ */
+#define MOS_LWKMEM_PROCESS_WARNING "mOSLwkmemProcessWarning"
+
+/**
+ * EventType: 1001100002
+ * Severity:  Warning
+ * Component: lwkmem
+ * Msg:       An unexpected problem was detected during boot.
+ */
+#define MOS_LWKMEM_BOOT_WARNING "mOSLwkmemBootWarning"
+
 /* Events for the LWK scheduler component have the range 1001200000-101299999 */
+
+/**
+ * EventType: 1001200001
+ * Severity:  Warning
+ * Component: Scheduler
+ * Msg:       A warning occurred in the Scheduler.
+ */
+#define MOS_SCHEDULER_WARNING "mOSSchedulerWarning"
+
+/**
+ * EventType: 1001200002
+ * Severity:  Error
+ * Component: Scheduler
+ * Msg:    An unexpected error occurred in the Scheduler.
+ * ControlOperation: KillJobOnNode
+ */
+#define MOS_SCHEDULER_ERROR "mOSSchedulerError"
+
 
 #endif

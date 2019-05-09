@@ -67,6 +67,7 @@
 #include <linux/ftrace.h>
 #include <linux/lockdep.h>
 #include <linux/nmi.h>
+#include <linux/mos.h>
 
 #include <asm/sections.h>
 #include <asm/tlbflush.h>
@@ -813,6 +814,12 @@ static inline void __free_one_page(struct page *page,
 	unsigned long uninitialized_var(buddy_pfn);
 	struct page *buddy;
 	unsigned int max_order;
+
+	if (is_lwkpg(page)) {
+		pr_warn("WARN: Attempt to free LWK page to Linux buddy sys\n");
+		dump_stack();
+		return;
+	}
 
 	max_order = min_t(unsigned int, MAX_ORDER, pageblock_order + 1);
 
@@ -2604,6 +2611,12 @@ void free_hot_cold_page(struct page *page, bool cold)
 	unsigned long flags;
 	unsigned long pfn = page_to_pfn(page);
 	int migratetype;
+
+	if (is_lwkpg(page)) {
+		pr_warn("WARN: Attempt to free LWK page to Linux buddy sys\n");
+		dump_stack();
+		return;
+	}
 
 	if (!free_pcp_prepare(page))
 		return;
@@ -6316,20 +6329,28 @@ static void __init find_zone_movable_pfns_for_nodes(void)
 	unsigned long totalpages = early_calculate_totalpages();
 	int usable_nodes = nodes_weight(node_states[N_MEMORY]);
 	struct memblock_region *r;
+	nodemask_t movable_nodes;
+	unsigned long movable_node_pages = 0;
 
 	/* Need to find movable_zone earlier when movable_node is specified. */
 	find_usable_zone_for_movable();
 
 	/*
 	 * If movable_node is specified, ignore kernelcore and movablecore
-	 * options.
+	 * options on hotpluggable nodes.
 	 */
+	nodes_clear(movable_nodes);
 	if (movable_node_is_enabled()) {
 		for_each_memblock(memory, r) {
 			if (!memblock_is_hotpluggable(r))
 				continue;
+			if (PFN_UP(r->base) >= PFN_DOWN(r->base + r->size))
+				continue;
 
 			nid = r->nid;
+			node_set(nid, movable_nodes);
+			movable_node_pages += PFN_DOWN(r->base + r->size) -
+						PFN_UP(r->base);
 
 			usable_startpfn = PFN_DOWN(r->base);
 			zone_movable_pfn[nid] = zone_movable_pfn[nid] ?
@@ -6337,6 +6358,14 @@ static void __init find_zone_movable_pfns_for_nodes(void)
 				usable_startpfn;
 		}
 
+		if (required_kernelcore || required_movablecore) {
+			usable_nodes -= nodes_weight(movable_nodes);
+			if (usable_nodes > 0 &&
+			    totalpages > movable_node_pages) {
+				totalpages -= movable_node_pages;
+				goto core_options;
+			}
+		}
 		goto out2;
 	}
 
@@ -6370,6 +6399,7 @@ static void __init find_zone_movable_pfns_for_nodes(void)
 		goto out2;
 	}
 
+core_options:
 	/*
 	 * If movablecore=nn[KMG] was specified, calculate what size of
 	 * kernelcore that corresponds so that memory usable for
@@ -6381,6 +6411,12 @@ static void __init find_zone_movable_pfns_for_nodes(void)
 	if (required_movablecore) {
 		unsigned long corepages;
 
+		if (movable_node_is_enabled()) {
+			if (required_movablecore > movable_node_pages)
+				required_movablecore -= movable_node_pages;
+			else
+				goto out2;
+		}
 		/*
 		 * Round-up so that ZONE_MOVABLE is at least as large as what
 		 * was requested by the user
@@ -6409,6 +6445,9 @@ restart:
 	for_each_node_state(nid, N_MEMORY) {
 		unsigned long start_pfn, end_pfn;
 
+		/* Skip movable nodes if any */
+		if (node_isset(nid, movable_nodes))
+			continue;
 		/*
 		 * Recalculate kernelcore_node if the division per node
 		 * now exceeds what is necessary to satisfy the requested

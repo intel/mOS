@@ -546,6 +546,106 @@ struct rt_rq {
 #endif
 };
 
+#ifdef CONFIG_MOS_SCHEDULER
+
+extern const struct sched_class mos_sched_class;
+
+extern int init_sched_mos(void);
+extern void assimilate_task_mos(struct rq *rq, struct task_struct *p);
+extern int mos_select_cpu_candidate(struct task_struct *p, int cpu);
+extern int mos_select_next_cpu(struct task_struct *p,
+			       const struct cpumask *new_mask);
+extern void mos_set_task_cpu(struct task_struct *p, int new_cpu);
+
+#define MOS_RQ_MAX_INDEX (101)
+#define MOS_RQ_DL_INDEX (MOS_RQ_MAX_INDEX - 2)
+#define MOS_RQ_FAIR_INDEX (MOS_RQ_MAX_INDEX - 1)
+#define MOS_RQ_IDLE_INDEX (MOS_RQ_MAX_INDEX)
+
+#define MOS_HIGH_USER_PRIO (60)
+#define MOS_DEFAULT_USER_PRIO  (50)
+#define MOS_LOW_USER_PRIO  (40)
+
+#define MOS_USR_TO_KERNEL_PRIO(uprio) (MAX_RT_PRIO - 1 - uprio)
+
+#define MOS_DEFAULT_PRIO MOS_USR_TO_KERNEL_PRIO(MOS_DEFAULT_USER_PRIO)
+#define MOS_HIGH_PRIO MOS_USR_TO_KERNEL_PRIO(MOS_HIGH_USER_PRIO)
+#define MOS_LOW_PRIO MOS_USR_TO_KERNEL_PRIO(MOS_HIGH_USER_PRIO)
+
+#define MOS_IDLE_PRIO (99)
+#define MOS_MAX_PRIO (99)
+
+/* mOS class' related field in a runqueue */
+struct mos_prio_array {
+	DECLARE_BITMAP(bitmap, MOS_RQ_MAX_INDEX+2); /* delimiter bit */
+	struct list_head queue[MOS_RQ_MAX_INDEX+1];
+};
+
+struct mos_sched_stats {
+	int pid;
+	unsigned int max_compute_level;
+	unsigned int max_util_level;
+	unsigned int max_running;
+	unsigned int guest_dispatch;
+	unsigned int guests;
+	unsigned int givebacks;
+	unsigned int timer_pop;
+	unsigned int sysc_migr;
+	unsigned int setaffinity;
+	unsigned int pushed;
+};
+
+struct mos_topology {
+	int tindex; /* hyperthread index within the core */
+	int core_id; /* first cpuid in list of CPUs in the same core */
+	int l1c_id; /* first cpuid in list of CPUs sharing l1 cache */
+	int l2c_id; /* first cpuid in list of CPUs sharing l2 cache */
+	int l3c_id; /* first cpuid in list of CPUs sharing l3 cache */
+	int numa_id; /* numa domain where this CPU is located */
+};
+
+struct mos_rq {
+	raw_spinlock_t lock;
+	struct mos_prio_array active;
+	unsigned int mos_nr_running;
+	unsigned int rr_nr_running;
+	u64 mos_time;
+	pid_t idle_pid; /* PID of the mOS idle task */
+	pid_t owner;
+	struct task_struct *idle;
+	u64 mos_runtime;
+	atomic_t exclusive_pid; /* PID of an exclusive user */
+
+	/* Topology information */
+	struct mos_topology topology;
+
+	/* MWAIT CSTATE information */
+	unsigned int shallow_sleep_mwait;
+	unsigned int deep_sleep_mwait;
+
+	/* Power management */
+	unsigned int idle_mechanism;
+	unsigned int idle_boundary;
+	bool mwait_supported;
+	bool mwait_tlbs_flushed;
+
+	bool api_timeout;
+
+	/* Number of mOS utility threads committed to run on this CPU. */
+	unsigned int utility_commits;
+	/* Number of mOS compute threads committed to run on this CPU */
+	unsigned int compute_commits;
+
+	/* mwait API timer */
+	struct timer_list api_timer;
+
+	/* Scheduler statistics */
+	struct mos_sched_stats stats;
+
+
+};
+#endif
+
 /* Deadline class' related fields in a runqueue */
 struct dl_rq {
 	/* runqueue is an rbtree, ordered by deadline */
@@ -713,7 +813,10 @@ struct rq {
 	struct cfs_rq cfs;
 	struct rt_rq rt;
 	struct dl_rq dl;
-
+#ifdef CONFIG_MOS_SCHEDULER
+	struct mos_rq mos;
+	int lwkcpu;
+#endif
 #ifdef CONFIG_FAIR_GROUP_SCHED
 	/* list of leaf cfs_rq on this cpu: */
 	struct list_head leaf_cfs_rq_list;
@@ -1207,6 +1310,9 @@ static inline struct task_group *task_group(struct task_struct *p)
 static inline void __set_task_cpu(struct task_struct *p, unsigned int cpu)
 {
 	set_task_rq(p, cpu);
+#ifdef CONFIG_MOS_SCHEDULER
+	mos_set_task_cpu(p, cpu);
+#endif
 #ifdef CONFIG_SMP
 	/*
 	 * After ->cpu is set up to a new value, task_rq_lock(p, ...) can be
@@ -1498,8 +1604,6 @@ extern const struct sched_class dl_sched_class;
 extern const struct sched_class rt_sched_class;
 extern const struct sched_class fair_sched_class;
 extern const struct sched_class idle_sched_class;
-
-
 #ifdef CONFIG_SMP
 
 extern void update_group_capacity(struct sched_domain *sd, int cpu);

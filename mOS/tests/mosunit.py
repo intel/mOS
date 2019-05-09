@@ -145,7 +145,7 @@ def partition_tests(test_list):
         # Passing these to the suite executor improves efficiency
         # relativate to passing each test one at a time.
         # Note that the period rather than a slash in the lwksched
-        # specifier is not a typo
+        # specifier is not a typo.
 
         return {
             STANDARD : ['master/*', 'lwkmem/*', 'lwksched.*'],
@@ -156,6 +156,7 @@ def partition_tests(test_list):
     BUCKETS = {
         'mos-core/yod-unit-tests' : MOS_CORE,
         'mos-core/algorithm_unit_tests' : MOS_CORE,
+        'mos-core/bignode_tests' : MOS_CORE,
         'lwkctl' : LWKCTL
     }
 

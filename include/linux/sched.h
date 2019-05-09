@@ -468,6 +468,47 @@ struct sched_rt_entity {
 #endif
 } __randomize_layout;
 
+#ifdef CONFIG_MOS_SCHEDULER
+enum mos_thread_type {
+	mos_thread_type_normal = 0,
+	mos_thread_type_utility,
+	mos_thread_type_idle,
+	mos_thread_type_guest
+};
+
+struct mos_clone_hints {
+	unsigned int flags;
+	unsigned int behavior;
+	unsigned int location;
+	unsigned long key;
+	nodemask_t nodes;
+	struct mos_clone_result __user *result;
+};
+
+struct mos_active_hints {
+	unsigned int behavior;
+	unsigned int location;
+	unsigned long key;
+	nodemask_t nodes;
+};
+
+struct sched_mos_entity {
+	struct list_head run_list;
+	struct list_head util_list;
+	struct mos_clone_hints clone_hints;
+	struct mos_active_hints active_hints;
+	const struct sched_class *orig_class;
+	unsigned long clone_flags;
+	unsigned int orig_time_slice;
+	unsigned int time_slice;
+	unsigned int orig_policy;
+	int assimilated;
+	int cpu_home;
+	enum mos_thread_type thread_type;
+	bool move_syscalls_disable;
+};
+#endif
+
 struct sched_dl_entity {
 	struct rb_node			rb_node;
 
@@ -602,6 +643,10 @@ struct task_struct {
 	const struct sched_class	*sched_class;
 	struct sched_entity		se;
 	struct sched_rt_entity		rt;
+#ifdef CONFIG_MOS_SCHEDULER
+	struct sched_mos_entity 	mos;
+#endif
+
 #ifdef CONFIG_CGROUP_SCHED
 	struct task_group		*sched_task_group;
 #endif
@@ -1480,7 +1525,6 @@ static inline int set_cpus_allowed_ptr(struct task_struct *p, const struct cpuma
 	return 0;
 }
 #endif
-
 #ifndef cpu_relax_yield
 #define cpu_relax_yield() cpu_relax()
 #endif
@@ -1516,6 +1560,10 @@ extern struct task_struct *idle_task(int cpu);
  */
 static inline bool is_idle_task(const struct task_struct *p)
 {
+#ifdef CONFIG_MOS_SCHEDULER
+	if (p->mos.thread_type == mos_thread_type_idle)
+		return 1;
+#endif
 	return !!(p->flags & PF_IDLE);
 }
 

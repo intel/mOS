@@ -17,6 +17,8 @@
 #include <asm/mmu_context.h>
 #include <asm/pgtable.h>
 #include <asm/tlbflush.h>
+#include <linux/mos.h>
+#include <linux/sizes.h>
 
 #include "internal.h"
 
@@ -696,7 +698,31 @@ retry:
 		if (unlikely(fatal_signal_pending(current)))
 			return i ? i : -ERESTARTSYS;
 		cond_resched();
+#ifdef CONFIG_MOS_LWKMEM
+		if (is_lwkmem(vma)) {
+			page = lwkmem_user_to_page(vma->vm_mm, start,
+						  &page_mask);
+			if (page) {
+				/* We assume that LWK pages handed out via GUP
+				 * will be written to.  Mark the page as a dirty
+				 * LWK page.
+				 */
+				set_lwkpg_dirty(page);
+
+				if (page_mask == SZ_2M)
+					page_mask = HPAGE_PMD_NR - 1;
+				else if (page_mask == SZ_1G)
+					page_mask = (1 <<
+					      (PUD_SHIFT-PMD_SHIFT)) - 1;
+				else
+					page_mask = 0;
+			}
+		} else
+			page = follow_page_mask(vma, start, foll_flags,
+				&page_mask);
+#else
 		page = follow_page_mask(vma, start, foll_flags, &page_mask);
+#endif  /* CONFIG_MOS_LWKMEM */
 		if (!page) {
 			int ret;
 			ret = faultin_page(tsk, vma, start, &foll_flags,
@@ -1776,6 +1802,14 @@ int __get_user_pages_fast(unsigned long start, int nr_pages, int write,
 	unsigned long addr, len, end;
 	unsigned long flags;
 	int nr = 0;
+#ifdef CONFIG_MOS_LWKMEM
+	int ret;
+
+	down_read(&current->mm->mmap_sem);
+	ret = get_user_pages(start, nr_pages, 0, pages, NULL);
+	up_read(&current->mm->mmap_sem);
+	return ret;
+#endif /* CONFIG_MOS_LWKMEM */
 
 	start &= PAGE_MASK;
 	addr = start;
@@ -1841,12 +1875,14 @@ int get_user_pages_fast(unsigned long start, int nr_pages, int write,
 					(void __user *)start, len)))
 		return -EFAULT;
 
+#ifndef CONFIG_MOS_LWKMEM
 	if (gup_fast_permitted(start, nr_pages, write)) {
 		local_irq_disable();
 		gup_pgd_range(addr, end, write, pages, &nr);
 		local_irq_enable();
 		ret = nr;
 	}
+#endif
 
 	if (nr < nr_pages) {
 		/* Try to get the remaining pages with get_user_pages */
