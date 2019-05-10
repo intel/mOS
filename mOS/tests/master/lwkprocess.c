@@ -178,7 +178,7 @@ static int mos_sysfs_write(const char *file, char *buff, size_t len)
 	return 0;
 }
 
-static int test_sysfs_sequence(const struct mos_sequence_t const *seq,
+static int test_sysfs_sequence(const struct mos_sequence_t *seq,
 			       char *cpus)
 {
 	char buffer[4096];

@@ -33,7 +33,7 @@
 #undef pr_fmt
 #define pr_fmt(fmt)	"mOS: " fmt
 
-#define MOS_VERSION	"0.7"
+#define MOS_VERSION	"0.8"
 
 static cpumask_var_t lwkcpus_map;
 static cpumask_var_t utility_cpus_map;
@@ -42,6 +42,9 @@ static char *lwkauto;
 static DEFINE_MUTEX(mos_sysfs_mutex);
 static LIST_HEAD(mos_process_option_callbacks);
 static LIST_HEAD(mos_process_callbacks);
+
+/* Memory designation precision. Default set to false for boot */
+static bool lwkmem_precise;
 
 /* NOTE: The following items are not static.  They are referenced
  *       by other LWK components in mOS.
@@ -544,20 +547,23 @@ MOS_SYSFS_CPU_RW(lwkcpus_reserved);
 MOS_SYSFS_CPU_WO(lwkcpus_request);
 MOS_SYSFS_CPU_RO(utility_cpus);
 
-#define MAX_NIDS (1 << CONFIG_NODES_SHIFT)
-
 static ssize_t _lwkmem_vec_show(char *buff, int (*getter)(unsigned long *, size_t *), unsigned long deflt)
 {
-	unsigned long lwkm[MAX_NIDS];
+	numa_nodes_t lwkm;
 	size_t  i, n;
 	ssize_t len;
 	int rc;
 
+	if (!zalloc_numa_nodes_array(&lwkm))
+		return -ENOMEM;
+
 	if (getter) {
-		n = ARRAY_SIZE(lwkm);
+		n = MAX_NUMNODES;
 		rc = getter(lwkm, &n);
-		if (rc)
+		if (rc) {
+			free_numa_nodes_array(lwkm);
 			return -EINVAL;
+		}
 	} else {
 		lwkm[0] = deflt ? deflt : 0;
 		n = 1;
@@ -569,7 +575,8 @@ static ssize_t _lwkmem_vec_show(char *buff, int (*getter)(unsigned long *, size_
 	for (i = 0; i < n; i++)
 		len += scnprintf(buff + len, PAGE_SIZE - len, "%lu ", lwkm[i]);
 
-	buff[len] = '\n';
+	buff[len++] = '\n';
+	free_numa_nodes_array(lwkm);
 	return len;
 }
 
@@ -625,20 +632,20 @@ static ssize_t lwkmem_request_store(struct kobject *kobj,
 				    const char *buff, size_t count)
 {
 	int rc;
-	unsigned long lwkm[MAX_NIDS], total;
+	unsigned long total;
+	numa_nodes_t lwkm;
 	size_t n;
 	char *str;
 	struct mos_process_t *process;
 
 	str = kstrdup(buff, GFP_KERNEL);
 
-	if (!str) {
+	if (!zalloc_numa_nodes_array(&lwkm) || !str) {
 		rc = -ENOMEM;
 		goto out;
 	}
 
-	n = ARRAY_SIZE(lwkm);
-
+	n = MAX_NUMNODES;
 	rc = _lwkmem_vec_parse(str, lwkm, &n, &total);
 
 	if (rc)
@@ -670,6 +677,7 @@ static ssize_t lwkmem_request_store(struct kobject *kobj,
 	mutex_unlock(&mos_sysfs_mutex);
 
  out:
+	free_numa_nodes_array(lwkm);
 	kfree(str);
 	return rc;
 }
@@ -895,13 +903,16 @@ static ssize_t lwkmem_domain_info_store(struct kobject *kobj,
 				    const char *buff, size_t count)
 {
 	ssize_t rc;
-	unsigned long nids[MAX_NIDS];
+	numa_nodes_t nids;
 	size_t n;
-	char *str, *typ_str, *nids_str, *nid_str;
+	char *str = 0, *typ_str, *nids_str, *nid_str;
 	enum lwkmem_type_t typ;
 	struct mos_process_t *mosp = current->mos_process;
 
 	pr_debug("(>) %s buff=\"%s\" count=%ld\n", __func__, buff, count);
+
+	if (!zalloc_numa_nodes_array(&nids))
+		return -ENOMEM;
 
 	mutex_lock(&mos_sysfs_mutex);
 
@@ -955,7 +966,7 @@ static ssize_t lwkmem_domain_info_store(struct kobject *kobj,
 
 		while ((nid_str = strsep(&nids_str, ","))) {
 
-			if (n == MAX_NIDS) {
+			if (n == MAX_NUMNODES) {
 				mos_ras(MOS_LWK_PROCESS_ERROR,
 					"Overflow in lwkmem_domain_info buffer.");
 				rc = -EINVAL;
@@ -992,6 +1003,7 @@ static ssize_t lwkmem_domain_info_store(struct kobject *kobj,
  out:
 	mutex_unlock(&mos_sysfs_mutex);
 	kfree(str);
+	free_numa_nodes_array(nids);
 	return rc;
 }
 
@@ -1231,13 +1243,13 @@ int lwk_config_lwkmem(char *param_value)
 {
 	int rc = -EINVAL;
 
-	if (lwkmem_static_enabled)
+	if (lwkmem_static_enabled || !param_value)
 		goto out;
 
 	if (param_value[0] == '\0')
 		rc = lwkmem_partition_destroy();
 	else
-		rc = lwkmem_partition_create(param_value);
+		rc = lwkmem_partition_create(param_value, lwkmem_precise);
 out:
 	return rc;
 }
@@ -1315,6 +1327,14 @@ static ssize_t lwk_config_store(struct kobject *kobj,
 			auto_config = kstrdup(s_value, GFP_KERNEL);
 			if (!auto_config)
 				goto out;
+		} else if (!strcmp(s_keyword, "precise")) {
+			strreplace(s_value, '\n', '\0');
+			if (!strcmp(s_value, "yes"))
+				lwkmem_precise = true;
+			else if (!strcmp(s_value, "no"))
+				lwkmem_precise = false;
+			else
+				goto out;
 		} else {
 			mos_ras(MOS_LWKCTL_WARNING,
 				"Unsupported keyword: %s was ignored.",
@@ -1363,6 +1383,9 @@ static ssize_t lwk_config_store(struct kobject *kobj,
 				mos_ras(MOS_LWKCTL_FAILURE,
 					"Failure processing: lwkcpus=%s",
 					lwkcpus);
+				if (lwk_config_lwkmem("") < 0)
+					mos_ras(MOS_LWKCTL_FAILURE,
+						"Failure returning LWK memory");
 				goto out;
 			}
 		}
@@ -1427,8 +1450,9 @@ static ssize_t lwk_config_store(struct kobject *kobj,
 		}
 
 		if (lwkmem) {
-			mos_ras(MOS_LWKCTL_FAILURE,
-				"Cannot create lwkmem=%s.  Partition is static.",
+			mos_ras(MOS_LWKCTL_WARNING,
+				"Cannot %s(lwkmem=%s).  Partition is static.",
+				delete_lwkmem ? "delete" : "create",
 				lwkmem);
 			rc = lwkcpus ? rc : -EINVAL;
 		}
@@ -1461,12 +1485,13 @@ static ssize_t lwk_config_show(struct kobject *kobj,
 		auto_s = kmalloc(auto_ssize, GFP_KERNEL);
 		if (!auto_s)
 			goto out;
-		snprintf(auto_s, auto_ssize, " auto=%s", lwkauto);
+		snprintf(auto_s, auto_ssize, "auto=%s", lwkauto);
 	}
 	rc = scnprintf(cur_buff, buffsize,
-			"lwkcpus=%s lwkcpu_profile=%s lwkmem=%s%s\n",
+			"lwkcpus=%s lwkcpu_profile=%s lwkmem=%s %s precise=%s\n",
 			lwkctrl_cpus_spec, lwkctrl_cpu_profile_spec,
-			lwkmem_get_spec(), auto_s);
+			lwkmem_get_spec(), auto_s,
+			lwkmem_precise ? "yes" : "no");
 out:
 	kfree(auto_s);
 	mutex_unlock(&mos_sysfs_mutex);

@@ -68,7 +68,7 @@ static char *_rstrip(char *attr)
 				    struct kobj_attribute *attr,	\
 				    const char *buf, size_t count)	\
 	{								\
-		if (count < sizeof(mosras_##name)) {			\
+		if (count < sizeof(mosras_##name)-1) {			\
 			strcpy(mosras_##name, buf);			\
 			_rstrip(mosras_##name);				\
 			return count;					\
@@ -94,7 +94,8 @@ static int mosras_configure(const char *cfg)
 	for (i = 0; i < ARRAY_SIZE(_CFGS) && !found; i++)
 		if (strncmp(_CFGS[i].name, cfg, strlen(_CFGS[i].name)) == 0) {
 			mosras_formatter = _CFGS[i].formatter;
-			strcpy(mosras_config, _CFGS[i].name);
+			mosras_config[sizeof(mosras_config)-1] = '\0';
+			strncpy(mosras_config, _CFGS[i].name, sizeof(mosras_config)-1);
 			_rstrip(mosras_config);
 			found = 1;
 		}
@@ -123,18 +124,31 @@ static ssize_t inject_store(struct kobject *kobj,
 			    struct kobj_attribute *attr,
 			    const char *buff, size_t count)
 {
-	char *msg = kstrdup(buff, GFP_KERNEL);
-	ssize_t ret = count;
+	char *dup, *msg;
+	ssize_t ret;
+	char *event_id;
+
+	dup = msg = kstrdup(buff, GFP_KERNEL);
 
 	if (!msg) {
 		ret = -ENOMEM;
 		goto out;
 	}
 
-	mos_ras(MOS_TEST_EVENT, "Details: %s", _rstrip(msg));
-	kfree(msg);
+	event_id = strsep(&msg, " ");
+
+	if (!event_id || !msg) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	ret = mos_ras(event_id, _rstrip(msg));
+
+	if (ret == 0)
+		ret = count;
 
  out:
+	kfree(dup);
 	return ret;
 }
 
@@ -190,7 +204,8 @@ int mosras_sysfs_init(struct kobject *mos_kobj)
 
 static int __init _mosras_location_setup(char *str)
 {
-	strncpy(mosras_location, str, sizeof(mosras_location));
+	mosras_location[sizeof(mosras_location)-1] = '\0';
+	strncpy(mosras_location, str, sizeof(mosras_location)-1);
 	return 0;
 }
 __setup("mosras_location=", _mosras_location_setup);
@@ -225,6 +240,7 @@ int mos_ras(const char *event_id, const char *fmt, ...)
 
 	mosras_formatter(event_id, mosras_location, mosras_jobid, msg);
 
+	va_end(argptr);
 	kfree(msg);
 	return 0;
 }

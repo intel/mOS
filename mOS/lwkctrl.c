@@ -18,9 +18,6 @@
 #include <linux/mutex.h>
 #include <linux/mos.h>
 #include <linux/sched.h>
-#include <linux/irq.h>
-#include <linux/irqnr.h>
-#include <linux/interrupt.h>
 #include <linux/slab.h>
 #include "lwkcpu.h"
 #include "lwkctrl.h"
@@ -51,8 +48,7 @@ int __weak mos_sched_init(void) { return 0; }
 int __weak mos_sched_exit(void) { return 0; }
 int __weak mos_sched_activate(cpumask_var_t new_lwkcpus) { return 0; }
 int __weak mos_sched_deactivate(cpumask_var_t back_to_linux) { return 0; }
-
-int __weak mos_mem_init(nodemask_t *m, resource_size_t *req) { return 0; }
+int __weak mos_mem_init(nodemask_t *m, resource_size_t *r, bool p) { return 0; }
 int __weak mos_mem_free(void) { return 0; }
 
 /*
@@ -68,7 +64,6 @@ int lwkcpu_partition_create(cpumask_var_t lwkcpus_req)
 	cpumask_var_t lwkcpus_booted;
 	cpumask_var_t lwkcpus_down;
 	cpumask_var_t lwkcpus_up;
-	int irq = 0;
 	int ret = -1;
 
 	if (!zalloc_cpumask_var(&lwkcpus_booted, GFP_KERNEL) ||
@@ -101,17 +96,6 @@ int lwkcpu_partition_create(cpumask_var_t lwkcpus_req)
 			}
 		}
 		goto error;
-	}
-
-	/* Re-affinitize interrupts away from LWK CPUs if possible */
-	for_each_irq_nr(irq) {
-		if (!irq_can_set_affinity(irq))
-			continue;
-		if (!irq_save_affinity_linux(irq, lwkcpus_req)) {
-			mos_ras(MOS_LWKCTL_WARNING,
-				"%s: could not drive away irq%d.",
-				__func__, irq);
-		}
 	}
 
 	/* Activate mOS scheduler on LWK CPUs */
@@ -157,7 +141,6 @@ int lwkcpu_partition_destroy(cpumask_var_t lwkcpus_req)
 {
 	cpumask_var_t lwkcpus_shutdown;
 	cpumask_var_t lwkcpus_up;
-	int irq;
 	int ret = -1;
 
 	if (!zalloc_cpumask_var(&lwkcpus_shutdown, GFP_KERNEL) ||
@@ -173,21 +156,6 @@ int lwkcpu_partition_destroy(cpumask_var_t lwkcpus_req)
 		mos_ras(MOS_LWKCTL_FAILURE,
 			"%s: Failed to deactivate mOS scheduler.", __func__);
 		goto error;
-	}
-
-	/*
-	 * Restore the CPU affinity of interrupts migrated
-	 * away while creating partition
-	 */
-	for_each_irq_nr(irq) {
-		if (!irq_can_set_affinity(irq))
-			continue;
-
-		if (!irq_restore_affinity_linux(irq)) {
-			mos_ras(MOS_LWKCTL_WARNING,
-				"%s: Could not restore irq%d affinity.",
-				__func__, irq);
-		}
 	}
 
 	/* Shutdown LWK CPUs */
@@ -216,7 +184,7 @@ error:
 	return ret;
 }
 
-int lwkmem_partition_create(char *spec)
+int lwkmem_partition_create(char *spec, bool precise)
 {
 	int rc = -EINVAL;
 
@@ -231,7 +199,7 @@ int lwkmem_partition_create(char *spec)
 		goto error;
 	}
 
-	rc = mos_mem_init(&__mos_lwkmem_nodes, __mos_lwkmem_size);
+	rc = mos_mem_init(&__mos_lwkmem_nodes, __mos_lwkmem_size, precise);
 	if (rc) {
 		mos_ras(MOS_LWKCTL_FAILURE,
 			"%s: Failed to initialize mOS memory management.",
@@ -390,7 +358,7 @@ int lwkmem_distribute_request(resource_size_t req, nodemask_t *mask,
 	int nid, nodes = nodes_weight(*mask);
 
 	if (!req || !nodes) {
-		mos_ras(MOS_LWKCTL_FAILURE,
+		mos_ras(MOS_LWKCTL_WARNING,
 			"Cannot distribute request : %s.",
 			!req ? "requested size is 0" :
 			       "requested nodemask is empty");
