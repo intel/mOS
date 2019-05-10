@@ -16,6 +16,7 @@
 #define _LINUX_MOS_H
 
 
+#include <linux/slab.h>
 #include <linux/cpumask.h>
 #include <linux/sched.h>
 #include <linux/cpuhotplug.h>
@@ -126,6 +127,31 @@ struct mos_process_t {
 	/* Scheduler attributes go here */
 #endif
 };
+
+#if MAX_NUMNODES > 64
+typedef unsigned long *numa_nodes_t;
+
+static inline bool zalloc_numa_nodes_array(numa_nodes_t *node_pp)
+{
+	*node_pp = kzalloc(sizeof(unsigned long) * MAX_NUMNODES, GFP_KERNEL);
+	return *node_pp != NULL;
+}
+
+#define free_numa_nodes_array(node_p) kfree(node_p)
+
+#else
+typedef unsigned long numa_nodes_t[MAX_NUMNODES];
+
+static inline bool clear_numa_nodes_array(numa_nodes_t *nodes, unsigned long n)
+{
+	while (n)
+		(*nodes)[--n] = 0;
+	return true;
+}
+
+#define zalloc_numa_nodes_array(a) clear_numa_nodes_array(a, ARRAY_SIZE(*a))
+#define free_numa_nodes_array(a)
+#endif
 
 extern int mos_register_option_callback(const char *name,
 		int (*callback)(const char *, struct mos_process_t *));

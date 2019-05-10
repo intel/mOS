@@ -80,6 +80,22 @@ static inline int mos_ras(...)
  */
 #define MOS_LWK_PROCESS_ERROR_UNSTABLE_NODE "mOSLwkProcessErrorUnstableNode"
 
+/**
+ * EventType: 1001000007
+ * Severity:  Warning
+ * Component: mOSKernel
+ * Msg:       An unexpected event occurred in mOS kernel.
+ */
+#define MOS_KERNEL_WARNING "mOSKernelWarning"
+
+/**
+ * EventType: 1001000008
+ * Severity:  Error
+ * Component: mOSKernel
+ * Msg:       An unexpected error occurred in mOS kernel.
+ * ControlOperation: ErrorOnNode
+ */
+#define MOS_KERNEL_ERROR "mOSKernelError"
 
 /* Events for the LWK memory component have the range 1001100000-101199999 */
 
