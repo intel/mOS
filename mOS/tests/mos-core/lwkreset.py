@@ -1,5 +1,5 @@
 # Multi Operating System (mOS)
-# Copyright (c) 2016, Intel Corporation.
+# Copyright (c) 2019, Intel Corporation.
 #
 # This program is free software; you can redistribute it and/or modify it
 # under the terms and conditions of the GNU General Public License,
@@ -10,13 +10,11 @@
 # FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
 # more details.
 
-hostprogs-y := lwkreset
-scriptprogs-y := lwkreset.sh lwkreset.1.man
-lwkreset-objs := lwkreset.o
+from mostests import *
+from mosunit import run
 
-lwkreset.sh_installname := lwkreset
-lwkreset.sh_installpath := /usr/bin
-lwkreset.1.man_installname := lwkreset.1
-lwkreset.1.man_installpath := /usr/share/man/man1
+class Basic(TestCase):
 
-include $(src)/../Makefile.tool
+    def test_lwkreset_existence(self):
+        out, rc = run(['lwkreset', '-h'])
+        self.assertTrue(rc == 0, 'Could not locate lwkreset.')

@@ -1,5 +1,7 @@
+#!/bin/sh
+
 # Multi Operating System (mOS)
-# Copyright (c) 2016, Intel Corporation.
+# Copyright (c) 2019, Intel Corporation.
 #
 # This program is free software; you can redistribute it and/or modify it
 # under the terms and conditions of the GNU General Public License,
@@ -10,13 +12,14 @@
 # FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
 # more details.
 
-hostprogs-y := lwkreset
-scriptprogs-y := lwkreset.sh lwkreset.1.man
-lwkreset-objs := lwkreset.o
+lwkreset="/lib/modules/`uname -r`/lwkreset"
+if ! [ -x "$lwkreset" ]; then
+	cat 1>&2 <<EOF
+$0: `uname -r` is not an mOS kernel.
 
-lwkreset.sh_installname := lwkreset
-lwkreset.sh_installpath := /usr/bin
-lwkreset.1.man_installname := lwkreset.1
-lwkreset.1.man_installpath := /usr/share/man/man1
-
-include $(src)/../Makefile.tool
+If you want to run lwkreset anyway, you must invoke one directly; look in
+/lib/modules/*/lwkreset.
+EOF
+	exit 1
+fi
+exec "$lwkreset" "$@"

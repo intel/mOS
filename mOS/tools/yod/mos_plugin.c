@@ -34,6 +34,7 @@
 #define MOS_SYSFS_LWKCPUS_SEQUENCE (MOS_SYSFS_ROOT "lwkcpus_sequence")
 #define MOS_SYSFS_LWKMEM_DOMAIN_INFO (MOS_SYSFS_ROOT "lwkmem_domain_info")
 #define MOS_SYSFS_LWK_OPTIONS (MOS_SYSFS_ROOT "lwk_options")
+#define MOS_SYSFS_LWK_PROCESSES (MOS_SYSFS_ROOT "lwkprocesses")
 #define CPUINFO "/proc/cpuinfo"
 #define CPU_ONLINE "/sys/devices/system/cpu/online"
 #define THREAD_SIBLINGS "/sys/devices/system/cpu/cpu%d/topology/thread_siblings_list"
@@ -64,6 +65,8 @@ static int mos_sysfs_read(const char *file, char *buff, int len)
 	YOD_LOG(YOD_GORY, "(>) %s(file=%s buff=%p:%d)",
 		__func__, file, buff, len);
 
+	buff[len-1] = '\0';
+
 	fptr = fopen(file, "r");
 
 	if (!fptr) {
@@ -71,11 +74,11 @@ static int mos_sysfs_read(const char *file, char *buff, int len)
 		return -1;
 	}
 
-	rc = fread(buff, 1, len, fptr);
+	rc = fread(buff, 1, len-1, fptr);
 
 	if (rc < 0) {
 		YOD_ERR("Could not read \"%s\" (rc = %d)", file, len);
-	} else if (rc < len) 
+	} else
 		buff[rc] = 0; /* force end-of-string */
 
 	fclose(fptr);
@@ -709,7 +712,7 @@ static int mos_combo_lock(struct lock_options_t *opts)
 	if (local_rank != 0) {
 		while (retries > 0) {
 			fd = open(seq_file, O_RDONLY);
-			if (fd > 0) {
+			if (fd >= 0) {
 				/* Attempt to read the sequence number from the
 				 * file.  It is possible that the value has not
 				 * arrived yet and therefore we should retry.
@@ -886,6 +889,27 @@ static bool mos_set_mos_view(char *mos_view)
 	return mos_sysfs_write(PROC_MOS_VIEW, mos_view, strlen(mos_view)) == 0;
 }
 
+static void mos_get_lwk_processes(pid_t *lwkprocs, size_t *n)
+{
+	size_t N = *n;
+	char buff[4096], *tok, *str, *save;
+	size_t nread;
+
+	*n = 0;
+	nread = mos_sysfs_read(MOS_SYSFS_LWK_PROCESSES, buff, sizeof(buff));
+
+	if (nread <= 0 || nread > sizeof(buff))
+		return;
+
+	str = buff;
+	while ((tok = strtok_r(str, ",", &save)) != 0) {
+		if (*n == N)
+			yod_abort(-EINVAL, "Buffer overrun parsing %s", MOS_SYSFS_LWK_PROCESSES);
+		lwkprocs[(*n)++] = atoi(tok);
+		str = 0;
+	}
+}
+
 struct yod_plugin mos_plugin = {
 	.get_designated_lwkcpus = mos_get_designated_lwkcpus,
 	.get_reserved_lwk_cpus = mos_get_reserved_lwk_cpus,
@@ -903,6 +927,7 @@ struct yod_plugin mos_plugin = {
 	.set_lwkmem_domain_info = mos_set_lwkmem_domain_info,
 	.get_mos_view = mos_get_mos_view,
 	.set_mos_view = mos_set_mos_view,
+	.get_lwk_processes = mos_get_lwk_processes,
 };
 
 

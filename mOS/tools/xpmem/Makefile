@@ -12,7 +12,7 @@
 
 PHONY += _toolinst_ _toolinst_libxpmem _toolinst_xpmem_h
 
-major := 1
+major := 0
 minor := 0
 soname := libxpmem.so.$(major)
 libxpmem := libxpmem.so.$(major).$(minor)

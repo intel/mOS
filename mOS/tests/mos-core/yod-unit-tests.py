@@ -15,6 +15,7 @@ import yod
 from itertools import permutations
 import math
 import copy
+import tempfile
 
 logger = logging.getLogger()
 
@@ -67,6 +68,97 @@ class Resources(yod.YodTestCase):
 
                 cmd += ['%AFFINITY_TEST%', '--lwkcpus_reserved', self.lwkcpus_request, '--lwkmem_reserved', self.total_lwkmem // 2]
                 self.expand_and_run(cmd, 0)
+
+    def test_mapfile_doesnt_exist(self):
+        cmd = ['%RESOURCES%', 'file:/this/file/does/not/exist', '%HELLO%']
+        self.expand_and_run(cmd, EINVAL)
+
+
+    def test_mapfile_doubly_specified_resources(self):
+        fd, map_file = tempfile.mkstemp(suffix='.map', text=True)
+
+        with open(map_file, 'w') as mapf:
+            mapf.write('* -R all\n')
+
+        for rspec, rval in ( ('%RESOURCES%', 'all'), ('%CORES%', '1'), ('%CPUS%', '1'), ('%MEM%', '16M'), ):
+            cmd = ['%RESOURCES%', 'file:{}'.format(map_file), rspec, rval, '%HELLO%']
+            self.expand_and_run(cmd, EINVAL)
+
+        os.remove(os.path.abspath(map_file))
+
+    def test_mapfile_env_var_not_set(self):
+
+        if 'MPI_LOCALRANKID' in os.environ:
+            del os.environ['MPI_LOCALRANKID']
+
+        map_file = self._get_map_file()
+        cmd = ['%RESOURCES%', 'file:{}'.format(map_file), '%HELLO%']
+        self.expand_and_run(cmd, EINVAL)
+        os.remove(os.path.abspath(map_file))
+
+
+    def _get_map_file(self):
+        fd, map_file = tempfile.mkstemp(suffix='.map', text=True)
+        with open(map_file, 'w') as mapf:
+            for line in [
+                    '# The first rank on the node will use 1/4 of the designated resources:',
+                    '0 -R 1/4',
+                    '# The second rank on the node will use CPU 9 and 1 gigabyte of memory:',
+                    '1 -c 9 -M 1G',
+                    '# All other ranks use 1 core and 1/8 of the designated memory:',
+                    '* --cores 1 --mem 1/8',
+            ]:
+                mapf.write(line + '\n')
+
+        return map_file
+
+    def test_mapfile_resources(self):
+
+        map_file = self._get_map_file()
+
+        # The rank 0 entry is a "-R 1/4" request:
+        n_cores = self.get_designated_lwkcpus().countBy(self.topology.cores)
+        self.lwkcpus_request = self.get_n_cores(n_cores // 4)
+        self.compute_lwkmem_request(fraction=0.25)
+
+        os.environ['MPI_LOCALRANKID'] = '0'
+        cmd = ['%RESOURCES%', 'file:{}'.format(map_file)]
+        #cmd += ['-v', '2']
+        cmd += ['%AFFINITY_TEST%', '--lwkcpus_reserved', self.lwkcpus_request, '--lwkmem_reserved', self.total_lwkmem // 4]
+        self.expand_and_run(cmd, 0)
+        os.remove(os.path.abspath(map_file))
+
+    def test_mapfile_cpu(self):
+
+        map_file = self._get_map_file()
+
+        # The rank 1 entry is a "-c 9 -M 1G" request:
+        n_cores = self.get_designated_lwkcpus().countBy(self.topology.cores)
+        self.lwkcpus_request = '9'
+        self.compute_lwkmem_request(size=1024*1024*1024)
+
+        os.environ['MPI_LOCALRANKID'] = '1'
+        cmd = ['%RESOURCES%', 'file:{}'.format(map_file)]
+        cmd += ['-v', '2']
+        cmd += ['%AFFINITY_TEST%', '--lwkcpus_reserved', self.lwkcpus_request, '--lwkmem_reserved', 1024*1024*1024]
+        self.expand_and_run(cmd, 0)
+        os.remove(os.path.abspath(map_file))
+
+    def test_mapfile_cores(self):
+
+        map_file = self._get_map_file()
+
+        # The fallthru is "--cores 1 --mem 1/8":
+
+        self.lwkcpus_request = self.get_n_cores(1)
+        self.compute_lwkmem_request(fraction=1.0/8.0)
+
+        os.environ['MPI_LOCALRANKID'] = '2'
+        cmd = ['%RESOURCES%', 'file:{}'.format(map_file)]
+        cmd += ['-v', '2']
+        cmd += ['%AFFINITY_TEST%', '--lwkcpus_reserved', self.lwkcpus_request, '--lwkmem_reserved', self.total_lwkmem // 8]
+        self.expand_and_run(cmd, 0)
+        os.remove(os.path.abspath(map_file))
 
 
 class Cores(yod.YodTestCase):
