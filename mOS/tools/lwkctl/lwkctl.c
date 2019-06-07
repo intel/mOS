@@ -25,6 +25,7 @@
 #include <ctype.h>
 #include <limits.h>
 #include <sys/user.h>
+#include <sys/file.h>
 
 #include "lwkctl.h"
 
@@ -32,14 +33,17 @@
 #define PROC_MOS_VIEW		"/proc/self/mos_view"
 #define PROC_MOS_VIEW_LEN 	20
 #define VM_DROP_CACHE_ALL	"3"
+#define VM_DROP_CACHE_PAGE	"1"
 
 #define PACKAGE_ID "/sys/devices/system/cpu/cpu%d/topology/physical_package_id"
 #define CORE_ID "/sys/devices/system/cpu/cpu%d/topology/core_id"
 #define CPU_ONLINE "/sys/devices/system/cpu/online"
 #define NODE_CPUS "/sys/devices/system/node/node%d/cpulist"
+#define NODE_MEMINFO "/sys/devices/system/node/node%d/meminfo"
 #define NODES_POSSIBLE "/sys/devices/system/node/possible"
 #define PROC_BUDDYINFO "/proc/buddyinfo"
 #define SYS_LWKMEM "/sys/kernel/mOS/lwkmem"
+#define SYS_ROOT "/sys/kernel/mOS"
 #define SYSCTL_DROP_CACHES "/proc/sys/vm/drop_caches"
 
 /* Topology info for a CPU */
@@ -56,10 +60,25 @@ struct cpu_info {
 	struct cpu_map *cpumap;
 };
 
+enum mem_type {
+	mem_type_unknown,
+	mem_type_ddr,
+	mem_type_not_ddr,
+};
+
+struct mem_info {
+	int node_id;
+	size_t total_size;
+	size_t lwk_gb;
+	enum mem_type memtype;
+};
+
 struct node_info {
 	unsigned long int nodes_possible;
+	int num_nodes;
 	char *buddyinfo;
 	char *lwkmeminfo;
+	struct mem_info *meminfo;
 };
 
 struct help_text {
@@ -80,12 +99,28 @@ struct help_text {
 	{"-s, --show",       0,                  "Show existing LWK partition."},
 	{"-r, --raw",        0,                  "Modifies the format of the"},
 	{0,                  0,                  "--show option output."},
+	{"-t, --timeout",    "secs",             "Specify the lock timeout"},
+	{0,                  0,                  "(in seconds)."},
+	{"-f, --force",      0,                  "Force creation/deletion of"},
+	{0,                  0,                  "partitions."},
 	{"-v, --v",          0,                  "Specify verbosity level."},
 	{"-h, --help",       0,                  "Prints help."},
 };
 
-struct lwkctl_options lc_opts;
+struct lwkctl_options lc_opts = {
+	.flags = 0,
+	.create = 0,
+	.delete = 0,
+	.show = false,
+	.timeout_in_millis = 5 * 60 * 1000, /* 5 minutes */
+};
+
 int lc_verbosity = LC_WARN;
+
+bool lwkmem_precise;
+
+static const char *amax = "auto:max";
+static const char *abal = "auto";
 
 /*
  * Prints usage of lwkctl command
@@ -149,7 +184,10 @@ static void parse_options(int argc, char **argv)
 		{"delete", no_argument, 0, 'd'},
 		{"show",   no_argument, 0, 's'},
 		{"raw", no_argument, 0, 'r'},
+		{"precise", required_argument, 0, 'p'},
+		{"timeout", required_argument, 0, 't'},
 		{"verbose", required_argument, 0, 'v'},
+		{"force", no_argument, 0, 'f'},
 		{"help",   no_argument, 0, 'h'},
 		{0, 0, 0, 0},
 	};
@@ -165,8 +203,9 @@ static void parse_options(int argc, char **argv)
 
 		int c;
 		int opt_index = 0;
+		char *endptr = 0;
 
-		c = getopt_long(argc, argv, "+c:dsrv:h", options,
+		c = getopt_long(argc, argv, "+c:dsrfp:t:v:h", options,
 				&opt_index);
 
 		if (c == -1)
@@ -193,6 +232,34 @@ static void parse_options(int argc, char **argv)
 			lc_opts.flags |= LC_RAW;
 			break;
 
+		case 'f':
+			lc_opts.flags |= LC_FORCE;
+			break;
+
+		case 'p':
+			lc_opts.flags |= LC_PRECISE;
+			if (!strcmp(optarg, "yes"))
+				lwkmem_precise = true;
+			else if (!strcmp(optarg, "no"))
+				lwkmem_precise = false;
+			else
+				lwkctl_abort(-EINVAL,
+				    "Invalid parameter for precise option");
+			break;
+
+		case 't':
+			endptr = 0;
+			errno = 0;
+			lc_opts.timeout_in_millis = strtol(optarg, &endptr, 0);
+			if (errno || (endptr == optarg) ||
+			    (lc_opts.timeout_in_millis < 0)) {
+				lwkctl_abort(-EINVAL,
+				     "Invalid argument for timeout: %s.",
+				     optarg);
+			}
+			lc_opts.timeout_in_millis *= 1000;
+			break;
+
 		case 'v':
 			lc_verbosity = atoi(optarg);
 			if (lc_verbosity < LC_QUIET)
@@ -211,6 +278,9 @@ static void parse_options(int argc, char **argv)
 	if ((lc_opts.flags & LC_RAW) && !(lc_opts.flags & LC_SHOW))
 		lwkctl_abort(-EINVAL,
 				"The raw option requires the show option");
+	if ((lc_opts.flags & LC_PRECISE) && !(lc_opts.flags & LC_CREATE))
+		lwkctl_abort(-EINVAL,
+			"The precise option requires the create option");
 }
 
 static unsigned long int nodelist_to_mask(char *path, char *buffer,
@@ -330,6 +400,14 @@ static size_t calc_memsize(int node, struct node_info *nodeinfo)
 	return memsize_GB;
 }
 
+static unsigned int node_cardinality(unsigned long int nodemask)
+{
+	int i;
+
+	for (i = 0; nodemask; nodemask >>= 1)
+		i += (nodemask & 1);
+	return i;
+}
 
 static void initialize_nodeinfo(struct node_info *nodeinfo, char *buffer,
 			int buff_size)
@@ -342,6 +420,9 @@ static void initialize_nodeinfo(struct node_info *nodeinfo, char *buffer,
 	if (mos_sysfs_read(SYS_LWKMEM, buffer, buff_size) < 0)
 		lwkctl_abort(-1, "Could not read %s", SYS_LWKMEM);
 	nodeinfo->lwkmeminfo = strdup(buffer);
+	nodeinfo->num_nodes = node_cardinality(nodeinfo->nodes_possible);
+	nodeinfo->meminfo = calloc(nodeinfo->num_nodes,
+				   sizeof(struct mem_info));
 }
 
 static void free_nodeinfo(struct node_info *nodeinfo)
@@ -350,17 +431,155 @@ static void free_nodeinfo(struct node_info *nodeinfo)
 	nodeinfo->buddyinfo = NULL;
 	free(nodeinfo->lwkmeminfo);
 	nodeinfo->lwkmeminfo = NULL;
+	free(nodeinfo->meminfo);
+	nodeinfo->meminfo = NULL;
+}
+
+static bool match_with_tolerance(size_t a, size_t b, unsigned int t)
+{
+	return ((b > (a - (a / t))) && (b < (a + (a / t)))) ? true : false;
+}
+
+/*
+ * Find a common LWK memory allocation for all like-sized NUMA domains that
+ * are of the same memory type (i.e. DDR, HBM).
+ */
+static size_t balance_designations(struct node_info *nodeinfo)
+{
+	static const int tolerance = 10;
+	int i, j, nodeid, gnode, min_node;
+	unsigned long int exclude;
+	unsigned long int group;
+	unsigned long int nodes;
+	size_t min_gb;
+	size_t match;
+	size_t node_size;
+	size_t total_lwk_gb = 0;
+	size_t x_gb = 0;
+	enum mem_type type_match;
+
+	LC_LOG(LC_DEBUG, "Begin NUMA domain balancing.");
+	/* Iterate over the nodes to find min LWK for each equal size domain */
+	for (i = 0, exclude = 0; i < nodeinfo->num_nodes; i++) {
+		group = 0;
+		min_gb = -1;
+		nodeid = nodeinfo->meminfo[i].node_id;
+		if ((exclude >> nodeid) & 1)
+			continue;
+		/* Setup the match values for the size and type of the domain */
+		match = nodeinfo->meminfo[i].total_size;
+		type_match = nodeinfo->meminfo[i].memtype;
+		for (j = 0; j < nodeinfo->num_nodes; j++) {
+			struct mem_info *mi;
+
+			mi = &nodeinfo->meminfo[j];
+			node_size = mi->total_size;
+			/* Bios/firmware may steal memory, making the total
+			 * memory reported in a domain different across equally
+			 * populated numa domains. Identify like-sized domains
+			 * with a tolerance.
+			 */
+			if (match_with_tolerance(node_size, match, tolerance) &&
+			    (mi->memtype == type_match)) {
+				if (mi->lwk_gb < min_gb) {
+					min_gb = mi->lwk_gb;
+					min_node = mi->node_id;
+				}
+				nodeid = mi->node_id;
+				group |= (1 << nodeid);
+			}
+		}
+		/* Loop through the group mask. Set the min for entire group */
+		for (gnode = 0, nodes = group; nodes; nodes >>= 1, gnode++) {
+			if (!(nodes & 1))
+				continue;
+			for (j = 0; j < nodeinfo->num_nodes; j++) {
+				struct mem_info *mi;
+
+				mi = &nodeinfo->meminfo[j];
+				nodeid = mi->node_id;
+				if (nodeid == gnode) {
+					if (mi->lwk_gb > min_gb) {
+						LC_LOG(LC_DEBUG,
+						   "Numa domain balancing: Node %d has %luG available but limited to %luG by node %d.",
+						   nodeid, mi->lwk_gb,
+						   min_gb, min_node);
+						x_gb += (mi->lwk_gb - min_gb);
+						mi->lwk_gb = min_gb;
+					}
+					total_lwk_gb += min_gb;
+					break;
+				}
+			}
+		}
+		/* Update the exclude mask with the processed nodes */
+		exclude |= group;
+	}
+	LC_LOG(LC_DEBUG,
+	    "End NUMA domain balancing. Lwk memory: %luG. Sacrificed %luG of potential LWK memory.",
+	    total_lwk_gb, x_gb);
+	return total_lwk_gb;
+}
+
+static size_t domain_total_memory(int node, char *buffer, int buff_size)
+{
+	char path[128];
+	char match_str[64];
+	static const char *match = "Node %d MemTotal:";
+	char *strptr, *endptr;
+	size_t total_mem;
+
+	/* Read the meminfo for the requested numa domain */
+	sprintf(path, NODE_MEMINFO, node);
+	if (mos_sysfs_read(path, buffer, buff_size) < 0)
+		lwkctl_abort(-1, "Could not read %s", path);
+
+	sprintf(match_str, match, node);
+	strptr = strstr(buffer, match_str);
+	if (!strptr)
+		lwkctl_abort(-1, "Could not find MemTotal in %s: %s", path,
+				buffer);
+
+	strptr += strlen(match_str);
+	errno = 0;
+	total_mem = strtoul(strptr, &endptr, 10);
+	if (errno || (endptr == strptr))
+		lwkctl_abort(-1,
+		    "Could not obtain value for MemTotal in meminfo: %s.",
+				strptr);
+	return total_mem;
+}
+
+static enum mem_type domain_memory_type(int node, char *buffer, int buff_size)
+{
+	char path[128];
+	int bytes_read;
+	enum mem_type rc;
+
+	/* Read the cpulist for the requested numa domain. Non-DDR, (e.g. HBM)
+	 * does not have any CPUs reported in the CPU list.
+	 */
+	sprintf(path, NODE_CPUS, node);
+	bytes_read = mos_sysfs_read(path, buffer, buff_size);
+	if (bytes_read < 0)
+		lwkctl_abort(-1, "Could not read %s", path);
+	rc = (bytes_read > 1) ? mem_type_ddr : mem_type_not_ddr;
+	LC_LOG(LC_DEBUG, "NUMA domain %d identified as %s.",
+	    node, (rc == mem_type_ddr) ? "DDR" : "NOT DDR (e.g. HBM)");
+	return rc;
 }
 
 /* Replaces the partition spec string with a new partition spec string
  * containing the generated lwkmem specification.
  */
-static int generate_default_mem_spec(char **partition_spec)
+static int generate_default_mem_spec(char **partition_spec, const char *auto_s)
 {
 	static const int buff_size = 4096;
 	char *buffer, *lwkmem_keyword, *suffix, *new_spec;
-	size_t memsize_GB, orig_spec_length, new_spec_length, total_memsize_GB;
+	size_t orig_spec_length, new_spec_length;
+	size_t total_memsize_GB = 0;
 	unsigned int written, remaining_bufsize, buffer_index, node;
+	int i;
 	unsigned long int nodes;
 	struct node_info nodeinfo;
 
@@ -371,24 +590,35 @@ static int generate_default_mem_spec(char **partition_spec)
 
 	initialize_nodeinfo(&nodeinfo, buffer, buff_size);
 
-	total_memsize_GB = 0;
-	buffer_index = 0;
-	/* Iterate over the possible nodes. Build the spec string */
-	for (node = 0, nodes = nodeinfo.nodes_possible; nodes;
+	/* Iterate over the possible nodes. Determine available memory */
+	for (node = 0, nodes = nodeinfo.nodes_possible, i = 0; nodes;
 	      nodes >>= 1, node++) {
+		struct mem_info *mi;
+
 		if (!(nodes & 1))
 			continue;
-		memsize_GB = calc_memsize(node, &nodeinfo);
-		if (!memsize_GB) {
+		mi = &nodeinfo.meminfo[i];
+		mi->node_id = node;
+		mi->total_size = domain_total_memory(node, buffer, buff_size);
+		mi->lwk_gb = calc_memsize(node, &nodeinfo);
+		mi->memtype = domain_memory_type(node, buffer, buff_size);
+		total_memsize_GB += mi->lwk_gb;
+		if (!mi->lwk_gb)
 			LC_LOG(LC_WARN,
 			    "WARNING: Node %d has no memory available for use in the LWK partition",
 			    node);
-			continue;
-		}
-		total_memsize_GB += memsize_GB;
+		i++;
+	}
+	/* Provide balanced lwk designations across like-sized numa domains */
+	if (!strcmp(abal, auto_s))
+		total_memsize_GB = balance_designations(&nodeinfo);
+
+	/* Build the spec string */
+	for (i = 0, buffer_index = 0; i < nodeinfo.num_nodes; i++) {
 		remaining_bufsize = buff_size - buffer_index;
 		written = snprintf(buffer + buffer_index, remaining_bufsize,
-					"%d:%zuG,", node, memsize_GB);
+				"%d:%zuG,", nodeinfo.meminfo[i].node_id,
+				nodeinfo.meminfo[i].lwk_gb);
 		if (written >= remaining_bufsize)
 			lwkctl_abort(-1,
 			 "Buffer overflow generating memory specification [%s:%d]",
@@ -409,10 +639,10 @@ static int generate_default_mem_spec(char **partition_spec)
 	*(lwkmem_keyword + strlen("lwkmem=")) = '\0';
 
 	/* Set the beginning of the suffix string */
-	suffix =  lwkmem_keyword + strlen("lwkmem=auto");
+	suffix =  lwkmem_keyword + strlen("lwkmem=") + strlen(auto_s);
 
 	/* Calculate the new size needed to hold the partition spec */
-	new_spec_length = orig_spec_length - strlen("auto") +
+	new_spec_length = orig_spec_length - strlen(auto_s) +
 			  strlen(buffer) + 1;
 
 	new_spec = (char *)malloc(new_spec_length);
@@ -542,8 +772,8 @@ static unsigned long int build_node_mask(struct cpu_info *cpuinfo)
 			lwkctl_abort(-1,
 			    "Mask overflow processing package ID=%d",
 			    cpuinfo->cpumap[cpu].node_id);
-		node_mask |= (1 << cpuinfo->cpumap[cpu].node_id);
-
+		if (cpuinfo->cpumap[cpu].node_id >= 0)
+			node_mask |= (1 << cpuinfo->cpumap[cpu].node_id);
 		LC_LOG(LC_DEBUG,
 		    "cpu=%d pkg=%d node=%d core=%d node_msk=%016lx", cpu,
 		    cpuinfo->cpumap[cpu].pkg_id, cpuinfo->cpumap[cpu].node_id,
@@ -552,20 +782,11 @@ static unsigned long int build_node_mask(struct cpu_info *cpuinfo)
 	return node_mask;
 }
 
-static unsigned int node_cardinality(unsigned long int nodemask)
-{
-	int i;
-
-	for (i = 0; nodemask; nodemask >>= 1)
-		i += (nodemask & 1);
-	return i;
-}
-
 static int select_linux_cpus(struct cpu_info *cpuinfo)
 {
 	static const int ratio_threshold = 64;
 	int cpu, i, min_count, num_nodes, cpu2, num_online, num_linux_cpus,
-		delta, ratio, coreid, pkgid, prev_node;
+		delta, ratio, coreid, pkgid, prev_node, nodeid;
 	int cpu_count_per_node[64];
 
 	/* Generate CPU counts for each numa node. */
@@ -573,15 +794,17 @@ static int select_linux_cpus(struct cpu_info *cpuinfo)
 	for (cpu = 0; cpu <= cpuinfo->max_cpuid; cpu++) {
 		if (!mos_cpuset_is_set(cpu, cpuinfo->online))
 			continue;
-		if (cpuinfo->cpumap[cpu].pkg_id != 0 ||
-		    cpuinfo->cpumap[cpu].core_id != 0)
-			cpu_count_per_node[cpuinfo->cpumap[cpu].node_id]++;
-		else {
-			/* Socket/core  0/0 contains the boot CPU0. We will
-			 * explicitly give this core to Linux.
-			 */
+		/* Socket/core 0/0 contains the boot CPU0. Give threads on this
+		 * core to Linux
+		 */
+		if (cpuinfo->cpumap[cpu].pkg_id == 0 &&
+		    cpuinfo->cpumap[cpu].core_id == 0) {
 			LC_LOG(LC_DEBUG, "Setting cpu=%d into Linux mask", cpu);
 			mos_cpuset_set(cpu, cpuinfo->linux_cpus);
+		} else {
+			nodeid = cpuinfo->cpumap[cpu].node_id;
+			if (nodeid >= 0)
+				cpu_count_per_node[nodeid]++;
 		}
 	}
 
@@ -702,15 +925,25 @@ static void generate_cpu_string(struct cpu_info *cpuinfo, int ratio,
 		num_linux_cpus, num_utils_per_node, nth_lwkcpu;
 	unsigned int written, remaining_bufsize;
 	unsigned long int node_mask;
-	mos_cpuset_t *subgroup_cpus, *lwk_cpus;
+	mos_cpuset_t *subgroup_cpus, *lwk_cpus, *unused_linux_cpus;
 	char *lwkcpu_str;
 
 	subgroup_cpus = mos_cpuset_alloc();
 	lwk_cpus = mos_cpuset_alloc();
+	unused_linux_cpus = mos_cpuset_alloc();
+
+	for (cpu = 0; cpu < cpuinfo->max_cpuid; cpu++)
+		if (mos_cpuset_is_set(cpu, cpuinfo->linux_cpus))
+			mos_cpuset_set(cpu, unused_linux_cpus);
 
 	node_mask = build_node_mask(cpuinfo);
 	num_nodes = node_cardinality(node_mask);
+	if (num_nodes == 0) {
+		lwkctl_abort(-1, "Unexpected condition no NUMA nodes [%s: %d]",
+			     __FILE__, __LINE__);
+	}
 	num_linux_cpus = mos_cpuset_cardinality(cpuinfo->linux_cpus);
+
 	num_utils_per_node = num_linux_cpus / num_nodes;
 
 	LC_LOG(LC_DEBUG, "ratio=%d num_utils_per_node=%d",
@@ -761,13 +994,11 @@ static void generate_cpu_string(struct cpu_info *cpuinfo, int ratio,
 			 * If not, just use what is available
 			 */
 			for (j = 1; ; j++) {
-				cpu = mos_cpuset_nth_cpu(j,
-							 cpuinfo->linux_cpus);
+				cpu = mos_cpuset_nth_cpu(j, unused_linux_cpus);
 				if (cpu < 0)
 					break;
 				if (cpuinfo->cpumap[cpu].node_id == node) {
-					mos_cpuset_clr(cpu,
-						       cpuinfo->linux_cpus);
+					mos_cpuset_clr(cpu, unused_linux_cpus);
 					break;
 				}
 			}
@@ -775,14 +1006,13 @@ static void generate_cpu_string(struct cpu_info *cpuinfo, int ratio,
 				/* Did not find a CPU in our node. Take the
 				 * first CPU in the available mask
 				 */
-				cpu = mos_cpuset_nth_cpu(1,
-							 cpuinfo->linux_cpus);
+				cpu = mos_cpuset_nth_cpu(1, unused_linux_cpus);
 				if (cpu <= 0) {
 					lwkctl_abort(-1,
 					    "Unexpected condition configuring utility CPU [%s:%d]",
 					    __FILE__, __LINE__);
 				}
-				mos_cpuset_clr(cpu, cpuinfo->linux_cpus);
+				mos_cpuset_clr(cpu, unused_linux_cpus);
 			}
 			syscall_target = cpu;
 
@@ -809,10 +1039,10 @@ static void generate_cpu_string(struct cpu_info *cpuinfo, int ratio,
 	 * syscall targets, include them at the end of the string for use by
 	 * utility threads. Otherwise, trim the trailing ":" from the string.
 	 */
-	if (!mos_cpuset_is_empty(cpuinfo->linux_cpus)) {
+	if (!mos_cpuset_is_empty(unused_linux_cpus)) {
 		remaining_bufsize = buffer_size - buffer_index;
 		written = snprintf(buffer + buffer_index, remaining_bufsize,
-				"%s.", mos_cpuset_to_list(cpuinfo->linux_cpus));
+				"%s.", mos_cpuset_to_list(unused_linux_cpus));
 		if (written >= remaining_bufsize) {
 			lwkctl_abort(-1,
 			 "Buffer overflow generating CPU specification [%s:%d]",
@@ -825,6 +1055,7 @@ static void generate_cpu_string(struct cpu_info *cpuinfo, int ratio,
 
 	mos_cpuset_free(subgroup_cpus);
 	mos_cpuset_free(lwk_cpus);
+	mos_cpuset_free(unused_linux_cpus);
 }
 
 /*
@@ -905,7 +1136,7 @@ static int generate_default_cpu_spec(char **partition_spec,
 		mos_cpuset_t *lwkcpus, mos_cpuset_t *utilcpus,
 		mos_cpuset_t *allcpus)
 {
-	static const int buffer_size = 4096;
+	const int buffer_size = 4096;
 	char *buffer, *lwkcpu_keyword, *new_spec, *suffix;
 	int ratio, rc;
 	unsigned int written;
@@ -989,7 +1220,7 @@ static void vm_drop_clean_caches(void)
 {
 	sync();
 	if (mos_sysfs_write(SYSCTL_DROP_CACHES,
-	    VM_DROP_CACHE_ALL, strlen(VM_DROP_CACHE_ALL)))
+	    VM_DROP_CACHE_PAGE, strlen(VM_DROP_CACHE_PAGE)))
 		LC_LOG(LC_WARN, "Failed to drop Linux's VM caches");
 }
 
@@ -1013,6 +1244,109 @@ void lwkctl_abort(int rc, const char *format, ...)
 	exit(rc);
 }
 
+/*
+ * irqbalance daemon interprets /sys/../online and /proc/stat files for
+ * determining the number of CPUs. If the CPUs are being dynamically
+ * hotplugged (like in lwkctl) then (irqbalance could see inconsistent
+ * number of online cpus between the two reads to sysfs and procfs. In
+ * order to avoid this inconsistent view of online cpus lwkctl needs to
+ * stop irqbalance when there is an ongoing LWK partition creation or
+ * deletion.
+ *
+ * irqbalance also sets the affinity of user managed irqs. But when an
+ * LWK partition is being created or present the irqbalance should not
+ * consider LWKCPUs for balancing the irqs. In order to achieve this,
+ *   a. we stop the irqbalance daemon during an LWK partition is being
+ *      created or deleted. And restart the daemon after the LWK part-
+ *      -ition creation/deletion is complete.
+ *   b. if an LWK partition is created then we set the irqbalance daemon's
+ *      environment variable IRQBALANCE_BANNED_CPUS before restarting it.
+ *      This ensures that the irqbalance ignores LWKCPUs for balancing
+ *      irqs.
+ *
+ * Note that the irqbalance daemon is restarted only if it was stopped
+ * at the beginning of lwkctl. So if the irqbalance is daemon is not
+ * active when the lwkctl was invoked then we don't restart it in lwkctl.
+ */
+static int irqbalance_stopped;
+
+static void lwkctl_start_irqbalance(void)
+{
+	int rc;
+
+	/* If we had stopped irqbalance daemon then try to restart it */
+	if (irqbalance_stopped) {
+		irqbalance_stopped = 0;
+		if (is_irqbalance_active()) {
+			/*
+			 * Ah! someone started irqbalance daemon
+			 * outside of lwkctl when we had stopped it
+			 * before. In this case we need to restart it
+			 * again. This ensures that the irqbalance is
+			 * started of with the right environment
+			 * variables set by us.
+			 */
+			LC_LOG(LC_WARN,
+			       "irqbalance was started outside of lwkctl!");
+			LC_LOG(LC_WARN, "restarting irqbalance...");
+		}
+
+		/* start or restart irqbalance */
+		rc = start_irqbalance();
+		if (rc) {
+			LC_LOG(LC_WARN,
+			       "Could not start irqbalance: %d", rc);
+		} else
+			LC_LOG(LC_DEBUG, "Started irqbalance");
+	}
+}
+
+static void lwkctl_stop_irqbalance(void)
+{
+	int rc;
+
+	/* Stop irqbalance daemon only if it is supported and active */
+	if (is_irqbalance_active()) {
+		rc = stop_irqbalance();
+		if (rc) {
+			LC_LOG(LC_WARN, "Could not stop irqbalance daemon: %d",
+			       rc);
+		} else {
+			irqbalance_stopped = 1;
+			LC_LOG(LC_DEBUG, "Stopped irqbalance daemon");
+		}
+	}
+}
+
+/*
+ * Checks to see if there is an active job registered in the RAS
+ * subsystem.
+ * @return 0 if there is no job registered or if the --force
+ *    option is in play.  Return -ve on failure.
+ */
+
+static int __lwkctl_check_for_jobs(void)
+{
+	char buffer[4096];
+	int rc = 0, i, N;
+
+	buffer[0] = '\0';
+
+	if (mos_sysfs_read(MOS_SYSFS_JOBID, buffer, sizeof(buffer)) < 0)
+		lwkctl_abort(-1, "Could not read %s", MOS_SYSFS_JOBID);
+
+	for (i = 0, N = strlen(buffer); i < N && !rc; i++)
+		if (!isspace(buffer[i]))
+			rc = -EBUSY;
+
+	if (rc) {
+		LC_LOG(-1, "There are active job(s) on this node: %s", buffer);
+		if (lc_opts.flags & LC_FORCE)
+			rc = 0;
+	}
+
+	return rc;
+}
 /*
  * Deletes the specified LWK resources from an existing
  * LWK partition
@@ -1047,7 +1381,7 @@ static int __lwkctl_delete(char *p)
 	if (!mos_cpuset_is_empty(cs)) {
 		LC_ERR("Can't delete LWK partition - being used");
 		show(LC_WARN, "lwkcpus_reserved", cs);
-		rc = -EINVAL;
+		rc = -EBUSY;
 		goto out;
 	}
 
@@ -1058,6 +1392,8 @@ static int __lwkctl_delete(char *p)
 
 	LC_LOG(LC_DEBUG, "Deleting partition %s.. Done", p);
 out:
+	if (cs)
+		mos_cpuset_free(cs);
 	return rc;
 }
 /*
@@ -1099,6 +1435,12 @@ static int lwkctl_delete(char *p)
 		goto out;
 	}
 
+	if ((rc =  __lwkctl_check_for_jobs()))
+		goto out;
+
+	atexit(lwkctl_start_irqbalance);
+	lwkctl_stop_irqbalance();
+
 	rc = __lwkctl_delete("lwkcpus= lwkmem=");
 	if (!rc) {
 		char *s_cpus;
@@ -1126,9 +1468,9 @@ out:
 static void auto_spec_update(char **partition_spec,
 			bool auto_cpus, bool auto_mem)
 {
-	char *auto_s = "auto=";
-	char *cpus_s = "cpu,";
-	char *mem_s = "mem,";
+	const char *auto_s = "auto=";
+	const char *cpus_s = "cpu,";
+	const char *mem_s = "mem,";
 	char *new_spec;
 	size_t max_spec_size, remaining_size, written;
 	int index = 0;
@@ -1158,6 +1500,24 @@ static void auto_spec_update(char **partition_spec,
 	*partition_spec = new_spec;
 }
 
+static void precise_spec_update(char **partition_spec)
+{
+	const char *precise = "precise=yes";
+	const char *not_precise = "precise=no";
+	char *new_spec;
+	size_t max_spec_size, written;
+
+	max_spec_size = strlen(*partition_spec) + strlen(precise) + 2;
+	new_spec = malloc(max_spec_size);
+	if (!new_spec)
+		lwkctl_abort(-ENOMEM, "Insufficient memory");
+	written = snprintf(new_spec, max_spec_size, "%s %s",
+		       *partition_spec, lwkmem_precise ? precise : not_precise);
+	*(new_spec + written) = '\0';
+	free(*partition_spec);
+	*partition_spec = new_spec;
+}
+
 /*
  * Creates a new LWK partition as per the input specification.
  *
@@ -1167,7 +1527,7 @@ static void auto_spec_update(char **partition_spec,
  */
 static int lwkctl_create(char *p)
 {
-	mos_cpuset_t *cs, *tmp_cs, *lwkcpus, *utilcpus, *allcpus;
+	mos_cpuset_t *cs, *tmp_cs, *lwkcpus, *utilcpus, *allcpus, *original;
 	int cpu;
 	int rc = -EINVAL;
 	char *s_key, *s_val, *s_dup, *s_itr, *partition_spec;
@@ -1189,6 +1549,7 @@ static int lwkctl_create(char *p)
 	lwkcpus = mos_cpuset_alloc();
 	utilcpus = mos_cpuset_alloc();
 	allcpus = mos_cpuset_alloc();
+	original = mos_cpuset_alloc();
 
 	if (!cs || !tmp_cs || !lwkcpus || !utilcpus || !allcpus)
 		lwkctl_abort(-ENOMEM, "Insufficient memory");
@@ -1238,11 +1599,13 @@ static int lwkctl_create(char *p)
 			}
 			found_valid_lwkcpus = true;
 		}
-		if (!strcmp(s_key, "lwkmem") && !strcmp(s_val, "auto")) {
+		if (!strcmp(s_key, "lwkmem") &&
+		    (!strcmp(s_val, abal) || !strcmp(s_val, amax))) {
 			auto_mem = true;
+			lwkmem_precise = false;
 			/* Sync and drop Linux's clean caches */
 			vm_drop_clean_caches();
-			rc = generate_default_mem_spec(&partition_spec);
+			rc = generate_default_mem_spec(&partition_spec, s_val);
 			if (rc) {
 				LC_ERR(
 				    "No memory available for the LWK. Refer the Administrator's Guide for proper configuration and kernel boot parameters.");
@@ -1264,8 +1627,15 @@ static int lwkctl_create(char *p)
 		goto out;
 	}
 
+	/* Are there jobs active? */
+	if ((rc = __lwkctl_check_for_jobs()))
+		goto out;
+
+	atexit(lwkctl_start_irqbalance);
+	lwkctl_stop_irqbalance();
+
 	/* Delete an existing partition if any. */
-	rc = mos_sysfs_get_cpulist(MOS_SYSFS_LWKCPUS, cs);
+	rc = mos_sysfs_get_cpulist(MOS_SYSFS_LWKCPUS, original);
 
 	if (rc) {
 		LC_ERR("Failed to read lwkcpus");
@@ -1283,9 +1653,9 @@ static int lwkctl_create(char *p)
 	 *     specification then kernel processes only 'lwkcpus=' with a
 	 *     warning that indicates 'lwkmem=' was ignored.
 	 */
-	if (!mos_cpuset_is_empty(cs)) {
+	if (!mos_cpuset_is_empty(original)) {
 		mos_cpuset_not(tmp_cs, lwkcpus);
-		mos_cpuset_and(cs, cs, tmp_cs);
+		mos_cpuset_and(cs, original, tmp_cs);
 
 		if (!mos_cpuset_is_empty(cs)) {
 			/* Do we have sufficient privilege to proceed? */
@@ -1299,7 +1669,7 @@ static int lwkctl_create(char *p)
 		rc = __lwkctl_delete("lwkcpus= lwkmem=");
 
 		if (rc) {
-			lwkctl_abort(-EINVAL,
+			lwkctl_abort(rc,
 				"Failed to delete the previous LWK partition");
 		}
 
@@ -1321,27 +1691,46 @@ static int lwkctl_create(char *p)
 						LC_LOG(LC_WARN,
 						 "Couldn't online Linux cpu%d",
 						 cpu);
-					}
+					} else
+						mos_cpuset_clr(cpu, original);
 				}
 			}
 		}
 	}
 
 	/* Create new partition */
-	/* Offline all Linux CPUs that needs to be booted as LWKCPUs */
+	/* Offline all Linux CPUs that need to be booted as LWKCPUs */
 	for (cpu = 0; cpu < mos_max_cpus(); cpu++) {
-		if (mos_cpuset_is_set(cpu, lwkcpus)) {
-			rc = mos_sysfs_set_linuxcpu(cpu, false);
-			if (rc) {
-				LC_ERR("Failed to offline Linux cpu %d", cpu);
-				goto out;
-			}
+		if (!mos_cpuset_is_set(cpu, lwkcpus))
+			continue;
+		if (!mos_sysfs_set_linuxcpu(cpu, false))
+			continue;
+		LC_ERR("Failed to offline Linux cpu %d", cpu);
+		/* Return offlined CPUs to Linux */
+		LC_ERR("Returning offlined cpus to Linux...");
+		while (--cpu >= 0) {
+			if (!mos_cpuset_is_set(cpu, lwkcpus))
+				continue;
+			if (mos_sysfs_set_linuxcpu(cpu, true))
+				LC_ERR("Failed to online cpu%d", cpu);
 		}
+		/* Bring back CPUs that may have been offlined by the kernel */
+		for (cpu = 0; cpu < mos_max_cpus(); cpu++) {
+			if (!mos_cpuset_is_set(cpu, original))
+				continue;
+			if (mos_sysfs_set_linuxcpu(cpu, true))
+				LC_ERR("Failed to online cpu%d", cpu);
+		}
+		rc = -EINVAL;
+		goto out;
 	}
 
 	/* Did we auto-configure memory or CPUs  */
 	if (auto_cpus || auto_mem)
 		auto_spec_update(&partition_spec, auto_cpus, auto_mem);
+
+	/* Add the precise setting to the specification */
+	precise_spec_update(&partition_spec);
 
 	/* Sync and drop Linux's clean caches */
 	vm_drop_clean_caches();
@@ -1354,8 +1743,7 @@ static int lwkctl_create(char *p)
 		/* Handover CPUs back to Linux */
 		for (cpu = 0; cpu < mos_max_cpus(); cpu++) {
 			if (mos_cpuset_is_set(cpu, lwkcpus)) {
-				rc = mos_sysfs_set_linuxcpu(cpu, true);
-				if (rc)
+				if (mos_sysfs_set_linuxcpu(cpu, true))
 					LC_ERR("Failed to online Linux cpu %d",
 					       cpu);
 			}
@@ -1367,12 +1755,16 @@ static int lwkctl_create(char *p)
 out:
 	if (cs)
 		mos_cpuset_free(cs);
+	if (tmp_cs)
+		mos_cpuset_free(tmp_cs);
 	if (lwkcpus)
 		mos_cpuset_free(lwkcpus);
 	if (utilcpus)
 		mos_cpuset_free(utilcpus);
 	if (allcpus)
 		mos_cpuset_free(allcpus);
+	if (original)
+		mos_cpuset_free(original);
 	if (s_dup)
 		free(s_dup);
 	if (partition_spec)
@@ -1441,11 +1833,11 @@ static int lwkctl_show(void)
 
 	if (rc <= 0) {
 		LC_ERR("Failure reading LWK configuration information");
-		return -EINVAL;
+		goto out;
 	}
 	if (rc >= (int)sizeof(config_parms)) {
 		LC_ERR("Buffer overflow reading LWK configuration information");
-		return -EINVAL;
+		goto out;
 	}
 
 	mos_cpuset_not(temp, lwkcpus);
@@ -1552,6 +1944,16 @@ static int lwkctl_show_raw(void)
 		else
 			memmove(p_start, p_end, strlen(p_end) + 1);
 	}
+	/* Remove the "precise" keyword */
+	p_start = strstr(config_parms, "precise=");
+	if (p_start) {
+		p_end = strstr(p_start, " ");
+		if (!p_end)
+			memmove(p_start, "\n", 2);
+		else
+			memmove(p_start, p_end, strlen(p_end) + 1);
+	}
+
 	printf("%s", config_parms);
 
 	return 0;
@@ -1562,15 +1964,19 @@ static bool set_mos_view(char *view)
 	FILE *fp;
 	size_t len, ret = -1;
 
-	if (!view || !(len = strlen(view)))
-		goto out;
+	if (!view)
+		return false;
+
+	len = strlen(view);
+	if (len <= 0)
+		return false;
 
 	fp = fopen(PROC_MOS_VIEW, "w");
-	if (!fp)
-		goto out;
-	ret = fwrite(view, 1, len, fp);
-	fclose(fp);
-out:
+	if (fp) {
+		ret = fwrite(view, 1, len, fp);
+		fclose(fp);
+	}
+
 	return ret == len;
 }
 
@@ -1588,8 +1994,10 @@ static bool get_mos_view(char *view)
 	if (!fp)
 		goto out;
 
-	ret = fread(view, 1, PROC_MOS_VIEW_LEN, fp);
-	if (ret && ret <= PROC_MOS_VIEW_LEN) {
+	view[PROC_MOS_VIEW_LEN-1] = '\0';
+	ret = fread(view, 1, PROC_MOS_VIEW_LEN-1, fp);
+	if (ret && ret <= PROC_MOS_VIEW_LEN-1) {
+		view[ret] = '\0';
 		c = strchr(view, '\n');
 		if (c)
 			*c = '\0';
@@ -1598,6 +2006,67 @@ static bool get_mos_view(char *view)
 	fclose(fp);
 out:
 	return rc;
+}
+
+static int lock_fd = -1;
+
+static int lwkctl_sysfs_lock(void)
+{
+	LC_LOG(LC_GORY, "(>) %s(timeout=%ld)",
+		__func__, lc_opts.timeout_in_millis);
+
+	lock_fd = open(SYS_ROOT, O_RDONLY);
+
+	if (lock_fd == -1) {
+		LC_ERR("Could not open %s for locking.", SYS_ROOT);
+		goto lock_out;
+	}
+
+	long retries = lc_opts.timeout_in_millis ?
+		lc_opts.timeout_in_millis / 10 : LONG_MAX;
+
+	/* Try at least twice. */
+	if (retries < 2)
+		retries = 2;
+
+	while (retries > 0) {
+
+		if (flock(lock_fd, LOCK_EX | LOCK_NB) == 0)
+			goto lock_out;
+
+		usleep(10 * 1000); /* 10 millis */
+		retries--;
+	}
+
+	if (close(lock_fd) != 0)
+		LC_LOG(LC_WARN, "Could not close \"%s\" (%s)",
+			SYS_ROOT, strerror(errno));
+
+	lock_fd = -1;
+
+ lock_out:
+	LC_LOG(LC_GORY, "(<) %s(timeout=%ld) fd=%d",
+		__func__, lc_opts.timeout_in_millis, lock_fd);
+
+	return (lock_fd == -1) ? -1 : 0;
+}
+static void lwkctl_sysfs_unlock(void)
+{
+	LC_LOG(LC_GORY, "(>) %s() fd=%d", __func__, lock_fd);
+
+	if (lock_fd != -1) {
+		if (flock(lock_fd, LOCK_UN) != 0)
+			LC_LOG(LC_WARN,
+			       "Could not release lock on \"%s\" (%s)",
+			       SYS_ROOT, strerror(errno));
+		if (close(lock_fd) != 0)
+			LC_LOG(LC_WARN,
+			       "Could not close \"%s\" (%s)",
+			       SYS_ROOT, strerror(errno));
+		lock_fd = -1;
+	}
+
+	LC_LOG(LC_GORY, "(<) %s() fd=%d", __func__, lock_fd);
 }
 
 /*
@@ -1628,8 +2097,8 @@ int main(int argc, char **argv)
 		return -1;
 	}
 
-	/* Reset LWKCTL options */
-	memset(&lc_opts, 0, sizeof(lc_opts));
+	/* Set precise default. May be modified after option parsing */
+	lwkmem_precise = false;
 
 	/* Parse arguments */
 	parse_options(argc, argv);
@@ -1639,7 +2108,13 @@ int main(int argc, char **argv)
 		goto out;
 	}
 
+	atexit(lwkctl_sysfs_unlock);
+
+	if (lc_opts.flags & (LC_DELETE | LC_CREATE))
+		if (lwkctl_sysfs_lock())
+			lwkctl_abort(-EAGAIN, "Could not acquire lock.");
 	while (lc_opts.flags) {
+		LC_LOG(LC_GORY, "FLAGS=%x", lc_opts.flags);
 		if (lc_opts.flags & LC_DELETE) {
 			rc = lwkctl_delete(lc_opts.delete);
 			if (rc) {
@@ -1656,8 +2131,10 @@ int main(int argc, char **argv)
 				       lc_opts.create);
 				break;
 			}
-			lc_opts.flags &= ~LC_CREATE;
+			lc_opts.flags &= ~(LC_CREATE | LC_PRECISE);
 		}
+
+		lc_opts.flags &= ~LC_FORCE;
 
 		if (lc_opts.flags & LC_SHOW) {
 			if (lc_opts.flags & LC_RAW)

@@ -90,6 +90,17 @@ static size_t mem_available(size_t nid, struct lwk_request_t *req)
 		req->lwkmem_reserved[nid] -
 		req->lwkmem_request[nid];
 }
+
+static enum mem_group_t _nid_to_mem_grp(int nid)
+{
+	enum mem_group_t g = yod_nid_to_mem_group(nid);
+
+	if (g == YOD_MEM_GROUP_UNKNOWN)
+		yod_abort(-EINVAL, "NID %d is unknown.", nid);
+
+	return g;
+}
+
 /**
  * Construct an envelope of a given depth starting from the given NID.
  * @param[in] nid The starting point from which the envelope will be created.
@@ -121,7 +132,7 @@ static envelope_t *construct_envelope(size_t nid, size_t depth,
 
 	for (i = 0; i < req->n_nids; i++) {
 
-		m = yod_nid_to_mem_group(i);
+		m = _nid_to_mem_grp(i);
 
 		for (j = 0; j < depth + 1; j++) {
 
@@ -169,7 +180,7 @@ static void construct_numa_distance_sets(lwk_request_t *req)
 		req->plugin->get_distance_map(i, dist, &N);
 
 		for (j = 0; j < N; j++) {
-			m = yod_nid_to_mem_group(j);
+			m = _nid_to_mem_grp(j);
 			yod_ordered_set_insert(req->dist_by_type[m],
 			       dist[j],
 			       &req->dist_by_type_len[m],
@@ -319,7 +330,7 @@ static int indirect_numa_memory_selection(struct lwk_request_t *req)
 		for (i = 0; i < e->n_nids; i++) {
 
 			nid = e->nids[i];
-			m = yod_nid_to_mem_group(nid);
+			m = _nid_to_mem_grp(nid);
 
 			if (by_group[m] == 0)
 				by_group[m] = req->lwkmem_size_by_group[m];
@@ -364,7 +375,7 @@ static int indirect_numa_memory_selection(struct lwk_request_t *req)
 
 	for (nid = 0; nid < req->n_nids; nid++) {
 
-		m = yod_nid_to_mem_group(nid);
+		m = _nid_to_mem_grp(nid);
 
 		requested = req->lwkmem_size_by_group[m];
 		available = mem_available(nid, req);
@@ -398,6 +409,8 @@ static int indirect_numa_memory_selection(struct lwk_request_t *req)
 	}
 
  out:
+
+	mos_cpuset_free(cpus);
 
 	YOD_LOG(YOD_DEBUG, "(<) %s rc=%d", __func__, incomplete ? -1 : 0);
 
@@ -452,7 +465,7 @@ int yod_numa_compute_core_algorithm(struct lwk_request_t *req, size_t n_cores,
 
 			for (i = 0; i < e->n_nids; i++) {
 				nid = e->nids[i];
-				avail_mem[yod_nid_to_mem_group(nid)] +=
+				avail_mem[_nid_to_mem_grp(nid)] +=
 					mem_available(nid, req);
 			}
 
@@ -492,6 +505,8 @@ int yod_numa_compute_core_algorithm(struct lwk_request_t *req, size_t n_cores,
 				      req->lwkcpus_request);
 			req->selected_envelope = e;
 
+			mos_cpuset_free(maybe);
+
 			YOD_LOG(YOD_DEBUG,
 				"(<) %s",
 				__func__);
@@ -500,6 +515,7 @@ int yod_numa_compute_core_algorithm(struct lwk_request_t *req, size_t n_cores,
 		}
 	}
 
+	show_state(YOD_CRIT);
 	yod_abort(-EBUSY, "Insufficient LWK resources.");
 }
 
@@ -523,7 +539,7 @@ int yod_numa_memory_selection_algorithm(lwk_request_t *req)
 	for (i = 0; i < req->selected_envelope->n_nids; i++) {
 
 		nid = req->selected_envelope->nids[i];
-		m = yod_nid_to_mem_group(nid);
+		m = _nid_to_mem_grp(nid);
 
 		have = mem_available(nid, req);
 		rqst = MIN(req->lwkmem_size_by_group[m], have);

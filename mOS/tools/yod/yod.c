@@ -93,7 +93,7 @@ static const char * const MAP_TYPES[] = {
 
 static struct map_type_t *yod_maps[YOD_NUM_MAP_ELEMS];
 
-int yod_verbosity = YOD_QUIET;
+int yod_verbosity = YOD_CRIT;
 int mpi_localnranks = 0;
 
 extern struct yod_plugin mos_plugin;
@@ -107,6 +107,7 @@ static int all_lwk_cpus_specified = 0;
 static int requested_lwk_cores = -1;
 static unsigned int mem_algorithm = YOD_MEM_ALGORITHM_LARGE;
 static mos_cpuset_t *designated_lwkcpus;
+static mos_cpuset_t *reserved_lwkcpus;
 static char extra_help[4096];
 static unsigned int resource_algorithm_index;
 
@@ -132,7 +133,7 @@ struct help_text {
 	{"Option", "Argument", "Description",},
 	{"----------------", "----------------",
 		    "--------------------------------"},
-	{"--resources, -R", "<fraction|all|MPI>", "Reserves a portion of LWK"},
+	{"--resources, -R", "<fraction|all|MPI|file:>", "Reserves a portion of LWK"},
 	{0, 0, "resources.  If MPI is specified then MPI environment"},
 	{0, 0, "variables are used to determine the fractional amount."},
 	{"--cpus, -c", "<list>|all", "Reserves the LWK CPUs."},
@@ -205,19 +206,17 @@ static mos_cpuset_t *get_designated_lwkcpus(void)
  */
 static void yod_get_available_lwkcpus(mos_cpuset_t *set)
 {
-	mos_cpuset_t *reserved = mos_cpuset_alloc_validate();
+	reserved_lwkcpus = mos_cpuset_alloc_validate();
 
 	if (plugin->get_designated_lwkcpus(set))
-		yod_abort(-1, "Could not obtain LWK CPU list from plugin.");
+		yod_abort(-1, "Could not obtain designated LWK CPU list from plugin.");
 
-	if (plugin->get_reserved_lwk_cpus(reserved)) {
+	if (plugin->get_reserved_lwk_cpus(reserved_lwkcpus)) {
 		yod_abort(-1,
 		  "Could not obtain reserved LWK CPU list from plugin.");
 	}
 
-	mos_cpuset_xor(set, set, reserved);
-
-	mos_cpuset_free(reserved);
+	mos_cpuset_xor(set, set, reserved_lwkcpus);
 }
 
 /**
@@ -540,7 +539,12 @@ static int yod_simple_memory_selection_algorithm(lwk_request_t *this)
 	 */
 
 	for (i = 0; i < this->n_nids; i++) {
+
 		g = yod_nid_to_mem_group(i);
+
+		if (g == YOD_MEM_GROUP_UNKNOWN)
+			yod_abort(-EINVAL, "Uncategorized NID %d", i);
+
 		if (this->lwkmem_size_by_group[g]) {
 			remainder = this->lwkmem_designated[i] - this->lwkmem_reserved[i] - this->lwkmem_request[i];
 			remainder = MIN(remainder, this->lwkmem_size_by_group[g]);
@@ -560,6 +564,7 @@ static int yod_simple_memory_selection_algorithm(lwk_request_t *this)
 		if (this->lwkmem_size_by_group[g]) {
 			YOD_ERR("Unfulfilled %'ld bytes from group %s",
 				this->lwkmem_size_by_group[g], MEM_GROUPS[g]);
+			show_state(YOD_CRIT);
 			return -EBUSY;
 		}
 
@@ -820,8 +825,10 @@ static void explicit_memsize_resolver(lwk_request_t *this)
 		}
 	}
 
-	if (this->lwkmem_size)
+	if (this->lwkmem_size) {
+		show_state(YOD_CRIT);
 		yod_abort(-EBUSY, "Not enough memory is available.");
+	}
 }
 
 /** Checks to see if any CPUs in set are non-LWK CPUs.  If so,
@@ -859,8 +866,10 @@ static void all_available_lwkcpus_resolver(lwk_request_t *this)
 	/* Resolver for "--cpus all" option */
 	yod_get_available_lwkcpus(this->lwkcpus_request);
 
-	if (mos_cpuset_is_empty(this->lwkcpus_request))
+	if (mos_cpuset_is_empty(this->lwkcpus_request)) {
+		show_state(YOD_CRIT);
 		yod_abort(-EBUSY, "No LWK CPUs are available.");
+	}
 }
 
 static void all_available_lwk_cores_resolver(lwk_request_t *this)
@@ -873,6 +882,7 @@ static void all_available_lwk_cores_resolver(lwk_request_t *this)
 		int n;
 
 		n = yod_count_by(get_designated_lwkcpus(), YOD_CORE);
+		show_state(YOD_CRIT);
 		yod_abort(n > 0 ? -EBUSY : -EINVAL, "There are no complete cores available.");
 	}
 }
@@ -887,9 +897,10 @@ static void lwkcpus_by_list_resolver(lwk_request_t *this)
 	 */
 
 	if (mos_cpuset_is_empty(requested_lwk_cpus)) {
-		if (all_lwk_cpus_specified)
+		if (all_lwk_cpus_specified) {
+			show_state(YOD_CRIT);
 			yod_abort(-EBUSY, "No LWK CPUs are available.");
-		else
+		} else
 			yod_abort(-EINVAL, "No LWK CPUs were requested.");
 	}
 
@@ -921,8 +932,10 @@ static void n_cores_lwkcpu_resolver(lwk_request_t *this)
 	available_cpus = mos_cpuset_alloc_validate();
 	yod_get_available_lwkcpus(available_cpus);
 
-	if (this->compute_core_algorithm(this, requested_lwk_cores, available_cpus))
+	if (this->compute_core_algorithm(this, requested_lwk_cores, available_cpus)) {
+		show_state(YOD_CRIT);
 		yod_abort(-EBUSY, "There are not enough cores available.");
+	}
 
 	assert(mos_cpuset_is_subset(this->lwkcpus_request, available_cpus));
 	mos_cpuset_free(available_cpus);
@@ -1260,6 +1273,8 @@ static int yodopt_mem(const char *opt)
 	yod_abort(-EINVAL, "Illegal argument for --mem.");
 }
 
+static void yodopt_process_resource_file(const char *);
+
 static int yodopt_lwk_resources(const char *opt)
 {
 	double fraction = 0.0;
@@ -1275,6 +1290,8 @@ static int yodopt_lwk_resources(const char *opt)
 		lwk_req.lwkcpus_resolver = all_available_lwk_cores_resolver;
 		lwk_req.memsize_resolver = all_available_memsize_resolver;
 		fraction = 1.0;
+	} else if (strncmp("file:", opt, strlen("file:")) == 0) {
+		yodopt_process_resource_file(opt + strlen("file:"));
 	} else if (strcmp("MPI", opt) == 0 ||
 		   (yodopt_parse_floating_point(opt, &fraction, 0.0, 1.0) == 0 ||
 		    yodopt_parse_rational(opt, &fraction, 0.0, 1.0) == 0)) {
@@ -1339,8 +1356,10 @@ static int yodopt_mem_algorithm(const char *opt)
 
 static void yodopt_layout(const char *descr)
 {
-	strncpy(lwk_req.layout_descriptor, descr,
-		sizeof(lwk_req.layout_descriptor));
+	strncpy(lwk_req.layout_descriptor, descr, sizeof(lwk_req.layout_descriptor) - 1);
+
+	if (strlen(descr) != strlen(lwk_req.layout_descriptor))
+	    yod_abort(-EINVAL, "Overrun of layout buffer in %s", __func__);
 }
 
 static void yodopt_rank_layout(const char *descr)
@@ -1636,35 +1655,186 @@ static void yodopt_mosview(const char *opt)
 	if (strcmp(opt, "lwk") && strcmp(opt, "lwk-local") &&
 	    strcmp(opt, "all"))
 		yod_abort(-EINVAL, "Invalid mOS view specified: %s", opt);
-	strncpy(view, opt, sizeof(view));
+	strncpy(view, opt, sizeof(view)-1);
+	if (strlen(opt) != strlen(view))
+		yod_abort(-EINVAL, "Overrun of \"view\" buffer in %s", __func__);
+}
+
+static void yodopt_process_resource_file(const char *opt)
+{
+	FILE *fptr;
+	char *line = 0, *tline, *toks[64], *tok, *this_rank;
+	ssize_t rc;
+	size_t line_size = 0;
+	size_t i, j, n_toks;
+	bool rank_handled, arg_handled;
+
+	struct {
+		const char *short_arg;
+		const char *long_arg;
+		int (*handler)(const char *);
+	} HANDLERS[] = {
+		{ "-c", "--cpus", yodopt_lwk_cpus, },
+		{ "-C", "--cores", yodopt_lwk_cores, },
+		{ "-M", "--mem", yodopt_mem, },
+		{ "-R", "--resources", yodopt_lwk_resources},
+		{ "-u", "--util_threads", yodopt_util_threads},
+	};
+
+	this_rank = getenv("MPI_LOCALRANKID");
+
+	if (!this_rank)
+		yod_abort(-EINVAL, "The -R file: option requires that MPI_LOCALRANKID be set.");
+
+	fptr = fopen(opt, "r");
+
+	if (!fptr)
+		yod_abort(-EINVAL, "Could not open \"%s\" for reading.", opt);
+
+	YOD_LOG(YOD_DEBUG, "(>) %s file=%s this_rank=%s", __func__, opt, this_rank);
+
+	rank_handled = false;
+
+	while (((rc = getline(&line, &line_size, fptr)) != -1) && !rank_handled) {
+
+		YOD_LOG(YOD_DEBUG, "file: %s", line);
+
+		/* Ignore comment lines */
+
+		if (line[0] == '#')
+			continue;
+
+		if (line[strlen(line) - 1] == '\n')
+			line[strlen(line) - 1] = 0;
+
+		/* Tokenize the line. */
+
+		tline = line;
+		n_toks = 0;
+		while ((tok = strtok(tline, " "))) {
+			toks[n_toks++] = tok;
+			tline = 0;
+		}
+
+		/* Skip to the next line if our rank does not match the current
+		 * line.
+		 */
+		if (strcmp(toks[0], this_rank) && strcmp(toks[0], "*"))
+			goto next_line;
+
+
+		/* Process the remainder of the line as arguments. */
+
+		for (i = 1; i < n_toks; i++) {
+
+			for (j = 0, arg_handled = false; j < ARRAY_SIZE(HANDLERS) && !arg_handled; j++) {
+				if (strcmp(HANDLERS[j].short_arg, toks[i]) && strcmp(HANDLERS[j].long_arg, toks[i]))
+					continue;
+				HANDLERS[j].handler(toks[++i]);
+				arg_handled = true;
+			}
+
+			if (!arg_handled)
+				yod_abort(-EINVAL, "Invalid argument \"%s\"", toks[i]);
+		}
+
+		rank_handled = true;
+
+next_line:
+		free(line);
+		line = 0;
+	}
+
+	if (!rank_handled)
+		yod_abort(-EINVAL, "No matching line in %s for rank %s", opt, this_rank);
+
+}
+
+static char *mem_vec_to_str(size_t *vec, size_t len, char *buff, size_t bufflen, size_t *total)
+{
+	char elem[PATH_MAX];
+	size_t i, remainder = bufflen;
+	int rc;
+
+	buff[0] = '\0';
+	*total = 0;
+
+	for (i = 0; i < len; i++) {
+		rc = snprintf(elem, PATH_MAX, "nid[%zd] %zd MiB, ", i,
+			      vec[i] >> 20);
+		if (rc >= PATH_MAX)
+			yod_abort(-EINVAL, "Overflow in memory vector buffer.");
+
+		strncat(buff, elem, remainder);
+		remainder -= strlen(elem);
+
+		if (remainder <= 0)
+			yod_abort(-EINVAL, "Overflow in memory vector buffer.");
+
+		*total += vec[i];
+
+	}
+
+	return buff;
+}
+
+static char *cpuset_dump_str(mos_cpuset_t *cpuset, char *buff, size_t bufflen)
+{
+	if (!cpuset)
+		return "<null>";
+
+	snprintf(buff, bufflen, "%s [%d CPUs]",
+		 mos_cpuset_to_list_validate(cpuset),
+		 mos_cpuset_cardinality(cpuset));
+
+	return buff;
 }
 
 /*
  * Dump the internal state of yod (useful in debugging)
  */
 
-static void show_state(int level)
+void show_state(int level)
 {
 	if (yod_verbosity >= level) {
-		char buff1[8192], buff2[8192];
 
-		strncpy(buff1, mos_cpuset_to_list_validate(requested_lwk_cpus),
-			sizeof(buff1));
-		strncpy(buff2, mos_cpuset_to_mask(requested_lwk_cpus),
-			sizeof(buff2));
+		char buff[8192];
+		size_t total = 0, i, remainder;
+		pid_t lwkprocs[1024];
 
-		YOD_LOG(level, "requested_lwk_cpus: list=[%s] mask=0x%s",
-			buff1, buff2);
-		YOD_LOG(level, "requested_lwk_cores=%d", requested_lwk_cores);
-		YOD_LOG(level, "utility_threads=%d", num_util_threads);
-		YOD_LOG(level, "requested_lwk_mem=%lX", requested_lwk_mem);
-		YOD_LOG(level, "resource_algorithm=%s",
-			ARRAY_ENT(RESOURCE_ALGORITHMS, resource_algorithm_index,
-				  name, "?"));
-		YOD_LOG(level, "mem_algorithm=%d (%s)", mem_algorithm,
-			mem_algorithm < ARRAY_SIZE(YOD_MEM_ALGORITHMS) ?
-			YOD_MEM_ALGORITHMS[mem_algorithm] : "?"); /* TODO FIX ME */
-		YOD_LOG(level, "verbosity=%d", yod_verbosity);
+		struct {
+			char *label;
+			size_t *mvec;
+		} lwkmem[] = {
+			{ .label = "Designated", .mvec = lwk_req.lwkmem_designated, },
+			{ .label = "Reserved  ", .mvec = lwk_req.lwkmem_reserved, },
+			{ .label = "Requested ", .mvec = lwk_req.lwkmem_request, },
+		};
+
+		YOD_LOG(level, "Designated LWK CPUs : %s", cpuset_dump_str(get_designated_lwkcpus(), buff, sizeof(buff)));
+		YOD_LOG(level, "Reserved   LWK CPUs : %s", cpuset_dump_str(reserved_lwkcpus, buff, sizeof(buff)));
+		YOD_LOG(level, "Requested  LWK CPUs : %s", cpuset_dump_str(lwk_req.lwkcpus_request, buff, sizeof(buff)));
+		YOD_LOG(level, "Requested LWK cores       : %d", requested_lwk_cores);
+		YOD_LOG(level, "Requested utility threads : %d", num_util_threads);
+
+		for (i = 0; i < ARRAY_SIZE(lwkmem); i++) {
+			mem_vec_to_str(lwkmem[i].mvec, lwk_req.n_nids, buff, sizeof(buff), &total);
+			YOD_LOG(level, "%s LWK memory : %s  total %zd MiB", lwkmem[i].label, buff, total >> 20);
+		}
+
+		total = ARRAY_SIZE(lwkprocs);
+		plugin->get_lwk_processes(lwkprocs, &total);
+		buff[0] = '\0';
+
+		for (i = 0, remainder = sizeof(buff) - 1; i < total; i++) {
+			char tmp[1024];
+
+			snprintf(tmp, sizeof(tmp), "%s%d", i > 0 ? "," : "", lwkprocs[i]);
+			strncat(buff, tmp, remainder);
+			remainder = sizeof(buff) - strlen(buff) - 1;
+		}
+
+		YOD_LOG(level, "LWK processes %s", buff);
 	}
 }
 
@@ -1678,33 +1848,13 @@ static void show_target(int level, int start, int argc, char **argv)
 		target[0] = 0;
 
 		for (i = start; i < argc; i++) {
-			strncat(target, argv[i], remaining);
+			strncat(target, argv[i], remaining-1);
 			remaining -= strlen(argv[i]);
-			strncat(target, " ", remaining);
+			strncat(target, " ", remaining-1);
 			remaining--;
 		}
 
 		YOD_LOG(level, "target: \"%s\"", target);
-	}
-}
-
-static void show_mos_state(int level)
-{
-	if (yod_verbosity >= level) {
-		mos_cpuset_t *set;
-		size_t val;
-		set = mos_cpuset_alloc_validate();
-		plugin->get_designated_lwkcpus(set);
-		YOD_LOG(level, "Designated mOS lwkcpus  : %s",
-			 mos_cpuset_to_list_validate(set));
-		plugin->get_reserved_lwk_cpus(set);
-		YOD_LOG(level, "Reserved   mOS lwkcpus  : %s",
-			mos_cpuset_to_list_validate(set));
-		val = yod_get_lwkmem(YOD_DESIGNATED);
-		YOD_LOG(level, "Designated mOS lwkmem   : %'ld / 0x%lX", val, val);
-		val = yod_get_lwkmem(YOD_RESERVED);
-		YOD_LOG(level, "Reserved   mOS lwkmem   : %'ld / 0x%lX", val, val);
-		mos_cpuset_free(set);
 	}
 }
 
@@ -1903,7 +2053,13 @@ static void parse_options(int argc, char **argv)
 			break;
 
 		case 'u':
-			yodopt_util_threads(optarg);
+			/* If the no.of utility threads is already set by
+			 * -R file:map_file then ignore -u option. The
+			 * -R file:map_file settings override -u settings
+			 * if -u is applied first.
+			 */
+			if (!num_util_threads)
+				yodopt_util_threads(optarg);
 			break;
 
 		case 'M':
@@ -2002,7 +2158,6 @@ int main(int argc, char **argv)
 	int rc;
 	char *timeout_str;
 	size_t i, total_mem;
-	char build_str[PATH_MAX];
 	char mem_str[PATH_MAX];
 
 	verbose_env = getenv("YOD_VERBOSE");
@@ -2059,7 +2214,7 @@ int main(int argc, char **argv)
 	if (dry_run)
 		return 0;
 
-	show_mos_state(YOD_DEBUG);
+	show_state(YOD_DEBUG);
 
 	rc = plugin->request_lwk_cpus(lwk_req.lwkcpus_request);
 	/*
@@ -2072,7 +2227,7 @@ int main(int argc, char **argv)
 
 	if (rc != 0)
 		yod_abort(rc, "Could not acquire LWK CPUs %s. (%s)",
-			  mos_cpuset_to_mask(lwk_req.lwkcpus_request),
+			  mos_cpuset_to_list_validate(lwk_req.lwkcpus_request),
 					     strerror(-rc));
 
 	YOD_LOG(YOD_INFO, "LWK CPUs requested:  %s, total: %d",
@@ -2097,16 +2252,7 @@ int main(int argc, char **argv)
 		yod_abort(rc, "Could not acquire %zd bytes of LWK memory. (%s)",
 			  lwk_req.lwkmem_size, strerror(-rc));
 
-	total_mem = 0;
-	mem_str[0] = '\0';
-
-	for (i = 0; i < lwk_req.n_nids; i++)   {
-		snprintf(build_str, PATH_MAX, "nid[%zd] %zd MiB, ", i,
-			 lwk_req.lwkmem_request[i] >> 20);
-		strncat(mem_str, build_str, PATH_MAX);
-		total_mem += lwk_req.lwkmem_request[i];
-	}
-
+	mem_vec_to_str(lwk_req.lwkmem_request, lwk_req.n_nids, mem_str, PATH_MAX, &total_mem);
 	YOD_LOG(YOD_INFO, "LWK memory requested: %s total %zd MiB",
 		mem_str, total_mem >> 20);
 

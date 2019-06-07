@@ -244,10 +244,22 @@ struct yod_plugin {
 	 * Get mOS view of current process
 	 */
 	bool (*get_mos_view)(char *mos_view, size_t len);
+
 	/**
 	 * Set mOS view of current process
 	 */
 	bool (*set_mos_view)(char *mos_view);
+
+	/**
+	 * Fetch the existing list of LWK processes.
+	 * @param[out] lwkprocs The LWK processes (PIDs).
+	 * @param[in/out] n As input, this describes the array size of
+	 *   lwkprocs.  As output, it describes the actual size of the
+	 *   results (i.e., the number of PIDs in the lwkprocs array).
+	 */
+
+	void (*get_lwk_processes)(pid_t *lwkprocs, size_t *n);
+
 };
 
 void yod_abort(int rc, const char *fmt, ...) __attribute__ ((noreturn));
@@ -340,5 +352,5 @@ extern int yod_numa_compute_core_algorithm(struct lwk_request_t *this,
 				   size_t n_cores, mos_cpuset_t *available);
 extern int yod_ordered_set_insert(size_t *set, size_t value, size_t *length,
 				  size_t capacity);
-
+extern void show_state(int level);
 #endif

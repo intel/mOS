@@ -42,15 +42,17 @@ by yod are owned by the launched process for its duration.
 .SH OPTIONS
 
 .TP
-.B --resources, -R <\fIfraction\fP, all, MPI>
+.B --resources, -R <\fIfraction\fP, all, MPI, file:\fImap_file\fP>
 Reserves a portion of the LWK resources.  If specified as a fraction, then
 the corresponding number of LWK cores are reserved, as well as an equal
 portion of the designated LWK memory. A \fIfraction\fP may be specified in
 floating point format or as a rational number M/N, where M and N are integers.
 Fractions must be in the interval (0, 1].  If MPI is specified then MPI
 environment variables are used to determine the fractional amount of
-resources.  This option may not be combined with any of the --cpu, --cores
-or --mem options.
+resources.  If file:\fImap_file\fP is specified, then a mapping file is used
+to specify LWK CPU and/or memory and/or number of utility threads per MPI rank.  See \FIRESOURCE
+MAP FILES\fP for details.  This option may not be combined with any of the
+--cpu, --cores or --mem options.
 
 .PP
 The following options control the overall reservation of LWK CPUs.  At
@@ -103,7 +105,8 @@ the process being launched. If a value is specified, the kernel will
 heuristically identify that number of threads as utility threads and
 provide special placement and behaviors to those threads. If no value
 is specified, the kernel will make no heuristic identification of utility
-threads.
+threads. If the number of utility threads is specified in -R file:map_file
+option then that value overrides the value specified here.
 
 .TP
 .B --resource_algorithm <numa, simple, random>
@@ -149,7 +152,7 @@ be cleared.  The default behavior is to clear 4K.  The \fIsize\fP argument may b
 specified in integer or symbolic format (4K, 2M, 1G, etc.).
 .TP
 .B --mosview <lwk, all>
-Sets the mOS view of process being launched.  If \fBlwk\fP is specified, the 
+Sets the mOS view of process being launched.  If \fBlwk\fP is specified, the
 process will see only LWK global resources but not Linux resources.  If \fBall\fP
 is specified, the process will see both LWK and Linux resources.  The default is
 \fBall\fP.
@@ -272,6 +275,50 @@ in order from left to right.
 
 .PP
 See \fIEXAMPLES\fP below.
+
+.SH  RESOURCE MAP FILES
+
+The \fIfile:\fP variant of the \fI--resources\fP option may be used to map
+CPU, memory and number of utility threads per MPI rank. The file contains lines of the form:
+
+.TP
+.B <local-rank> <resource-spec>...
+.PP
+where <local-rank> is either an integer identifying the Nth rank on the node or
+the wildcard character * and <resource-spec> is one of the CPUs, cores,
+memory, number of utility threads or resources option.  The wildcard line is
+optional, matches all ranks and should be last in the file.  Comments are
+allowed and start with the # character.
+
+.PP
+This option requires that the MPI_LOCALRANKID environment be set to identify
+the rank's ordinal within the node.
+.PP
+Here is an example:
+
+.RS 2
+.TP
+# The first rank on the node will use 1/4 of the designated resources:
+.TP
+0 -R 1/4
+.TP
+# The second rank on the node will use CPU 9 and 1 gigabyte of memory:
+.TP
+1 -c 9 -M 1G
+.TP
+# All other ranks use 1 core and 1/8 of the designated memory:
+.TP
+* --cores 1 --mem 1/8
+.TP
+# First rank uses CPU 1,49 and 1G of LWKMEM and has 2 utility threads and second rank uses CPU 2,50 and 1G of LWKMEM and has 1 utility threads:
+.TP
+0 -c 1,49 -M 1G -u 2
+.RS 0
+1 -c 2,50 -M 1G -u 1
+.RE
+
+.RE
+
 
 .SH EXAMPLES
 

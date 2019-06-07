@@ -21,10 +21,12 @@
 #define MOS_SYSFS_ROOT "/sys/kernel/mOS/"
 #define MOS_SYSFS_VERSION (MOS_SYSFS_ROOT "version")
 #define MOS_SYSFS_LWKCPUS (MOS_SYSFS_ROOT "lwkcpus")
+#define MOS_SYSFS_LWKCPUS_MASK (MOS_SYSFS_ROOT "lwkcpus_mask")
 #define MOS_SYSFS_LWKCPUS_RES (MOS_SYSFS_ROOT "lwkcpus_reserved")
 #define MOS_SYSFS_UTILITY_CPUS (MOS_SYSFS_ROOT "utility_cpus")
 #define MOS_SYSFS_LWKMEM (MOS_SYSFS_ROOT "lwkmem")
 #define MOS_SYSFS_LWKCONFIG (MOS_SYSFS_ROOT "lwk_config")
+#define MOS_SYSFS_JOBID (MOS_SYSFS_ROOT "ras/jobid")
 #define CPU_SYSFS "/sys/devices/system/cpu/"
 #define CPUS_ONLINE (CPU_SYSFS "online")
 #define CPUS_OFFLINE (CPU_SYSFS "offline")
@@ -36,6 +38,8 @@
 #define LC_DELETE	(0x1 << 1)
 #define LC_SHOW		(0x1 << 2)
 #define LC_RAW		(0x1 << 3)
+#define LC_PRECISE	(0x1 << 4)
+#define LC_FORCE        (0x1 << 5)
 
 #ifndef ARRAY_SIZE
 #define ARRAY_SIZE(x) (sizeof(x)/sizeof(x[0]))
@@ -47,6 +51,7 @@ struct lwkctl_options {
 	char *create;
 	char *delete;
 	bool show;
+	long timeout_in_millis;
 };
 
 extern void lwkctl_abort(int rc, const char *format, ...);
@@ -59,5 +64,9 @@ extern int mos_sysfs_set_lwkconfig(char *arg);
 extern int mos_sysfs_set_linuxcpu(int cpu, bool online);
 extern int mos_sysfs_access_linuxcpu(mos_cpuset_t *cs);
 extern void show(int level, const char *label, mos_cpuset_t *set);
+
+extern bool is_irqbalance_active(void);
+extern int start_irqbalance(void);
+extern int stop_irqbalance(void);
 
 #endif

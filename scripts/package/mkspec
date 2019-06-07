@@ -147,6 +147,8 @@ $M	/lib/modules/$KERNELRELEASE
 $M	%exclude /lib/modules/$KERNELRELEASE/build
 $M	%exclude /lib/modules/$KERNELRELEASE/source
 	/boot/*
+$L	/usr/bin/*
+$L	/etc/udev/rules.d/*
 
 	%files headers
 	%defattr (-, root, root)
@@ -154,12 +156,12 @@ $M	%exclude /lib/modules/$KERNELRELEASE/source
 
 $L
 $L	%post mOS
-$L	ldconfig && ln -fs libmos.so.1 /usr/lib/libmos.so
-$L	ldconfig && ln -fs libxpmem.so.1 /usr/lib/libxpmem.so
+$L	ldconfig
+$L	ln -fs libmos.so.1 /usr/lib/libmos.so
+$L	ln -fs libxpmem.so.0 /usr/lib/libxpmem.so
 $L
 $L	%files mOS
 $L	%defattr (-, root, root)
-$L	/usr/bin/*
 $L	/usr/lib/libmos*
 $L	/usr/lib/libxpmem*
 $L	/usr/include/mos.h
@@ -167,7 +169,6 @@ $L	/usr/include/uti.h
 $L	/usr/include/xpmem.h
 $L	/usr/share/man/man1/*
 $L	/usr/share/man/man2/*
-$L	/etc/udev/rules.d/*
 $S$M
 $S$M	%files devel
 $S$M	%defattr (-, root, root)
@@ -175,4 +176,3 @@ $S$M	/usr/src/kernels/$KERNELRELEASE
 $S$M	/lib/modules/$KERNELRELEASE/build
 $S$M	/lib/modules/$KERNELRELEASE/source
 EOF
-

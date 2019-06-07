@@ -13,7 +13,7 @@
 hostprogs-y := lwkctl
 scriptprogs-y := lwkctl.sh lwkctl.1.man
 mos-lib-objs := ../lib/mos_cpuset.o
-lwkctl-objs := lwkctl_sysfs.o lwkctl.o
+lwkctl-objs := lwkctl_sysfs.o lwkctl_irq.o lwkctl.o
 lwkctl-objs += $(mos-lib-objs)
 
 lwkctl.sh_installname := lwkctl

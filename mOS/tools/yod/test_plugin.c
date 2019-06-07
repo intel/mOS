@@ -41,9 +41,13 @@
 #define DISTANCE_N "distance%zd"
 #define MAX_CPUS 1024
 
-static char *tst_get_file_name(const char *name, char *buffer)
+static char *tst_get_file_name(const char *name, char *buffer, size_t len)
 {
-	sprintf(buffer, "/tmp/%s/yod/%s", getenv("USER"), name);
+	int n = snprintf(buffer, len, "/tmp/%s/yod/%s", getenv("USER"), name);
+
+	if (n >= len)
+		yod_abort(-1, "Buffer overflow constructing test file %s", name);
+
 	return buffer;
 }
 
@@ -63,6 +67,8 @@ static int tst_read_raw(const char *filen, char *buffer, size_t length)
 		yod_abort(-1, "Could not read test file %s", filen);
 	else if (n < length)
 		buffer[n] = 0;
+	else
+		yod_abort(-1, "Insufficient buffer space in %s", __func__);
 
 	fclose(f);
 	return n;
@@ -123,7 +129,7 @@ static void tst_write(const char *filen, mos_cpuset_t *set)
 static int tst_get_designated_lwkcpus(mos_cpuset_t *set)
 {
 	char buffer[256];
-	tst_read(tst_get_file_name(LWKCPUS, buffer), set);
+	tst_read(tst_get_file_name(LWKCPUS, buffer, sizeof(buffer)), set);
 	return 0;
 }
 
@@ -150,21 +156,21 @@ static void tst_get_designated_lwkmem(size_t *mem, size_t *n)
 {
 	char buffer[4096];
 
-	_tst_get_memvec(mem, n, tst_get_file_name(LWKMEM, buffer));
+	_tst_get_memvec(mem, n, tst_get_file_name(LWKMEM, buffer, sizeof(buffer)));
 }
 
 static void tst_get_reserved_lwkmem(size_t *mem, size_t *n)
 {
 	char buffer[4096];
 
-	_tst_get_memvec(mem, n, tst_get_file_name(LWKMEM_RESERVED, buffer));
+	_tst_get_memvec(mem, n, tst_get_file_name(LWKMEM_RESERVED, buffer, sizeof(buffer)));
 }
 
 static int tst_get_reserved_lwk_cpus(mos_cpuset_t *set)
 {
 	char buffer[256];
 
-	tst_read(tst_get_file_name(LWKCPUS_RESERVED, buffer), set);
+	tst_read(tst_get_file_name(LWKCPUS_RESERVED, buffer, sizeof(buffer)), set);
 	return 0;
 }
 
@@ -180,7 +186,7 @@ static int tst_request_lwk_cpus(mos_cpuset_t *set)
 	reserved = mos_cpuset_alloc_validate();
 	and = mos_cpuset_alloc_validate();
 
-	tst_read(tst_get_file_name(LWKCPUS, buffer), lwkcpus);
+	tst_read(tst_get_file_name(LWKCPUS, buffer, sizeof(buffer)), lwkcpus);
 
 	/*
 	 * Requesting a non-LWK CPU is an error
@@ -197,7 +203,7 @@ static int tst_request_lwk_cpus(mos_cpuset_t *set)
 		goto out;
 	}
 
-	tst_read(tst_get_file_name(LWKCPUS_RESERVED, buffer), reserved);
+	tst_read(tst_get_file_name(LWKCPUS_RESERVED, buffer, sizeof(buffer)), reserved);
 	mos_cpuset_and(and, reserved, set);
 
 	if (!mos_cpuset_is_empty(and)) {
@@ -209,11 +215,11 @@ static int tst_request_lwk_cpus(mos_cpuset_t *set)
 		goto out;
 	}
 
-	tst_write(tst_get_file_name(REQ_LWKCPUS, buffer), set);
+	tst_write(tst_get_file_name(REQ_LWKCPUS, buffer, sizeof(buffer)), set);
 
-	tst_read(tst_get_file_name(LWKCPUS_RESERVED, buffer), reserved);
+	tst_read(tst_get_file_name(LWKCPUS_RESERVED, buffer, sizeof(buffer)), reserved);
 	mos_cpuset_or(reserved, reserved, set);
-	tst_write(tst_get_file_name(LWKCPUS_RESERVED, buffer), reserved);
+	tst_write(tst_get_file_name(LWKCPUS_RESERVED, buffer, sizeof(buffer)), reserved);
 	rc = 0;
 
  out:
@@ -243,9 +249,9 @@ static int tst_request_lwk_memory(size_t *mem, size_t n)
 
 	assert(n < (int)ARRAY_SIZE(desig));
 
-	_tst_get_memvec(desig, &n_tmp, tst_get_file_name(LWKMEM, path));
+	_tst_get_memvec(desig, &n_tmp, tst_get_file_name(LWKMEM, path, sizeof(path)));
 	assert(n_tmp == n);
-	_tst_get_memvec(resvd, &n_tmp, tst_get_file_name(LWKMEM_RESERVED, path));
+	_tst_get_memvec(resvd, &n_tmp, tst_get_file_name(LWKMEM_RESERVED, path, sizeof(path)));
 	assert(n_tmp == n);
 
 	buffer[0] = 0;
@@ -261,10 +267,8 @@ static int tst_request_lwk_memory(size_t *mem, size_t n)
 		STR_APPEND(req_buffer, sizeof(req_buffer), "%zu ", mem[i]);
 	}
 
-	tst_write_raw(tst_get_file_name(LWKMEM_RESERVED, path), buffer,
-		      strlen(buffer)+1);
-	tst_write_raw(tst_get_file_name(LWKMEM_REQUEST, path), req_buffer,
-		      strlen(req_buffer)+1);
+	tst_write_raw(tst_get_file_name(LWKMEM_RESERVED, path, sizeof(path)), buffer, strlen(buffer)+1);
+	tst_write_raw(tst_get_file_name(LWKMEM_REQUEST, path, sizeof(path)), req_buffer, strlen(req_buffer)+1);
 	return 0;
 }
 
@@ -274,10 +278,10 @@ static int tst_lock(struct lock_options_t *opts)
 {
 	char buffer[256];
 
-	lock_fd = open(tst_get_file_name("", buffer), O_RDONLY);
+	lock_fd = open(tst_get_file_name("", buffer, sizeof(buffer)), O_RDONLY);
 
 	if (lock_fd == -1) {
-		YOD_LOG(YOD_WARN, "Could not open %s for locking.", tst_get_file_name("", buffer));
+		YOD_LOG(YOD_WARN, "Could not open %s for locking.", tst_get_file_name("", buffer, sizeof(buffer)));
 		goto lock_out;
 	}
 
@@ -295,7 +299,7 @@ static int tst_lock(struct lock_options_t *opts)
 		retries--;
 	}
 
-	YOD_ERR("Could not lock %s.", tst_get_file_name("", buffer));
+	YOD_ERR("Could not lock %s.", tst_get_file_name("", buffer, sizeof(buffer)));
 	close(lock_fd);
 	lock_fd = -1;
 
@@ -325,7 +329,7 @@ static void tst_get_distance_map(size_t nid, size_t *dist, size_t *n)
 	char path[256];
 
 	sprintf(filen, DISTANCE_N, nid);
-	_tst_get_memvec(dist, n, tst_get_file_name(filen, path));
+	_tst_get_memvec(dist, n, tst_get_file_name(filen, path, sizeof(path)));
 }
 
 static int tst_set_util_threads(size_t num_util_threads)
@@ -334,7 +338,7 @@ static int tst_set_util_threads(size_t num_util_threads)
 	char buff[16];
 
 	snprintf(buff, sizeof(buff), "%zd", num_util_threads);
-	tst_write_raw(tst_get_file_name(LWK_UTIL_THREADS_REQUEST, path),
+	tst_write_raw(tst_get_file_name(LWK_UTIL_THREADS_REQUEST, path, sizeof(path)),
 		      buff, strlen(buff));
 	return 0;
 }
@@ -343,7 +347,7 @@ static int tst_lwkcpus_sequence_request(char *layout)
 {
 	char path[256];
 
-	tst_write_raw(tst_get_file_name(SEQUENCE_REQUEST, path),
+	tst_write_raw(tst_get_file_name(SEQUENCE_REQUEST, path, sizeof(path)),
 		      layout, strlen(layout));
 	return 0;
 }
@@ -363,7 +367,7 @@ static int tst_set_options(char *options, size_t len)
 		if (options[i] == '\0')
 			options[i] = '\n';
 
-	tst_write_raw(tst_get_file_name(LWK_OPTIONS, path),
+	tst_write_raw(tst_get_file_name(LWK_OPTIONS, path, sizeof(path)),
 		      options, len);
 	return 0;
 }
@@ -372,9 +376,15 @@ static int tst_set_lwkmem_domain_info(char *info)
 {
 	char path[256];
 
-	tst_write_raw(tst_get_file_name(LWKMEM_DOMAIN_INFO_REQUEST, path),
+	tst_write_raw(tst_get_file_name(LWKMEM_DOMAIN_INFO_REQUEST, path, sizeof(path)),
 		      info, strlen(info) + 1);
 	return 0;
+}
+
+static void tst_get_lwk_processes(__attribute__((unused)) pid_t *procs, size_t *n)
+{
+	YOD_LOG(YOD_WARN, "%s always returns an empty set.", __func__);
+	*n = 0;
 }
 
 static struct yod_plugin tst_plugin = {
@@ -392,6 +402,7 @@ static struct yod_plugin tst_plugin = {
 	.lwkcpus_sequence_request = tst_lwkcpus_sequence_request,
 	.set_options = tst_set_options,
 	.set_lwkmem_domain_info = tst_set_lwkmem_domain_info,
+	.get_lwk_processes = tst_get_lwk_processes,
 };
 
 struct yod_plugin *init_tst_plugin(const char *file)
@@ -436,7 +447,7 @@ struct yod_plugin *init_tst_plugin(const char *file)
 
 	/* Process the test plugin's memory group descriptor. */
 
-	if (tst_read_raw(tst_get_file_name("lwkmem_groups", path), line, sizeof(line)) <= 0)
+	if (tst_read_raw(tst_get_file_name("lwkmem_groups", path, sizeof(path)), line, sizeof(line)) <= 0)
 		yod_abort(-1, "Could not read memory group descriptor (%s)", path);
 
 	set = mos_cpuset_alloc_validate();
@@ -450,7 +461,7 @@ struct yod_plugin *init_tst_plugin(const char *file)
 
 		if ((size_t)g >= ARRAY_SIZE(mem_groups_order))
 			yod_abort(-1, "Too many entries in %s\n",
-				  tst_get_file_name("lwkmem_groups", path));
+				  tst_get_file_name("lwkmem_groups", path, sizeof(path)));
 
 		/* A "-1" indicates that this group is not present. */
 
@@ -466,6 +477,7 @@ struct yod_plugin *init_tst_plugin(const char *file)
 
 	}
 
+	fclose(f);
 	mos_cpuset_free(set);
 	return &tst_plugin;
 }

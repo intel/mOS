@@ -22,7 +22,7 @@
  * utility.
  */
 
-#define YOD_QUIET 0
+#define YOD_CRIT  0
 #define YOD_WARN  1
 #define YOD_INFO  2
 #define YOD_DEBUG 3
