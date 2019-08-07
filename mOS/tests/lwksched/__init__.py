@@ -245,28 +245,27 @@ class Basics(TestCase):
                         *v)
 
     def test_preemption(self):
-        # Verify that no timer-based preemption occurs in default
-        # environment and verify that balanced round-robin preemptions
-        # and progress occurs when a round-robin time quantum is
+        # Verify that balanced round robin occurs in default environment and
+        # verify that no timer based preemption occurrs when round robin is
+        # turned off.
         # specified.
         v = ['--debug'] if ARGS.test_debug else []
-        yod(self, '-u', 0, '-C', '2', '-M', 'all', './timer_preemption', '-t', 4, '-w', 6, *v)
-        yod(self, '-u', 0, '-C', '2', '-M', 'all', '-o', 'lwksched-enable-rr=100',
-            './timer_preemption', '--threads', 4, '-w', 6, '-q', 100, *v)
+        yod(self, '-u', 0, '-C', '2', '-M', 'all', '-o', 'lwksched-enable-rr=0',
+            './timer_preemption', '-t', 4, '-w', 6, *v)
+        yod(self, '-u', 0, '-C', '2', '-M', 'all', './timer_preemption',
+            '--threads', 4, '-w', 6, '-q', 100, *v)
 
     def test_thread_priority(self):
-        # Verify that no timer-based preemption occurs in default
-        # environment and verify that balanced round-robin preemptions
-        # and progress occurs when a round-robin time quantum is
-        # specified.
         v = ['--debug'] if ARGS.test_debug else []
-        yod(self, '-u', 0, '-C', '2', '-M', 'all', './thread_priority', *v)
+        yod(self, '-u', 0, '-C', '2', '-M', 'all', '-o', 'lwksched-enable-rr=0',
+            './thread_priority', *v)
 
     def test_yield(self):
         # Verify that the yield system call will round robin LWK threads of
         # equal priority
         v = ['--debug'] if ARGS.test_debug else []
-        yod(self, '-u', 0, '-C', '2', '-M', 'all', './timer_preemption', '-t', 4, '-w', 6,
+        yod(self, '-u', 0, '-C', '2', '-M', 'all', '-o', 'lwksched-enable-rr=0',
+            './timer_preemption', '-t', 4, '-w', 6,
             '-y', 10000, *v)
     def test_concurrent_thread_creates(self):
         v = ['--debug'] if ARGS.test_debug else []

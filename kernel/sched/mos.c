@@ -49,6 +49,7 @@
 #include <asm/intel-family.h>
 #include <asm/mwait.h>
 #include <asm/msr.h>
+#include <uapi/linux/sched/types.h>
 
 
 #define CREATE_TRACE_POINTS
@@ -61,6 +62,11 @@
  */
 #define MOS_TIMESLICE		(100 * HZ / 1000)
 #define COMMIT_MAX		INT_MAX		/* Max limit */
+
+/* NICE values to be used for utility threads running in the Linux scheduler */
+#define MOS_NICE_HIGH_PRIOR -20
+#define MOS_NICE_LOW_PRIOR 19
+#define MOS_NICE_DEFAULT -10
 
 #define CMCI_THRESHOLD_MAX	32767
 
@@ -299,6 +305,7 @@ static void init_mos_rq(struct rq *rq)
 	/* Delimiter for bitsearch: */
 	__set_bit(MOS_RQ_MAX_INDEX+1, array->bitmap);
 
+	raw_spin_lock_init(&mos_rq->lock);
 	mos_rq->mos_nr_running = 0;
 	mos_rq->rr_nr_running = 0;
 	mos_rq->mos_time = 0;
@@ -707,20 +714,24 @@ static inline int mos_rq_index(int priority)
 	return qindex;
 }
 
-static void move_to_linux_scheduler(struct task_struct *p,
-				unsigned long behavior)
+static int nice_for_util_thread(unsigned long behavior)
 {
 	int nice;
 
 	if (behavior & MOS_CLONE_ATTR_HPRIO)
-		nice = -20;
+		nice = MOS_NICE_HIGH_PRIOR;
 	else if (behavior & MOS_CLONE_ATTR_LPRIO)
-		nice = 19;
+		nice = MOS_NICE_LOW_PRIOR;
 	else
-		nice = -10;
+		nice = MOS_NICE_DEFAULT;
+	return nice;
+}
 
+static void move_to_linux_scheduler(struct task_struct *p,
+				unsigned long behavior)
+{
 	p->policy = SCHED_NORMAL;
-	p->static_prio = NICE_TO_PRIO(nice);
+	p->static_prio = NICE_TO_PRIO(nice_for_util_thread(behavior));
 	p->rt_priority = 0;
 	p->prio = p->normal_prio = p->static_prio;
 	p->se.load.weight =
@@ -955,6 +966,7 @@ static void set_utility_cpus_allowed(struct task_struct *p,
 				 * longer be in control of the
 				 * scheduling of this thread.
 				 */
+
 				move_to_linux_scheduler(p,
 						hints->behavior);
 				break;
@@ -1068,8 +1080,14 @@ static void set_utility_cpus_allowed(struct task_struct *p,
 			mutex_lock(&proc->util_list_lock);
 
 			commit_cpu(p, util_cpu);
-			list_add(&p->mos.util_list, &proc->util_list);
-
+			if (p->mos.on_moveable_list)
+				mos_ras(MOS_SCHEDULER_WARNING,
+				    "%s: Thread is on the moveable list.",
+				    __func__);
+			else {
+				list_add(&p->mos.util_list, &proc->util_list);
+				p->mos.on_moveable_list = true;
+			}
 			/* Unlock the utility list */
 			mutex_unlock(&proc->util_list_lock);
 		} else
@@ -1109,40 +1127,16 @@ static void set_utility_cpus_allowed(struct task_struct *p,
 
 static void push_to_linux_scheduler(struct task_struct *p)
 {
-	struct rq_flags rf;
-	bool queued;
-	bool running;
-	struct rq *rq;
+	struct sched_param param;
 
-	/*
-	 * To change p->policy safely, we need to obtain
-	 * both the rq and the pi lock.
-	 */
-	rq = task_rq_lock(p, &rf);
-
-	queued = task_on_rq_queued(p);
-	running = task_current(rq, p);
-	if (queued) {
-		update_rq_clock(rq);
-		sched_info_dequeued(rq, p);
-		p->sched_class->dequeue_task(rq, p, 0);
-	}
-	if (running)
-		put_prev_task(rq, p);
-
-	move_to_linux_scheduler(p, p->mos.active_hints.behavior);
-
-	if (queued) {
-		update_rq_clock(rq);
-		sched_info_queued(rq, p);
-		p->sched_class->enqueue_task(rq, p, 0);
-	}
-	if (running)
-		set_curr_task(rq, p);
-
-	p->sched_class->switched_to(rq, p);
-
-	task_rq_unlock(rq, p, &rf);
+	param.sched_priority = 0;
+	if (sched_setscheduler_nocheck(p, SCHED_NORMAL, &param))
+		mos_ras(MOS_SCHEDULER_WARNING,
+		    "%s: Setting scheduler policy/priority failed.", __func__);
+	set_user_nice(p, nice_for_util_thread(p->mos.active_hints.behavior));
+	if (set_cpus_allowed_ptr(p, p->mos_process->utilcpus))
+		mos_ras(MOS_SCHEDULER_WARNING,
+		    "%s: Setting allowed CPUs failed.", __func__);
 }
 
 static void push_utility_threads(struct task_struct *p)
@@ -1188,6 +1182,7 @@ static void push_utility_threads(struct task_struct *p)
 
 			/* remove the utility thread from the list */
 			list_del(&util_thread->mos.util_list);
+			util_thread->mos.on_moveable_list = false;
 
 			/*
 			 * If the original request specified a domain mask,
@@ -1535,7 +1530,7 @@ static int lwksched_process_init(struct mos_process_t *mosp)
 	mosp->num_util_threads = 0;
 	mosp->mce_modifications_active = 0;
 	mosp->move_syscalls_disable = 0;
-	mosp->enable_rr = 0;
+	mosp->enable_rr = MOS_TIMESLICE;
 	mosp->disable_setaffinity = 0;
 	mosp->sched_stats = 0;
 	INIT_LIST_HEAD(&mosp->util_list);
@@ -1575,22 +1570,34 @@ static void lwksched_thread_exit(struct mos_process_t *mosp)
 	/* Cleanup CPU commits */
 	uncommit_cpu(current);
 
-	/* Cleanup utility thread key table */
-	if (current->mos.active_hints.key) {
-		int i;
-
-		/* Search key table for a match */
-		raw_spin_lock(&util_grp_lock);
-		for (i = 0; i < UTIL_GROUP_LIMIT; i++) {
-			if (util_grp.entry[i].key ==
-					current->mos.active_hints.key) {
-				/* Decrement the reference count */
-				if (!(--(util_grp.entry[i].refcount)))
-					util_grp.entry[i].key = 0;
-				break;
-			}
+	if (current->mos.thread_type == mos_thread_type_utility) {
+		/* Remove the task from the moveable list */
+		mutex_lock(&mosp->util_list_lock);
+		/* Do we need to remove task from the moveable list */
+		if (current->mos.on_moveable_list) {
+			/* Remove utility thread from the moveable list */
+			list_del(&current->mos.util_list);
+			current->mos.on_moveable_list = false;
 		}
-		raw_spin_unlock(&util_grp_lock);
+		mutex_unlock(&mosp->util_list_lock);
+
+		/* Cleanup utility thread key table */
+		if (current->mos.active_hints.key) {
+			int i;
+
+			/* Search key table for a match */
+			raw_spin_lock(&util_grp_lock);
+			for (i = 0; i < UTIL_GROUP_LIMIT; i++) {
+				if (util_grp.entry[i].key ==
+				    current->mos.active_hints.key) {
+					/* Decrement the reference count */
+					if (!(--(util_grp.entry[i].refcount)))
+						util_grp.entry[i].key = 0;
+					break;
+				}
+			}
+			raw_spin_unlock(&util_grp_lock);
+		}
 	}
  }
 
@@ -1708,6 +1715,8 @@ static void lwksched_process_exit(struct mos_process_t *mosp)
 				   !mosp->correctable_mcheck_polling);
 		mosp->mce_modifications_active = 0;
 	}
+	/* Free the allocated cpumask */
+	free_cpumask_var(mosp->original_cpus_allowed);
 }
 
 static struct mos_process_callbacks_t lwksched_callbacks = {
@@ -1737,8 +1746,10 @@ static int lwksched_enable_rr(const char *val,
 	if (rc)
 		goto invalid;
 	/* Allow a zero value to indicate no rr time-slicing */
-	if (!msecs)
+	if (!msecs) {
+		mosp->enable_rr = 0;
 		return 0;
+	}
 	/* Specified value minimum need to be >= timer frequency */
 	if (msecs < min_msecs)
 		goto invalid;
@@ -1947,8 +1958,7 @@ static int lwksched_cmci_control(const char *val, struct mos_process_t *mosp)
 		mosp->correctable_mcheck_polling = 0;
 	else
 		goto invalid;
-	if ((mosp->cmci_threshold < 0) ||
-	    (mosp->cmci_threshold > CMCI_THRESHOLD_MAX))
+	if (mosp->cmci_threshold > CMCI_THRESHOLD_MAX)
 		goto invalid;
 	kfree(threshold_str);
 	return 0;
@@ -1961,6 +1971,7 @@ invalid:
 
 static int __init lwksched_mod_init(void)
 {
+	raw_spin_lock_init(&util_grp_lock);
 
 	mos_register_process_callbacks(&lwksched_callbacks);
 
@@ -2021,7 +2032,7 @@ static int lwksched_topology_init(void)
 {
 	int i;
 
-	for_each_present_cpu(i) {
+	for_each_online_cpu(i) {
 		struct rq *rq;
 
 		rq = cpu_rq(i);
@@ -2551,11 +2562,12 @@ void assimilate_task_mos(struct rq *rq, struct task_struct *p)
 			return;
 		else if (unlikely((p->mos.thread_type ==
 						mos_thread_type_guest))) {
-			/* LWK CPUs are likely being returned to Linux.
+			/* LWK CPUs are likely being returned to Linux due to
+			 * the destruction of the LWK partition.
 			 * Another possibility is a rogue kthread that was
 			 * affinitized to a LWK CPU and now is affinitized to
 			 * a Linux CPU. We need to give this assimilated Linux
-			 * kthread  back to the Linux scheduler. We already
+			 * kthread back to the Linux scheduler. We already
 			 * hold the runqueue lock  and we know we are at the
 			 * point just prior to calling the enqueue_task method
 			 * on the scheduler class. It is safe to change the
@@ -2564,8 +2576,11 @@ void assimilate_task_mos(struct rq *rq, struct task_struct *p)
 			p->sched_class = p->mos.orig_class;
 			p->policy = p->mos.orig_policy;
 			p->mos.assimilated = 0;
-			rq->mos.stats.givebacks++;
-			trace_mos_giveback_thread(p);
+			/* Is this an mOS idle thread exiting */
+			if (p->normal_prio != MOS_IDLE_PRIO) {
+				rq->mos.stats.givebacks++;
+				trace_mos_giveback_thread(p);
+			}
 		}
 	}
 	if (!rq->lwkcpu)
@@ -2812,6 +2827,9 @@ select_task_rq_mos(struct task_struct *p, int cpu, int sd_flag, int flags)
 
 		/* Find the best cpu candidate for the mOS clone operation */
 		ncpu = select_cpu_candidate(p, COMMIT_MAX);
+		/* If a negative value is returned, use original CPU */
+		if (ncpu < 0)
+			ncpu = cpu;
 
 		trace_mos_clone_cpu_assign(ncpu, p);
 
@@ -2831,6 +2849,9 @@ select_task_rq_mos(struct task_struct *p, int cpu, int sd_flag, int flags)
 		} else {
 			/* Need to select a cpu in the allowed mask */
 			ncpu = select_cpu_candidate(p, COMMIT_MAX);
+			/* If a negative value is returned, use original CPU */
+			if (ncpu < 0)
+				ncpu = cpu;
 		}
 	}
 	return ncpu;

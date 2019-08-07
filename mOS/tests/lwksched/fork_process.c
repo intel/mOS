@@ -90,7 +90,7 @@ int main(int argc, char **argv)
 		/* Parent */
 
 		/* Test policy */
-		if (isPolicy(SCHED_FIFO)) {
+		if (isPolicy(SCHED_RR)) {
 			/* Test cpus allowed mask */
 			if (isCpusAllowedMaskLwk()) {
 				/* Test current cpu */
@@ -108,7 +108,7 @@ int main(int argc, char **argv)
 			}
 		} else {
 			log_msg(LOG_ERR,
-			    "Parent scheduling policy is not SCHED_FIFO");
+			    "Parent scheduling policy is not SCHED_RR");
 			rc = -1;
 		}
 

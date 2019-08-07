@@ -665,7 +665,7 @@ bool sched_can_stop_tick(struct rq *rq)
 	int fifo_nr_running;
 
 	if (is_lwkrq(rq) && nr_running_mos(rq))
-		return nr_rr_running_mos(rq) ? false : true;
+		return (nr_rr_running_mos(rq) > 1) ? false : true;
 
 	/* Deadline tasks, even if single, need the tick */
 	if (rq->dl.dl_nr_running)
@@ -2074,6 +2074,7 @@ static int select_fallback_rq(int cpu, struct task_struct *p)
 	    ((!zalloc_cpumask_var(&linux_cpus, GFP_KERNEL)) ||
 	     (!zalloc_cpumask_var(&allowed, GFP_KERNEL)))) {
 		WARN(1, "Failed to allocate CPU masks");
+		dest_cpu = 0;
 		state = fail;
 		goto out_nf;
 	}
@@ -4480,6 +4481,18 @@ void rt_mutex_setprio(struct task_struct *p, struct task_struct *pi_task)
 	if (p->pi_top_task == pi_task && prio == p->prio && !dl_prio(prio))
 		return;
 
+	/*
+	 * If we are dealing with a mix of LWK and Linux tasks, bail early.
+	 * We do not support the complexity of elevating a Linux task into the
+	 * LWK scheduler and there is no reason to elevate an LWK task to a
+	 * Linux task since it is already running at a higher priority. Since
+	 * mOS tasks can have different priorities, we could support priority
+	 * adjustments when both tasks are mOS tasks, however at this time we do
+	 * not. We currently have no known users specifying explicit priority.
+	*/
+	if (is_mos_sched_class(p) || (pi_task && is_mos_sched_class(pi_task)))
+		return;
+
 	rq = __task_rq_lock(p, &rf);
 	update_rq_clock(rq);
 	/*
@@ -4541,9 +4554,6 @@ void rt_mutex_setprio(struct task_struct *p, struct task_struct *pi_task)
 	 *      --> -dl task blocks on mutex A and could preempt the
 	 *          running task
 	 */
-	if (is_mos_sched_class(p))
-		/* Task is controlled by the mOS scheduler. */
-		goto mod_prio;
 	if (dl_prio(prio)) {
 		if (!dl_prio(p->normal_prio) ||
 		    (pi_task && dl_entity_preempt(&pi_task->dl, &p->dl))) {
@@ -4565,8 +4575,6 @@ void rt_mutex_setprio(struct task_struct *p, struct task_struct *pi_task)
 			p->rt.timeout = 0;
 		p->sched_class = &fair_sched_class;
 	}
-
-mod_prio:
 	p->prio = prio;
 
 	if (queued)
