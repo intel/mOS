@@ -134,7 +134,7 @@ static inline cpumask_t *lwkcpus_mask_mos(void)
 	return this_cpu_ptr(&lwkcpus_mask);
 }
 
-static inline bool is_migration_mask_valid_mos(const cpumask_var_t mask,
+static inline bool is_migration_mask_valid_mos(const cpumask_t *mask,
 						struct task_struct *p)
 {
 	if (cpumask_subset(mask, p->mos_process->lwkcpus) ||
@@ -230,7 +230,7 @@ static inline cpumask_t *lwkcpus_mask_mos(void)
 	return NULL;
 }
 
-static inline bool is_migration_mask_valid_mos(const cpumask_var_t mask,
+static inline bool is_migration_mask_valid_mos(const cpumask_t *mask,
 						struct task_struct *p)
 {
 	return false;

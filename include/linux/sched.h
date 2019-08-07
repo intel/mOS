@@ -534,6 +534,7 @@ struct sched_mos_entity {
 	int cpu_home;
 	enum mos_thread_type thread_type;
 	bool move_syscalls_disable;
+	bool on_moveable_list;
 };
 #endif
 

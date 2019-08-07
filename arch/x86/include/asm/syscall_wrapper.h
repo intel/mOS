@@ -275,38 +275,8 @@ asmlinkage long __x64_sys_time(const struct pt_regs *regs);
 #include <linux/mos.h>
 #ifdef CONFIG_MOS_MOVE_SYSCALLS
 
-/* We need to declare the syscalls that will be executed locally */
-asmlinkage long __x64_sys_clock_adjtime(const struct pt_regs *regs);
-asmlinkage long __x64_sys_clock_settime(const struct pt_regs *regs);
-asmlinkage long __x64_sys_clock_gettime(const struct pt_regs *regs);
-asmlinkage long __x64_sys_clock_getres(const struct pt_regs *regs);
-asmlinkage long __x64_sys_clock_nanosleep(const struct pt_regs *regs);
-asmlinkage long __x64_sys_futex(const struct pt_regs *regs);
-asmlinkage long __x64_sys_getitimer(const struct pt_regs *regs);
-asmlinkage long __x64_sys_getpid(void);
-asmlinkage long __x64_sys_getppid(void);
-asmlinkage long __x64_sys_getpriority(const struct pt_regs *regs);
-asmlinkage long __x64_sys_setpriority(const struct pt_regs *regs);
-asmlinkage long __x64_sys_mbind(const struct pt_regs *regs);
-asmlinkage long __x64_sys_mmap(const struct pt_regs *regs);
-asmlinkage long __x64_sys_mmap_pgoff(const struct pt_regs *regs);
-asmlinkage long __x64_sys_munmap(const struct pt_regs *regs);
-asmlinkage long __x64_sys_mremap(const struct pt_regs *regs);
-asmlinkage long __x64_sys_nanosleep(const struct pt_regs *regs);
-asmlinkage long __x64_sys_perf_event_open(const struct pt_regs *regs);
-asmlinkage long __x64_sys_process_vm_readv(const struct pt_regs *regs);
-asmlinkage long __x64_sys_process_vm_writev(const struct pt_regs *regs);
-asmlinkage long __x64_sys_sched_setaffinity(const struct pt_regs *regs);
-asmlinkage long __x64_sys_sched_getaffinity(const struct pt_regs *regs);
-asmlinkage long __x64_sys_sched_yield(void);
-asmlinkage long __x64_sys_setitimer(const struct pt_regs *regs);
-asmlinkage long __x64_sys_timer_create(const struct pt_regs *regs);
-asmlinkage long __x64_sys_timer_gettime(const struct pt_regs *regs);
-asmlinkage long __x64_sys_timer_getoverrun(const struct pt_regs *regs);
-asmlinkage long __x64_sys_timer_settime(const struct pt_regs *regs);
-asmlinkage long __x64_sys_timer_delete(const struct pt_regs *regs);
-asmlinkage long __x64_sys_times(const struct pt_regs *regs);
-asmlinkage long __x64_sys_writev(const struct pt_regs *regs);
+/* We need to declare all syscalls that will be executed remotely */
+asmlinkage long __x64_sys_write(const struct pt_regs *regs);
 
 /*
  * When 'm' is true, the optimizer can easily prove it statically--after
@@ -321,41 +291,10 @@ asmlinkage long __x64_sys_writev(const struct pt_regs *regs);
  *
  * (Must be a macro to behave correctly, at least with GCC 4.8.3.)
  */
-#define __mos_do_on_original_cpu(s)				\
+#define __mos_do_on_remote_cpu(s)				\
 	({							\
-		bool m = (/* Keep these alphabetical */		\
-			s == __x64_sys_clock_adjtime ||		\
-			s == __x64_sys_clock_getres ||		\
-			s == __x64_sys_clock_gettime ||		\
-			s == __x64_sys_clock_nanosleep ||	\
-			s == __x64_sys_clock_settime ||		\
-			s == __x64_sys_futex ||			\
-			s == __x64_sys_getitimer ||		\
-			s == __x64_sys_getpid ||		\
-			s == __x64_sys_getppid ||		\
-			s == __x64_sys_getpriority ||		\
-			s == __x64_sys_gettimeofday ||		\
-			s == __x64_sys_mbind ||			\
-			s == __x64_sys_mmap ||			\
-			s == __x64_sys_mmap_pgoff ||		\
-			s == __x64_sys_mremap ||		\
-			s == __x64_sys_munmap ||		\
-			s == __x64_sys_nanosleep ||		\
-			s == __x64_sys_perf_event_open ||	\
-			s == __x64_sys_process_vm_readv ||	\
-			s == __x64_sys_process_vm_writev ||	\
-			s == __x64_sys_sched_getaffinity ||	\
-			s == __x64_sys_sched_setaffinity ||	\
-			s == __x64_sys_sched_yield ||		\
-			s == __x64_sys_setitimer ||		\
-			s == __x64_sys_time ||			\
-			s == __x64_sys_timer_create ||		\
-			s == __x64_sys_timer_delete ||		\
-			s == __x64_sys_timer_getoverrun ||	\
-			s == __x64_sys_timer_gettime ||		\
-			s == __x64_sys_timer_settime ||		\
-			s == __x64_sys_times ||			\
-			s == __x64_sys_writev ||		\
+		bool m = (/* Syscalls to execute remotely */	\
+			/* i.e.: s == __x64_sys_write || */	\
 			0);					\
 		__builtin_constant_p(m) ? m : false;		\
 	})
@@ -364,14 +303,14 @@ asmlinkage long __x64_sys_writev(const struct pt_regs *regs);
 static inline void __mos_linux_enter(void *sys_wrap)
 {
 #ifdef CONFIG_MOS_MOVE_SYSCALLS
-	if (!__mos_do_on_original_cpu(sys_wrap))
+	if (__mos_do_on_remote_cpu(sys_wrap))
 		mos_linux_enter(sys_wrap);
 #endif
 }
 static inline void __mos_linux_leave(void *sys_wrap)
 {
 #ifdef CONFIG_MOS_MOVE_SYSCALLS
-	if (!__mos_do_on_original_cpu(sys_wrap))
+	if (__mos_do_on_remote_cpu(sys_wrap))
 		mos_linux_leave();
 #endif
 }

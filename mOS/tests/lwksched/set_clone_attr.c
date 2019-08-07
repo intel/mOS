@@ -23,9 +23,13 @@
 #include <locale.h>
 #include "lwksched.h"
 
-#define NDSZ  4
 
 #define BITS_IN_LONG (sizeof(unsigned long) * 8)
+/* Set NDSZ to the number of dwords that would support a NUMA node mask
+ * with more bits than the maximum node size supported in the kernel.
+ */
+#define NDSZ  (1024/BITS_IN_LONG + 1)
+
 #define MAX_NUMNODES (NDSZ * BITS_IN_LONG)
 #define NUMNODES 8
 
@@ -43,7 +47,7 @@ struct mos_clone_result result;
 
 static void initnodes(void)
 {
-       int i;
+       unsigned int i;
 
 	for (i = 0; i < NDSZ; i++)
 		nodes[i] = 0;
@@ -244,7 +248,7 @@ int main(int argc, char **argv)
 		MOS_CLONE_PLACEMENT_REQUESTED);
 
 	/*
-	 * Domain placement request using max num nodes > 64.
+	 * Domain placement request using max num nodes > kernel max.
 	 * As long as no node is set within the bitmask area that exceeds
 	 * the size of the kernel bitmask, this should succeed.
 	 */
@@ -258,9 +262,9 @@ int main(int argc, char **argv)
 		MOS_CLONE_PLACEMENT_REQUESTED);
 
 	/*
-	 * Domain placement request using max num nodes > 64.
+	 * Domain placement request using max num nodes > kernel max.
 	 * Set a node outside of the nodes that are supported
-	 * by a 64 bit mask. This should fail since the kernel
+	 * by the kernel. This should fail since the kernel
 	 * can only deal with a node that can be contained in its
 	 * bitmask within the nodemask_t structure.
 	 */
