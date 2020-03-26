@@ -465,7 +465,7 @@ asmlinkage long lwk_sys_brk(unsigned long brk)
 			"%s: Requested brk:%lx but returning %lx.",
 			__func__, brk, ret);
 	if (brk || first_brk)
-		trace_mos_brk(ret, clear_len, clear_addr, current->tgid);
+		trace_mos_brk(ret, mosp->brk_end, clear_len, clear_addr, current->tgid);
 
 	return ret;
 }

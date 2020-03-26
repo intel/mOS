@@ -144,13 +144,14 @@ TRACE_EVENT(mos_mremap,
 
 TRACE_EVENT(mos_brk,
 
-	TP_PROTO(unsigned long brk, unsigned long clear_len,
+	TP_PROTO(unsigned long brk, unsigned long brk_end, unsigned long clear_len,
 		void *clear_addr, int tgid),
 
-	TP_ARGS(brk, clear_len, clear_addr, tgid),
+	TP_ARGS(brk, brk_end, clear_len, clear_addr, tgid),
 
 	TP_STRUCT__entry(
 		__field(unsigned long, brk)
+		__field(unsigned long, brk_end)
 		__field(unsigned long, clear_len)
 		__field(void *, clear_addr)
 		__field(int, tgid)
@@ -158,13 +159,15 @@ TRACE_EVENT(mos_brk,
 
 	TP_fast_assign(
 		__entry->brk = brk;
+		__entry->brk_end = brk_end;
 		__entry->clear_len = clear_len;
 		__entry->clear_addr = clear_addr;
 		__entry->tgid = tgid;
 	),
 
-	TP_printk("brk=%lx clr_addr=%lx clr_len=%ld tgid=%d",
+	TP_printk("brk=%lx brk_end=%lx clr_addr=%lx clr_len=%ld tgid=%d",
 			__entry->brk,
+			__entry->brk_end,
 			(unsigned long)__entry->clear_addr,
 			__entry->clear_len,
 			__entry->tgid)
