@@ -2991,8 +2991,13 @@ static void task_fork_mos(struct task_struct *p)
 
 	p->prio = current->prio;
 	p->normal_prio = current->prio;
-	p->mos.thread_type = mos_thread_type_normal;
-	p->mos.cpu_home = -1;
+
+	/* We need to remove the commit placed on the CPU that called clone.
+	 * This occurred in core.c->sched_fork->__select_task_cpu. This needs
+	 * to be done prior to selecting the target CPU for this new thread
+	 * which occurs in core.c->wake_up_new_task.
+	 */
+	uncommit_cpu(p);
 
 	/*
 	 * We need to set the cpus allowed mask appropriately. If this is
@@ -3054,8 +3059,7 @@ static void task_fork_mos(struct task_struct *p)
 
 void mos_set_task_cpu(struct task_struct *p, int new_cpu)
 {
-	if (task_cpu(p) != new_cpu &&
-	    cpu_rq(new_cpu)->lwkcpu &&
+	if (cpu_rq(new_cpu)->lwkcpu &&
 	    p->mos_process &&
 	    new_cpu != p->mos.cpu_home) {
 		/* Release a previous commit if it exists */
