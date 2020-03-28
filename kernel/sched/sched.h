@@ -703,6 +703,8 @@ struct mos_sched_stats {
 	unsigned int sysc_migr;
 	unsigned int setaffinity;
 	unsigned int pushed;
+	unsigned int balance_to;
+	unsigned int balance_from;
 };
 
 struct mos_topology {
@@ -714,14 +716,19 @@ struct mos_topology {
 	int numa_id; /* numa domain where this CPU is located */
 };
 
+struct mos_process_t;
+
 struct mos_rq {
 	raw_spinlock_t lock;
 	struct mos_prio_array active;
+	cpumask_var_t reserved_cpus;
 	unsigned int mos_nr_running;
 	unsigned int rr_nr_running;
-	u64 mos_time;
+	unsigned int weight;
+	unsigned long tstamp_exit_idle;
+	unsigned long tstamp_overcommitted;
 	pid_t idle_pid; /* PID of the mOS idle task */
-	pid_t owner;
+	struct mos_process_t *owner;
 	struct task_struct *idle;
 	u64 mos_runtime;
 	atomic_t exclusive_pid; /* PID of an exclusive user */
@@ -748,6 +755,15 @@ struct mos_rq {
 
 	/* mwait API timer */
 	struct timer_list api_timer;
+
+	/* balancer fields */
+	int balancer;
+	int balancer_parm1;
+	int balancer_parm2;
+	int balancer_parm3;
+	struct hrtimer	balance_timer;
+	u64 last_balance;
+	bool balance_tick_started;
 
 	/* Scheduler statistics */
 	struct mos_sched_stats stats;

@@ -69,6 +69,7 @@
 #define MOS_NICE_DEFAULT -10
 
 #define CMCI_THRESHOLD_MAX	32767
+#define COMMIT_WARNING_THRESHOLD 1000
 
 /* Maximum supported number of active utility thread groups */
 #define UTIL_GROUP_LIMIT   4
@@ -90,6 +91,19 @@ enum SearchOrder {ForwardSearch = 0,
 enum CpusAllowedPerUtilThread {
 	AllowMultipleCpusPerUtilThread = 0,
 	AllowOnlyOneCpuPerUtilThread,
+};
+
+/* Balancer */
+#define BALANCER_PULL_DEFAULT_PARM1 100 /* idle timer tick frequency X ms */
+#define BALANCER_PULL_DEFAULT_PARM2  20 /* overcommit threshold X ms */
+#define BALANCER_PULL_DEFAULT_PARM3   0 /* idle time (us) before first pull action */
+#define BALANCER_PUSH_DEFAULT_PARM1  12 /* consider if target cpu load < (cpu load/(2**x)) */
+#define BALANCER_PUSH_DEFAULT_PARM2  20 /* consider if overcommit > X ms */
+#define BALANCER_PUSH_DEFAULT_PARM3  10 /* ms before allowing another push */
+enum BalancerType {
+	BalancerType_None = 0,
+	BalancerType_Pull,
+	BalancerType_Push,
 };
 
 static cpumask_var_t saved_wq_mask;
@@ -126,6 +140,11 @@ static void set_cpus_allowed_mos(struct task_struct *p,
 static inline struct task_struct *mos_task_of(struct sched_mos_entity *mos_se)
 {
 	return container_of(mos_se, struct task_struct, mos);
+}
+
+static inline struct rq *rq_of_mos_rq(struct mos_rq *mosrq)
+{
+	return container_of(mosrq, struct rq, mos);
 }
 
 static inline struct mos_rq *mos_rq_of_rq(struct rq *rq)
@@ -183,6 +202,8 @@ static void sched_stats_prepare_launch(struct mos_sched_stats *stats)
 	stats->sysc_migr = 0;
 	stats->setaffinity = 0;
 	stats->pushed = 0;
+	stats->balance_to = 0;
+	stats->balance_from = 0;
 }
 
 
@@ -308,20 +329,27 @@ static void init_mos_rq(struct rq *rq)
 	raw_spin_lock_init(&mos_rq->lock);
 	mos_rq->mos_nr_running = 0;
 	mos_rq->rr_nr_running = 0;
-	mos_rq->mos_time = 0;
 	mos_rq->mos_runtime = 0;
+	mos_rq->tstamp_exit_idle = 0;
+	mos_rq->tstamp_overcommitted = 0;
 	mos_rq->idle_pid = 0;
 	mos_rq->idle = NULL;
 	mos_rq->utility_commits = 0;
 	mos_rq->compute_commits = 0;
-	mos_rq->owner = 0;
+	mos_rq->owner = NULL;
+	mos_rq->balancer = BalancerType_None;
+	mos_rq->balancer_parm1 = 0;
+	mos_rq->balancer_parm2 = 0;
+	mos_rq->balancer_parm3 = 0;
 	atomic_set(&mos_rq->exclusive_pid, 0);
 	/* Initialize mwait flags based on our processor capabilities */
 	mos_rq->mwait_supported = mwait_supported;
 	mos_rq->deep_sleep_mwait = deep_sleep_mwait;
 	mos_rq->shallow_sleep_mwait = shallow_sleep_mwait;
-	mos_rq->idle_mechanism = Idle_Mechanism_MWAIT;
+	mos_rq->idle_mechanism = mwait_supported ? Idle_Mechanism_MWAIT :
+						   Idle_Mechanism_HALT;
 	mos_rq->idle_boundary = Idle_Boundary_RESERVED;
+	zalloc_cpumask_var(&mos_rq->reserved_cpus, GFP_KERNEL);
 
 	sched_stats_init(&mos_rq->stats);
 }
@@ -345,13 +373,14 @@ static void uncommit_cpu(struct task_struct *p)
 	struct mos_rq *mos_rq;
 	int cpu = p->mos.cpu_home;
 	int underflow = 0;
+	unsigned long flags;
 
 	if (cpu < 0)
 		return;
 	mos_rq = &cpu_rq(cpu)->mos;
 	p->mos.cpu_home = -1;
 
-	raw_spin_lock(&mos_rq->lock);
+	raw_spin_lock_irqsave(&mos_rq->lock, flags);
 	if (p->mos.thread_type == mos_thread_type_normal) {
 		if (mos_rq->compute_commits > 0)
 			mos_rq->compute_commits--;
@@ -364,7 +393,7 @@ static void uncommit_cpu(struct task_struct *p)
 		else
 			underflow = 1;
 	}
-	raw_spin_unlock(&mos_rq->lock);
+	raw_spin_unlock_irqrestore(&mos_rq->lock, flags);
 
 	trace_mos_cpu_uncommit(p, cpu, mos_rq->compute_commits,
 				mos_rq->utility_commits, underflow);
@@ -375,11 +404,12 @@ static void commit_cpu(struct task_struct *p, int cpu)
 	struct mos_rq *mos_rq;
 	unsigned int newval = 0;
 	int overflow = 0;
+	unsigned long flags;
 
 	if (cpu < 0)
 		return;
 	mos_rq = &cpu_rq(cpu)->mos;
-	raw_spin_lock(&mos_rq->lock);
+	raw_spin_lock_irqsave(&mos_rq->lock, flags);
 	if (p->mos.thread_type == mos_thread_type_normal) {
 		if (mos_rq->compute_commits < INT_MAX) {
 			newval = ++mos_rq->compute_commits;
@@ -395,7 +425,7 @@ static void commit_cpu(struct task_struct *p, int cpu)
 		} else
 			overflow = 1;
 	}
-	raw_spin_unlock(&mos_rq->lock);
+	raw_spin_unlock_irqrestore(&mos_rq->lock, flags);
 	p->mos.cpu_home = cpu;
 	trace_mos_cpu_commit(p, cpu, mos_rq->compute_commits,
 			     mos_rq->utility_commits, overflow);
@@ -571,6 +601,11 @@ static int _select_cpu_candidate(struct task_struct *p,
 		int n;
 		int match = 0;
 
+		if (commitment == COMMIT_WARNING_THRESHOLD) {
+			mos_ras(MOS_SCHEDULER_WARNING,
+				"%s: Excessive commit level depth=%d.",
+				__func__, commitment);
+		}
 		for (n = 0; n < num_slots_to_search; n++) {
 			struct mos_rq *mos_rq;
 			int cpu;
@@ -604,7 +639,7 @@ static int _select_cpu_candidate(struct task_struct *p,
 							     &util_commits);
 					commits = comp_commits + util_commits;
 				}
-				if (commits == commitment) {
+				if (commits <= commitment) {
 					int prev_pid = 0;
 
 					if (exclusive) {
@@ -1278,6 +1313,360 @@ static void clear_clone_hints(struct task_struct *p)
 	memset(&p->mos.clone_hints, 0, sizeof(struct mos_clone_hints));
 }
 
+static bool balance_pull(bool start_balance_timer, bool irqs_disabled_on_entry);
+
+static enum hrtimer_restart balance_tick(struct hrtimer *timer)
+{
+	struct mos_rq *mos_rq = container_of(timer, struct mos_rq, balance_timer);
+
+	trace_mos_balancer_tick(mos_rq);
+
+	/* Keep timer running if we are still in the idle task */
+	if (current != mos_rq->idle)
+		return HRTIMER_NORESTART;
+
+	balance_pull(false, true);
+
+	hrtimer_forward_now(timer, ms_to_ktime(mos_rq->balancer_parm1));
+	return HRTIMER_RESTART;
+}
+
+/* Returns true if the balance_tick timer was enabled */
+static inline bool start_balance_tick(struct mos_rq *mos_rq, uint64_t ktime)
+{
+	trace_mos_balancer_tick_start(mos_rq);
+	hrtimer_forward_now(&mos_rq->balance_timer, ktime);
+	hrtimer_start_expires(&mos_rq->balance_timer, HRTIMER_MODE_ABS_PINNED_HARD);
+	mos_rq->balance_tick_started = true;
+	return true;
+}
+
+static inline void stop_balance_tick(struct mos_rq *mos_rq)
+{
+	hrtimer_cancel(&mos_rq->balance_timer);
+	mos_rq->balance_tick_started = false;
+	trace_mos_balancer_tick_stop(mos_rq);
+}
+
+static bool balance_pull(bool start_balance_timer, bool irqs_disabled_on_entry)
+{
+	int cpu;
+	bool rc = 0;
+	struct rq *this_rq;
+	struct mos_rq *this_mos_rq;
+	struct mos_rq *max_mos_rq = NULL;
+	int this_cpu = smp_processor_id();
+	int pid = -1;
+	unsigned long current_time;
+	unsigned long max_weight = 0;
+	unsigned long overcommit_threshold;
+
+	this_rq = cpu_rq(this_cpu);
+	this_mos_rq = &(this_rq->mos);
+	/* Is balancing activated */
+	if (this_mos_rq->balancer != BalancerType_Pull)
+		/* Return, balancing is not active */
+		return rc;
+
+	/* Is there a process that has this CPU reserved? */
+	if (!this_mos_rq->owner)
+		/* Return. There is nothing to balance */
+		return rc;
+
+	if (start_balance_timer && this_mos_rq->balancer_parm3)
+		/* Delay doing a PULL until the balance timer pops */
+		goto start_timer;
+
+	/* Search run queues to see if we can help balance the load. We can
+	 * do this without locking the target queue. Once we find a likely
+	 * candidate, we will then lock down both run queues involved.
+	 */
+	overcommit_threshold = ms_to_ktime(this_mos_rq->balancer_parm2);
+	current_time = sched_clock();
+	for_each_cpu(cpu, this_mos_rq->reserved_cpus) {
+		unsigned long delta_idle;
+		unsigned long delta_overcommit;
+		unsigned long weight = 0;
+		struct mos_rq *mos_rq = &cpu_rq(cpu)->mos;
+		unsigned long tstamp_overcommitted =
+						   mos_rq->tstamp_overcommitted;
+		unsigned long tstamp_exit_idle = mos_rq->tstamp_exit_idle;
+		unsigned int rr_nr_running = READ_ONCE(mos_rq->rr_nr_running);
+
+
+		/* Are we not overcommitted or have not ever left the idle state
+		 * or not more than 1 running lwk thread
+		 */
+		if (!mos_rq->tstamp_overcommitted ||
+		    !mos_rq->tstamp_exit_idle || (rr_nr_running < 2))
+			continue;
+
+		/* Calculate the time since the CPU last exited idle */
+		delta_idle = (current_time > tstamp_exit_idle) ?
+			(current_time - tstamp_exit_idle) : 0;
+		/* Calculate the time that the CPU has been overcommitted */
+		delta_overcommit = (current_time > tstamp_overcommitted) ?
+		(current_time - tstamp_overcommitted) : 0;
+
+		weight = (rr_nr_running - 1) * delta_idle;
+		/* Have we been over-committed beyond the threshold time? */
+		if (delta_overcommit > overcommit_threshold) {
+			if (weight > max_weight) {
+				max_weight = weight;
+				max_mos_rq = mos_rq;
+			}
+		}
+	}
+	/* Did we find a candidate? */
+	if (max_mos_rq) {
+		int rq_index;
+		struct mos_prio_array *src_queue_array;
+		struct list_head *src_queue;
+		struct sched_mos_entity *mos_se;
+		struct task_struct *p;
+		struct rq *max_rq = rq_of_mos_rq(max_mos_rq);
+		int max_cpu = cpu_of(max_rq);
+
+		/*
+		 * Pull a task from max_rq to our mos_rq
+		 *
+		 * We need to lock both run queues. In order to avoid a deadlock
+		 * lock each run queue in a consistent order.
+		 */
+		if (!irqs_disabled_on_entry)
+			local_irq_disable();
+
+		if (this_rq < max_rq)
+			double_rq_lock(this_rq, max_rq);
+		else
+			double_rq_lock(max_rq, this_rq);
+
+		rq_index = mos_rq_index(MOS_DEFAULT_PRIO);
+		src_queue_array = &max_mos_rq->active;
+		src_queue = src_queue_array->queue + rq_index;
+
+		/* Need to directly test this queue after acquiring the rq
+		 * lock for two reasons:
+		 * 1. Conditions may have changed since the first test when
+		 *    we did not hold the rq lock
+		 * 2. If non-default priorities were used, the additional
+		 *    threads indicated by mos_nr_running may be attributed to
+		 *    queues associated with different priorities. Unlikely but
+		 *    possible.
+		 */
+		if (list_empty(src_queue))
+			goto unlock;
+		if (list_is_singular(src_queue))
+			goto unlock;
+
+
+		/* Choose a non-running task on the src queue that is allowed to
+		 * run on our CPU.
+		 */
+		list_for_each_entry(mos_se, src_queue, run_list) {
+			p = mos_task_of(mos_se);
+			if (!task_current(max_rq, p) &&
+			    cpumask_test_cpu(this_cpu, p->cpus_ptr)) {
+				pid = p->pid;
+				break;
+			}
+		}
+		/* Did we find a task for balancing */
+		if (pid == -1)
+			goto unlock;
+
+		trace_mos_balance(pid, max_cpu, this_cpu, max_weight, 0);
+		max_mos_rq->stats.balance_from++;
+		this_mos_rq->stats.balance_to++;
+
+		/* Change the CPU commit and move thread. */
+		deactivate_task(max_rq, p, 0);
+		set_task_cpu(p, this_cpu);
+		activate_task(this_rq, p, 0);
+
+		/* Avoid entering idle on return and run newly acquired task */
+		resched_curr(this_rq);
+
+unlock:
+		if (this_rq > max_rq)
+			double_rq_unlock(this_rq, max_rq);
+		else
+			double_rq_unlock(max_rq, this_rq);
+
+		if (!irqs_disabled_on_entry)
+			local_irq_enable();
+
+	}
+start_timer:
+	/* If balancing is allowed and no task was pulled to be dispatched,
+	 * enable the balance timer
+	 */
+	if (start_balance_timer &&
+	    !this_mos_rq->balance_tick_started && /* Is tick not running */
+	    !need_resched() && /* Are we staying in idle loop */
+	    (pid == -1))   /* Did we not pull a thread onto this CPU */
+		rc = start_balance_tick(this_mos_rq,
+					this_mos_rq->balancer_parm3 * 1000);
+	return rc;
+}
+
+static bool balance_push(struct rq *this_rq)
+{
+	int cpu, this_cpu;
+	bool rc = 0;
+	struct mos_rq *this_mos_rq;
+	struct mos_rq *min_mos_rq = NULL;
+	int pid = -1;
+	unsigned long this_load;
+	unsigned long delta_overcommit;
+	unsigned long time_since_idle;
+	unsigned long cur_time;
+	unsigned long min_load = -1;
+	unsigned long overcommit_threshold, load_delta_threshold;
+	unsigned long throttle;
+	struct mos_process_t *mosp;
+
+	this_cpu = cpu_of(this_rq);
+	this_mos_rq = &(this_rq->mos);
+	mosp = this_mos_rq->owner;
+	throttle = ms_to_ktime(mosp->balancer_parm3);
+
+	/* Are we overcommitted */
+	if (this_mos_rq->rr_nr_running <= 1)
+		return rc;
+	load_delta_threshold = this_mos_rq->balancer_parm1;
+	overcommit_threshold = ms_to_ktime(this_mos_rq->balancer_parm2);
+	cur_time = sched_clock();
+	/* Have we been running overcommitted beyond threshold amount of time */
+	delta_overcommit = (cur_time > this_mos_rq->tstamp_overcommitted) ?
+		(cur_time - this_mos_rq->tstamp_overcommitted) : 0;
+	if (delta_overcommit < overcommit_threshold)
+		return rc;
+	time_since_idle = (cur_time > this_mos_rq->tstamp_exit_idle) ?
+	 (cur_time - this_mos_rq->tstamp_exit_idle) : 0;
+	this_load = this_mos_rq->rr_nr_running * time_since_idle;
+
+	/* We do not want multiple overcommitted CPUs deciding to push their
+	 * work all to the same CPU. Obtain a process-scoped balancer lock.
+	 * Process scoping this lock only works because we never have more than
+	 * one mOS process thread running on any given LWK CPU. If this design
+	 * ever changes, this lock design will need to be changed
+	 */
+	if (!mosp)
+		return rc;
+	raw_spin_unlock(&this_rq->lock);
+	raw_spin_lock(&mosp->balancer_lock);
+
+	/* Search run queues to see if we can reduce the load on this CPU. We
+	 * can do this without locking the target queue. Once we find a likely
+	 * candidate, we will then lock down both run queues involved.
+	 */
+	for_each_cpu_wrap(cpu, this_mos_rq->reserved_cpus, this_cpu) {
+		unsigned long load = -1;
+		struct mos_rq *mos_rq = &cpu_rq(cpu)->mos;
+		unsigned long exit_idle_tstamp = mos_rq->tstamp_exit_idle;
+		unsigned long delta_idle = 1;
+
+		if (cpu == this_cpu)
+			continue;
+		/* Was this CPU a recent target of a push from another CPU?
+		 * If so, we dont want to gang up on this CPU since it recently
+		 * took on addtional work that has not yet be realized
+		 */
+		if (mos_rq->last_balance + throttle > cur_time)
+			continue;
+		/* Calculate the time since the CPU last exited idle */
+		if (exit_idle_tstamp && (cur_time > exit_idle_tstamp))
+			delta_idle = cur_time - exit_idle_tstamp;
+		load = mos_rq->rr_nr_running * delta_idle;
+		if ((load < (this_load >> load_delta_threshold)) &&
+		     (load < min_load)) {
+			min_load = load;
+			min_mos_rq = mos_rq;
+			if (!load)
+				break; /* No reason to continue the search */
+		}
+	}
+	/* Did we find a candidate? */
+	if (min_mos_rq) {
+		int rq_index;
+		struct mos_prio_array *src_queue_array;
+		struct list_head *src_queue;
+		struct sched_mos_entity *mos_se;
+		struct task_struct *p;
+		struct rq *min_rq = rq_of_mos_rq(min_mos_rq);
+		int min_cpu = cpu_of(min_rq);
+
+		/*
+		 * Push a task from our mos_rq to the min_rq
+		 *
+		 * We need to lock both run queues. In order to avoid a deadlock
+		 * lock each run queue in a consistent order. The rq passed in
+		 * to this function is already locked. We could be smarter and
+		 * avoid unlock 50% of the time, however this is complicated
+		 * by the Linux caller saving/restoring rq flags using
+		 * rq_lock()/rq_unlock()
+		 */
+		if (this_rq < min_rq)
+
+			double_rq_lock(this_rq, min_rq);
+		else
+			double_rq_lock(min_rq, this_rq);
+
+		rq_index = mos_rq_index(MOS_DEFAULT_PRIO);
+		src_queue_array = &this_mos_rq->active;
+		src_queue = src_queue_array->queue + rq_index;
+
+		/* Choose a non-running task on our src queue that is allowed to
+		 * run on the targeted CPU.
+		 */
+		list_for_each_entry(mos_se, src_queue, run_list) {
+			p = mos_task_of(mos_se);
+			if (!task_current(this_rq, p) &&
+			    cpumask_test_cpu(min_cpu, p->cpus_ptr)) {
+				pid = p->pid;
+				break;
+			}
+		}
+		/* Did we find a task for balancing */
+		if (pid == -1)
+			goto unlock;
+
+		min_mos_rq->last_balance = sched_clock();
+		trace_mos_balance(pid, this_cpu, min_cpu, this_load, min_load);
+		min_mos_rq->stats.balance_to++;
+		this_mos_rq->stats.balance_from++;
+
+		/* Change the CPU commit and move thread. */
+		deactivate_task(this_rq, p, 0);
+		set_task_cpu(p, min_cpu);
+		activate_task(min_rq, p, 0);
+
+		/* Poke the target CPU */
+		resched_curr(min_rq);
+
+unlock:
+		/*
+		 * We need to unlock both run queues. To avoid a deadlock
+		 * unlock each run queue in a consistent order. The rq passed in
+		 * to this function is already locked. We could be smarter and
+		 * avoid the extra unlock 50% of the time, however this is
+		 * complicated  by the Linux caller saving/restoring rq flags
+		 * using rq_lock()/rq_unlock()
+		 */
+
+		if (this_rq > min_rq)
+			double_rq_unlock(this_rq, min_rq);
+		else
+			double_rq_unlock(min_rq, this_rq);
+
+	}
+	/* Return with the same lock state in entry. */
+	raw_spin_unlock(&mosp->balancer_lock);
+	raw_spin_lock(&this_rq->lock);
+	return rc;
+}
+
 static inline void mos_idle_poll_halt_wait(struct mos_rq *mos_rq, int cpu)
 {
 	unsigned long ecx, eax;
@@ -1347,6 +1736,7 @@ static int mos_idle_main(void *data)
 	int cpu = (int)(unsigned long) data;
 	struct rq *rq;
 	struct mos_rq *mos_rq;
+	bool balance_tick_enabled = false;
 
 	rq = cpu_rq(cpu);
 	mos_rq = &(rq->mos);
@@ -1364,6 +1754,8 @@ static int mos_idle_main(void *data)
 	while (rq->lwkcpu) {
 		__current_set_polling();
 		tick_nohz_idle_enter();
+		balance_tick_enabled = balance_pull(true, false);
+
 
 		while (!need_resched() && rq->lwkcpu) {
 			rmb(); /* sync need_resched and polling settings */
@@ -1380,12 +1772,16 @@ static int mos_idle_main(void *data)
 				mos_idle_poll_halt_wait(mos_rq, cpu);
 			arch_cpu_idle_exit();
 		}
+		mos_rq->tstamp_exit_idle = sched_clock();
+
 		/*
 		 * Since we fell out of the loop above, we know
 		 * TIF_NEED_RESCHED must be set, propagate it into
 		 * PREEMPT_NEED_RESCHED.
 		 */
 		preempt_set_need_resched();
+		if (balance_tick_enabled)
+			stop_balance_tick(mos_rq);
 		tick_nohz_idle_exit();
 		__current_clr_polling();
 		/*
@@ -1484,34 +1880,39 @@ static void idle_task_prepare(int cpu)
 void mos_sched_prepare_launch(void)
 {
 	int cpu;
+	struct mos_process_t *mos_process = current->mos_process;
 
-	for_each_cpu(cpu, current->mos_process->lwkcpus) {
+	for_each_cpu(cpu, mos_process->lwkcpus) {
 
-		struct mos_rq *mos = &cpu_rq(cpu)->mos;
+		struct mos_rq *mos_rq = &cpu_rq(cpu)->mos;
 
 		/* initialize mos run queue */
-		mos->compute_commits = 0;
-		mos->utility_commits = 0;
-		atomic_set(&mos->exclusive_pid, 0);
-		sched_stats_prepare_launch(&mos->stats);
+		mos_rq->compute_commits = 0;
+		mos_rq->utility_commits = 0;
+		atomic_set(&mos_rq->exclusive_pid, 0);
+		sched_stats_prepare_launch(&mos_rq->stats);
 
 		/* Set the owning process */
-		mos->owner = current->tgid;
+		mos_rq->owner = current->mos_process;
 
 		/* Set the requested idle control */
-		mos->idle_mechanism = current->mos_process->idle_mechanism;
-		mos->idle_boundary = current->mos_process->idle_boundary;
-		mos->mwait_supported = mwait_supported;
-		mos->mwait_tlbs_flushed = mwait_deep_sleep_tlbs_flushed;
+		mos_rq->idle_mechanism = mos_process->idle_mechanism;
+		mos_rq->idle_boundary = mos_process->idle_boundary;
+		mos_rq->balancer = mos_process->balancer;
+		mos_rq->balancer_parm1 = mos_process->balancer_parm1;
+		mos_rq->balancer_parm2 = mos_process->balancer_parm2;
+		mos_rq->balancer_parm3 = mos_process->balancer_parm3;
+		mos_rq->mwait_supported = mwait_supported;
+		mos_rq->mwait_tlbs_flushed = mwait_deep_sleep_tlbs_flushed;
+		cpumask_copy(mos_rq->reserved_cpus, mos_process->lwkcpus);
 	}
 	smp_mb(); /* idle tasks need to see the current owner */
 
-	for_each_cpu(cpu, current->mos_process->lwkcpus)
+	for_each_cpu(cpu, mos_process->lwkcpus)
 		idle_task_prepare(cpu); /* prepare the idle task */
 
 	/* Save the original cpus_allowed mask */
-	cpumask_copy(current->mos_process->original_cpus_allowed,
-		     current->cpus_ptr);
+	cpumask_copy(mos_process->original_cpus_allowed, current->cpus_ptr);
 }
 
 static int lwksched_process_init(struct mos_process_t *mosp)
@@ -1528,6 +1929,11 @@ static int lwksched_process_init(struct mos_process_t *mosp)
 	mosp->enable_rr = MOS_TIMESLICE;
 	mosp->disable_setaffinity = 0;
 	mosp->sched_stats = 0;
+	mosp->balancer = BalancerType_None;
+	mosp->balancer_parm1 = 0;
+	mosp->balancer_parm2 = 0;
+	mosp->balancer_parm3 = 0;
+	raw_spin_lock_init(&mosp->balancer_lock);
 	INIT_LIST_HEAD(&mosp->util_list);
 	mutex_init(&mosp->util_list_lock);
 	mosp->max_cpus_for_util = -1;
@@ -1613,10 +2019,12 @@ static void stats_summarize(struct mos_sched_stats *pstats,
 		pstats->sysc_migr += stats->sysc_migr;
 		pstats->setaffinity += stats->setaffinity;
 		pstats->pushed += stats->pushed;
+		pstats->balance_from += stats->balance_from;
+		pstats->balance_to += stats->balance_to;
 		if (((detail_level == 1) &&
 		    (stats->max_compute_level > 1)) ||
 		    (detail_level > 2)) {
-			pr_info("mOS-sched: PID=%d cpuid=%2d max_compute=%d max_util=%d max_running=%d guest_dispatch=%d timer_pop=%d setaffinity=%d sysc_migr=%d pushed=%d\n",
+			pr_info("mOS-sched: PID=%d cpuid=%2d max_compute=%d max_util=%d max_running=%d guest_dispatch=%d timer_pop=%d setaffinity=%d balance_from=%d balance_to=%d pushed=%d sysc_migr=%d\n",
 				tgid, cpu,
 				stats->max_compute_level,
 				stats->max_util_level,
@@ -1624,8 +2032,11 @@ static void stats_summarize(struct mos_sched_stats *pstats,
 				stats->guest_dispatch,
 				stats->timer_pop,
 				stats->setaffinity,
-				stats->sysc_migr,
-				stats->pushed);
+				stats->balance_from,
+				stats->balance_to,
+				stats->pushed,
+				stats->sysc_migr
+			    );
 		}
 	}
 }
@@ -1652,7 +2063,7 @@ static void sched_stats_summarize(struct mos_process_t *mosp)
 		if (((detail_level ==  1) &&
 		    (pstats.max_compute_level > 1)) ||
 		    (detail_level > 1))
-			pr_info("mOS-sched: PID=%d threads=%d cpus=%2d max_compute=%d max_util=%d max_running=%d guest_dispatch=%d timer_pop=%d setaffinity=%d sysc_migr=%d pushed=%d\n",
+			pr_info("mOS-sched: PID=%d threads=%d cpus=%2d max_compute=%d max_util=%d max_running=%d guest_dispatch=%d timer_pop=%d setaffinity=%d balancer_actions=%d pushed=%d sysc_migr=%d\n",
 			tgid,
 			atomic_read(&mosp->threads_created)+1,
 			cpus,
@@ -1662,8 +2073,9 @@ static void sched_stats_summarize(struct mos_process_t *mosp)
 			pstats.guest_dispatch,
 			pstats.timer_pop,
 			pstats.setaffinity,
-			pstats.sysc_migr,
-			pstats.pushed);
+			pstats.balance_from,
+			pstats.pushed,
+			pstats.sysc_migr);
 		if (detail_level > 1) {
 			int i;
 
@@ -1856,6 +2268,84 @@ static int lwksched_one_cpu_per_util(const char *val,
 	return 0;
 }
 
+static int lwksched_enable_balancer(const char *val,
+				     struct mos_process_t *mosp)
+{
+	int rc = -EINVAL;
+	unsigned int balancer_parm1, balancer_parm2, balancer_parm3;
+	char *balancer_type;
+	char *balancer_parms_st;
+	char *balancer_parm1_st;
+	char *balancer_parm2_st;
+	char *balancer_parm3_st;
+
+	if (!val) {
+		mosp->balancer = BalancerType_Pull;
+		mosp->balancer_parm1 = BALANCER_PULL_DEFAULT_PARM1;
+		mosp->balancer_parm2 = BALANCER_PULL_DEFAULT_PARM2;
+		mosp->balancer_parm3 = BALANCER_PULL_DEFAULT_PARM3;
+		return 0;
+	}
+	balancer_parms_st = kstrdup(val, GFP_KERNEL);
+	if (!balancer_parms_st)
+		return -ENOMEM;
+	balancer_type = strsep(&balancer_parms_st, ",");
+	if (!strcmp(balancer_type, "pull")) {
+		mosp->balancer = BalancerType_Pull;
+		mosp->balancer_parm1 = BALANCER_PULL_DEFAULT_PARM1;
+		mosp->balancer_parm2 = BALANCER_PULL_DEFAULT_PARM2;
+		mosp->balancer_parm3 = BALANCER_PULL_DEFAULT_PARM3;
+	} else if (!strcmp(balancer_type, "push")) {
+		mosp->balancer = BalancerType_Push;
+		mosp->balancer_parm1 = BALANCER_PUSH_DEFAULT_PARM1;
+		mosp->balancer_parm2 = BALANCER_PUSH_DEFAULT_PARM2;
+		mosp->balancer_parm3 = BALANCER_PUSH_DEFAULT_PARM3;
+	} else {
+		mos_ras(MOS_SCHEDULER_ERROR, "%s: Invalid balance type (%s).",
+		    __func__, balancer_type);
+		goto leave;
+	}
+	if (balancer_parms_st) {
+		balancer_parm2_st = balancer_parms_st;
+		balancer_parm1_st = strsep(&balancer_parm2_st, ",");
+
+		if (kstrtou32(balancer_parm1_st, 0, &balancer_parm1)) {
+			mos_ras(MOS_SCHEDULER_ERROR,
+				"%s: Illegal balance parameter (%s).",
+				__func__, balancer_parm1_st);
+			goto leave;
+		}
+		mosp->balancer_parm1 = balancer_parm1;
+		if (balancer_parm2_st) {
+			balancer_parm3_st = balancer_parm2_st;
+			balancer_parm2_st = strsep(&balancer_parm3_st, ",");
+
+			if (kstrtou32(balancer_parm2_st, 0, &balancer_parm2)) {
+				mos_ras(MOS_SCHEDULER_ERROR,
+					"%s: Illegal balance parameter (%s).",
+					__func__, balancer_parm2_st);
+				goto leave;
+			}
+			mosp->balancer_parm2 = balancer_parm2;
+			if (balancer_parm3_st) {
+				if (kstrtou32(balancer_parm3_st, 0,
+						&balancer_parm3)) {
+					mos_ras(MOS_SCHEDULER_ERROR,
+					"%s: Illegal balance parameter (%s).",
+						__func__, balancer_parm3_st);
+					goto leave;
+				}
+				mosp->balancer_parm3 = balancer_parm3;
+			}
+		}
+	}
+	rc = 0;
+leave:
+	kfree(balancer_type);
+	return rc;
+}
+
+
 static int lwksched_idle_control(const char *val, struct mos_process_t *mosp)
 {
 	char *mechanism_str = NULL;
@@ -1980,6 +2470,8 @@ static int __init lwksched_mod_init(void)
 				     lwksched_idle_control);
 	mos_register_option_callback("cmci-control",
 				     lwksched_cmci_control);
+	mos_register_option_callback("enable-balancer",
+				     lwksched_enable_balancer);
 	return 0;
 }
 
@@ -2005,10 +2497,18 @@ static int timer_init(cpumask_var_t lwkcpus)
 	for_each_cpu(cpu, lwkcpus) {
 
 		struct mos_rq *mos_rq = &(cpu_rq(cpu)->mos);
-		struct timer_list *t = &mos_rq->api_timer;
+		struct timer_list *t;
 
+		/* Setup the mwait API timer */
+		t = &mos_rq->api_timer;
 		timer_setup(t, mos_timer_fn, TIMER_PINNED);
 		mos_rq->api_timeout = 0;
+
+		/* Setup the balancer timer */
+		hrtimer_init(&mos_rq->balance_timer, CLOCK_MONOTONIC,
+			     HRTIMER_MODE_ABS_PINNED);
+		mos_rq->balance_timer.function = balance_tick;
+		mos_rq->balance_tick_started = false;
 	}
 	return 0;
 }
@@ -2175,6 +2675,8 @@ int mos_sched_exit(void)
 
 		total_guests += mos->stats.guests;
 		total_givebacks += mos->stats.givebacks;
+
+		free_cpumask_var(mos->reserved_cpus);
 	}
 	pr_info("mOS-sched: Giving back %d of %d assimilated tasks.\n",
 				total_givebacks, total_guests);
@@ -2590,6 +3092,8 @@ static void update_curr_mos(struct rq *rq)
 	schedstat_set(curr->se.statistics.exec_max,
 		      max(curr->se.statistics.exec_max, delta_exec));
 
+	curr->se.prev_sum_exec_runtime = curr->se.sum_exec_runtime;
+
 	curr->se.sum_exec_runtime += delta_exec;
 
 	curr->se.exec_start = rq_clock_task(rq);
@@ -2615,8 +3119,12 @@ enqueue_task_mos(struct rq *rq, struct task_struct *p, int flags)
 	if (mos_rq->mos_nr_running > mos_rq->stats.max_running)
 		mos_rq->stats.max_running = mos_rq->mos_nr_running;
 
-	if (p->policy == SCHED_RR)
-		mos_rq->rr_nr_running++;
+	if (p->policy == SCHED_RR) {
+		/* Are we trasitioning into an overcommmitted condition */
+		if (mos_rq->rr_nr_running++ == 1)
+			/* timestamp when we became overcommitted */
+			mos_rq->tstamp_overcommitted = sched_clock();
+	}
 
 	add_nr_running(rq, 1);
 
@@ -2643,7 +3151,8 @@ static void dequeue_task_mos(struct rq *rq, struct task_struct *p, int flags)
 		sub_nr_running(rq, 1);
 
 		if (p->policy == SCHED_RR)
-			mos_rq->rr_nr_running--;
+			if (mos_rq->rr_nr_running-- == 2)
+				mos_rq->tstamp_overcommitted = 0;
 	}
 }
 
@@ -2808,14 +3317,25 @@ static void set_next_task_mos(struct rq *rq, struct task_struct *p, bool first)
 	p->se.exec_start = rq_clock_task(rq);
 }
 
+/*
+ * With NOHZ_FULL active, calls to the following function may be from a
+ * Linux CPU targeting an LWK CPU's run-queue. These remote calls will be made
+ * from an unbound kworker task.
+ */
 static void task_tick_mos(struct rq *rq, struct task_struct *p, int queued)
 {
 	struct sched_mos_entity *mos_se = &p->mos;
 
 	update_curr_mos(rq);
-	if (rq->lwkcpu) {
+	/*
+	 * Only trace conditions that are of interest. We do not want to
+	 * flood the trace buffers with entries we do not care about
+	 */
+	if (rq->lwkcpu && /* Is the target rq associated with an LWK CPU */
+	    rq->mos.owner /* Is there an lwk proc that has this CPU reserved */
+	    ) {
 		rq->mos.stats.timer_pop++;
-		trace_mos_timer_tick(p);
+		trace_mos_timer_tick(p, cpu_of(rq));
 	}
 	/*
 	 * mOS tasks with timesliced enabled is essentially
@@ -2823,7 +3343,8 @@ static void task_tick_mos(struct rq *rq, struct task_struct *p, int queued)
 	 * value in the policy field to distinguish this from
 	 * the normal non-timesliced behavior which is
 	 * represented by the SCHED_FIFO value in the policy
-	 * field of the mOS task.
+	 * field of the mOS task. Note that the mOS Idle task will never present
+	 * itself as SCHED_RR
 	 */
 	if (rq->lwkcpu && p->policy != SCHED_RR)
 		return;
@@ -2831,16 +3352,19 @@ static void task_tick_mos(struct rq *rq, struct task_struct *p, int queued)
 	if (--p->mos.time_slice)
 		return;
 
+	if ((mos_se->run_list.prev != mos_se->run_list.next) &&
+	    (rq->mos.balancer == BalancerType_Push))
+		balance_push(rq);
+
 	p->mos.time_slice = p->mos.orig_time_slice;
 
 	/*
-	 * Requeue to the end of queue if we are not
+	 * Optionally balance and requeue to the end of queue if we are not
 	 * the only element on the queue.
 	 */
 	if (mos_se->run_list.prev != mos_se->run_list.next) {
 		requeue_task_mos(rq, p, 0);
 		resched_curr(rq);
-		return;
 	}
 }
 
@@ -2903,8 +3427,13 @@ static void task_fork_mos(struct task_struct *p)
 
 	p->prio = current->prio;
 	p->normal_prio = current->prio;
-	p->mos.thread_type = mos_thread_type_normal;
-	p->mos.cpu_home = -1;
+
+	/* We need to remove the commit placed on the CPU that called clone.
+	 * This occurred in core.c->sched_fork->__select_task_cpu. This needs
+	 * to be done prior to selecting the target CPU for this new thread
+	 * which occurs in core.c->wake_up_new_task.
+	 */
+	uncommit_cpu(p);
 
 	/*
 	 * We need to set the cpus allowed mask appropriately. If this is
@@ -2962,8 +3491,7 @@ static void task_fork_mos(struct task_struct *p)
 
 void mos_set_task_cpu(struct task_struct *p, int new_cpu)
 {
-	if (task_cpu(p) != new_cpu &&
-	    cpu_rq(new_cpu)->lwkcpu &&
+	if (cpu_rq(new_cpu)->lwkcpu &&
 	    p->mos_process &&
 	    new_cpu != p->mos.cpu_home) {
 		/* Release a previous commit if it exists */

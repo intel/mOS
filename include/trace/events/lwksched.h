@@ -214,23 +214,86 @@ TRACE_EVENT(mos_clone_cpu_assign,
  */
 TRACE_EVENT(mos_timer_tick,
 
-	TP_PROTO(struct task_struct *p),
+	TP_PROTO(struct task_struct *p, int cpu),
 
-	TP_ARGS(p),
+	TP_ARGS(p, cpu),
 
 	TP_STRUCT__entry(
 		__field(int, policy)
 		__field(int, nr_cpus)
+		__field(int, cpu)
 	),
 
 	TP_fast_assign(
 		__entry->policy	= p->policy;
 		__entry->nr_cpus = p->nr_cpus_allowed;
+		__entry->cpu = cpu;
 	),
 
-	TP_printk("policy=%d:%s num cpus allowed=%d",
+	TP_printk("cpu=%d policy=%d:%s num cpus allowed=%d",
+		__entry->cpu,
 		__entry->policy, mos_show_sched_policy(__entry->policy),
 		__entry->nr_cpus)
+);
+
+/*
+ * Tracepoint for balance tick
+ */
+TRACE_EVENT(mos_balancer_tick,
+
+	TP_PROTO(struct mos_rq *mos_rq),
+
+	TP_ARGS(mos_rq),
+
+	TP_STRUCT__entry(
+		__field(unsigned int, period)
+	),
+
+	TP_fast_assign(
+		__entry->period = mos_rq->balancer_parm1;
+	),
+
+	TP_printk("current period(ns)=%d", __entry->period)
+);
+
+/*
+ * Tracepoint for balance tick start
+ */
+TRACE_EVENT(mos_balancer_tick_start,
+
+	TP_PROTO(struct mos_rq *mos_rq),
+
+	TP_ARGS(mos_rq),
+
+	TP_STRUCT__entry(
+		__field(unsigned int, period)
+	),
+
+	TP_fast_assign(
+		__entry->period = mos_rq->balancer_parm1;
+	),
+
+	TP_printk("period(ms)=%d", __entry->period)
+);
+
+/*
+ * Tracepoint for balance tick stop
+ */
+TRACE_EVENT(mos_balancer_tick_stop,
+
+	TP_PROTO(struct mos_rq *mos_rq),
+
+	TP_ARGS(mos_rq),
+
+	TP_STRUCT__entry(
+		__field(unsigned int, period)
+	),
+
+	TP_fast_assign(
+		__entry->period = mos_rq->balancer_parm1;
+	),
+
+	TP_printk("period(ms)=%d", __entry->period)
 );
 
 
@@ -579,8 +642,39 @@ TRACE_EVENT(mos_mwait_api_exit,
 		__entry->eax = eax;
 	),
 
-	TP_printk(".d..Leave MWAIT ecx=%08x eax=%08x",
+	TP_printk("...Leave MWAIT ecx=%08x eax=%08x",
 			__entry->ecx, __entry->eax)
+);
+
+/*
+ * Balancer migration action
+ */
+TRACE_EVENT(mos_balance,
+
+	TP_PROTO(int pid, unsigned int from_cpu, unsigned int to_cpu, unsigned long src_load, unsigned long tgt_load),
+
+	TP_ARGS(pid, from_cpu, to_cpu, src_load, tgt_load),
+
+	TP_STRUCT__entry(
+		__field(unsigned int, pid)
+		__field(unsigned int, from_cpu)
+		__field(unsigned int, to_cpu)
+		__field(unsigned long, src_load)
+		__field(unsigned long, tgt_load)
+	),
+
+	TP_fast_assign(
+		__entry->pid = pid;
+		__entry->from_cpu = from_cpu;
+		__entry->to_cpu = to_cpu;
+		__entry->src_load = src_load;
+		__entry->tgt_load = tgt_load;
+	),
+
+	TP_printk(
+	"Balancer moving pid=%d from cpu=%d -> cpu=%d, load=%lu -> %lu",
+			__entry->pid, __entry->from_cpu, __entry->to_cpu,
+			__entry->src_load, __entry->tgt_load)
 );
 
 #endif /* _TRACE_MOS_H */

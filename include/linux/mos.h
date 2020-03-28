@@ -132,6 +132,12 @@ struct mos_process_t {
 	bool mce_modifications_active;
 	/* Enabled round-robin threads. Value=timeslice in ms */
 	int enable_rr;
+	/* Enable the scheduler balancer */
+	unsigned int balancer;
+	unsigned int balancer_parm1;
+	unsigned int balancer_parm2;
+	unsigned int balancer_parm3;
+	raw_spinlock_t	balancer_lock;
 	/* Idle control fields */
 	int idle_mechanism;
 	int idle_boundary;
