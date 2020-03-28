@@ -143,6 +143,14 @@ static inline bool is_migration_mask_valid_mos(const cpumask_t *mask,
 	return false;
 }
 
+static inline void init_fork_mos(struct task_struct *p)
+{
+	p->mos.cpu_home = -1;
+	p->mos.thread_type = mos_thread_type_normal;
+	init_run_list_mos(p);
+	init_util_list_mos(p);
+}
+
 #else
 
 static inline void assimilate_mos(struct rq *rq, struct task_struct *p)
@@ -235,6 +243,9 @@ static inline bool is_migration_mask_valid_mos(const cpumask_t *mask,
 {
 	return false;
 }
+
+static inline void init_fork_mos(struct task_struct *p)
+{}
 
 #endif
 
