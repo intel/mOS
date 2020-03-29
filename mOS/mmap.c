@@ -253,7 +253,8 @@ asmlinkage long lwk_sys_mmap_pgoff(unsigned long addr, unsigned long len,
 			if (!(flags & (MAP_FIXED)))
 				addr = next_lwkmem_address(len, mosp);
 
-			if (addr <= TASK_SIZE - len) {
+			if (!offset_in_page(addr) &&
+			    (addr <= TASK_SIZE - len)) {
 				ret = allocate_blocks_fixed(addr, len, prot,
 					flags | MAP_FIXED, lwkmem_mmap);
 				goto done;

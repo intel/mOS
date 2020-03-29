@@ -525,7 +525,7 @@ static int lwkmem_process_init(struct mos_process_t *mosp)
 	mosp->heap_page_size = SZ_2M;
 	mosp->lwkmem_mmap_aligned_threshold = SZ_2M;
 	mosp->lwkmem_mmap_alignment = SZ_1G;
-	mosp->lwkmem_next_addr = 0x300000000000;
+	mosp->lwkmem_next_addr = TASK_SIZE_MAX;
 	mosp->brk_clear_len = 4096;
 	mosp->lwkmem_interleave_disable = false;
 	mosp->lwkmem_load_elf_segs = true;
@@ -2495,8 +2495,8 @@ static long build_lwkvma(enum lwkmem_kind_t knd, unsigned long addr,
 
 		info.flags = 0;
 		info.length = total_length;
-		info.low_limit = current->mm->mmap_legacy_base;
-		info.high_limit = TASK_SIZE;
+		info.low_limit = current->mm->mmap_base;
+		info.high_limit = TASK_SIZE_MAX;
 		info.align_mask = lwk_page_size[knd] - 1;
 		info.align_offset = 0;
 
@@ -3482,11 +3482,61 @@ int lwkmem_set_domain_info(struct mos_process_t *mos_p, enum lwkmem_type_t typ,
 unsigned long next_lwkmem_address(unsigned long len, struct mos_process_t *mosp)
 {
 
-	unsigned long addr;
+	struct mm_struct *mm = current->mm;
+	unsigned long addr, next, align = mosp->lwkmem_mmap_alignment;
+	unsigned long mmap_end;
 
-	addr = mosp->lwkmem_next_addr;
-	mosp->lwkmem_next_addr = roundup(mosp->lwkmem_next_addr + len,
-					 mosp->lwkmem_mmap_alignment);
+	/*
+	 * Linux mmaps grow top down from mmap_base since LWK process
+	 * do not use legacy map base. LWK uses bottom up range starting
+	 * mmap_base always. Even when the legacy mode is forced using
+	 * sysctl setting we use the same approach and not collide with
+	 * Linux mmaps that grow bottom up from mmap_legacy_base as we
+	 * check for overlaps every time we return a range from this
+	 * function.
+	 *
+	 * End of mOS mmap allocation range depends on how the heap is loaded.
+	 * a. If heap starts below mmap_base,
+	 *        there is nothing in between mOS mmap region and stack that
+	 *        grows top to bottom. So we pick end of user virtual address
+	 *        range as the possible end for mOS mmap region.
+	 *
+	 * b. If heap starts at or after mmap_base,
+	 *        mOS mmap region can grow until start of heap at max. If the
+	 *        interpreter is loaded in between that is ok and we still
+	 *        consider the start of brk as the end of mOS mmap region.
+	 *
+	 * In both the cases, end of mOS mmap region mmap_end is merely
+	 * theoritical upper limit of the region and actual end could be lesser
+	 * than that as it could overlap with growing stack or interpreter
+	 * loading. This is ok because the overlap checking code takes care
+	 * of stopping us when we reach the mmap_end after skipping overlaps.
+	 */
+	mmap_end = mm->start_brk < mm->mmap_base ? TASK_SIZE_MAX:mm->start_brk;
+
+	/*
+	 * We know that @lwkmem_next_addr will never reach TASK_SIZE_MAX,
+	 * so we use that as hint to start at mmap_base when we are here
+	 * for the first time.
+	 */
+	if (unlikely(mosp->lwkmem_next_addr == TASK_SIZE_MAX))
+		mosp->lwkmem_next_addr = mm->mmap_base;
+
+	next = mosp->lwkmem_next_addr;
+	do {
+		addr = next;
+		next = roundup(addr + len, align);
+
+		/* Check for overflow */
+		if (next < addr)
+			return -ENOMEM;
+
+	} while (next < mmap_end && find_vma_intersection(mm, addr, next));
+
+	if (next > mmap_end)
+		return -ENOMEM;
+
+	mosp->lwkmem_next_addr = next;
 	return addr;
 }
 
