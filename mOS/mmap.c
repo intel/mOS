@@ -35,6 +35,9 @@
 
 extern void list_vmas(struct mm_struct *mm);
 
+#define is_yod() (current->mos_process && \
+		  (current->mos_process->yod_mm == current->mm))
+
 static struct vm_area_struct *mos_find_vma(struct mm_struct *mm,
 					   unsigned long addr)
 {
@@ -138,7 +141,7 @@ asmlinkage long lwk_sys_mmap_pgoff(unsigned long addr, unsigned long len,
 	mosp = current->mos_process;
 	/* Let Linux deal with this, if it is not a mOS task */
 
-	if (!mosp || (mosp->lwkmem <= 0) ||
+	if (!mosp || (mosp->lwkmem <= 0) || is_yod() ||
 	    !(flags & MAP_ANONYMOUS) || (flags & MAP_SHARED)) {
 		ret = -ENOSYS;
 		goto out;
@@ -492,6 +495,9 @@ asmlinkage long lwk_sys_madvise(unsigned long addr, size_t len,
 
 	mos_p = current->mos_process;
 
+	if (is_yod())
+		return -ENOSYS;
+
 	if (!mos_p) {
 		mos_ras(MOS_LWKMEM_PROCESS_ERROR,
 			"%s: pid %d is not an mOS process.",
@@ -532,6 +538,9 @@ asmlinkage long lwk_sys_mbind(unsigned long start, unsigned long len,
 	struct vm_area_struct *vma;
 	struct mos_process_t *mosp = current->mos_process;
 	long ret = -ENOSYS;
+
+	if (is_yod())
+		return -ENOSYS;
 
 	if (!mosp) {
 		mos_ras(MOS_LWKMEM_PROCESS_ERROR,
@@ -646,6 +655,9 @@ asmlinkage long lwk_sys_mprotect(unsigned long start, size_t len_in,
 	long ret = -ENOSYS;
 	size_t len = round_up(len_in, PAGE_SIZE);
 
+	if (is_yod())
+		return -ENOSYS;
+
 	if (!mosp) {
 		mos_ras(MOS_LWKMEM_PROCESS_ERROR,
 			"%s: pid %d is not an mOS process.",
@@ -747,6 +759,9 @@ asmlinkage long lwk_sys_mremap(unsigned long addr, unsigned long old_len,
 	static int prot_flags[] = { PROT_READ, PROT_WRITE, PROT_EXEC };
 
 	mos_p = current->mos_process;
+
+	if (is_yod())
+		return -ENOSYS;
 
 	if (!mos_p) {
 		mos_ras(MOS_LWKMEM_PROCESS_ERROR,
@@ -891,6 +906,9 @@ asmlinkage long lwk_sys_mos_get_addr_info(unsigned long addr,
 	int i;
 	unsigned long offset, left, right;
 	unsigned long virt_end;
+
+	if (is_yod())
+		return -ENOSYS;
 
 	vma = mos_find_vma(mm, addr);
 	if (!vma) {
