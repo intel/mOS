@@ -333,6 +333,13 @@ extern unsigned int kobjsize(const void *objp);
 # define VM_MAPPED_COPY	VM_ARCH_1	/* T if mapped copy of data (nommu mmap) */
 #endif
 
+#ifdef CONFIG_MOS_LWKMEM
+extern struct kmem_cache *vm_area_cachep;
+#define VM_LWK		BIT(63)
+#define VM_LWK_1G	BIT(62)
+#define VM_LWK_XPMEM	BIT(61)
+#endif
+
 #if defined(CONFIG_X86_INTEL_MPX)
 /* MPX specific bounds table or bounds directory */
 # define VM_MPX		VM_HIGH_ARCH_4

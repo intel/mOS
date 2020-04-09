@@ -268,7 +268,12 @@ __memblock_find_range_top_down(phys_addr_t start, phys_addr_t end,
  * Return:
  * Found address on success, 0 on failure.
  */
-static phys_addr_t __init_memblock memblock_find_in_range_node(phys_addr_t size,
+#ifdef CONFIG_MOS_LWKMEM
+extern
+#else
+extern
+#endif
+phys_addr_t __init_memblock memblock_find_in_range_node(phys_addr_t size,
 					phys_addr_t align, phys_addr_t start,
 					phys_addr_t end, int nid,
 					enum memblock_flags flags)

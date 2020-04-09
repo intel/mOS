@@ -66,6 +66,7 @@
 #include <linux/page_idle.h>
 #include <linux/memremap.h>
 #include <linux/userfaultfd_k.h>
+#include <linux/mos.h>
 
 #include <asm/tlbflush.h>
 
@@ -1102,6 +1103,8 @@ void do_page_add_anon_rmap(struct page *page,
 	bool compound = flags & RMAP_COMPOUND;
 	bool first;
 
+	WARN_ON(is_lwkpg(page));
+
 	if (compound) {
 		atomic_t *mapcount;
 		VM_BUG_ON_PAGE(!PageLocked(page), page);
@@ -1153,6 +1156,7 @@ void page_add_new_anon_rmap(struct page *page,
 {
 	int nr = compound ? hpage_nr_pages(page) : 1;
 
+	WARN_ON(is_lwkpg(page));
 	VM_BUG_ON_VMA(address < vma->vm_start || address >= vma->vm_end, vma);
 	__SetPageSwapBacked(page);
 	if (compound) {
@@ -1181,6 +1185,7 @@ void page_add_file_rmap(struct page *page, bool compound)
 {
 	int i, nr = 1;
 
+	WARN_ON(is_lwkpg(page));
 	VM_BUG_ON_PAGE(compound && !PageTransHuge(page), page);
 	lock_page_memcg(page);
 	if (compound && PageTransHuge(page)) {
@@ -1301,6 +1306,8 @@ static void page_remove_anon_compound_rmap(struct page *page)
  */
 void page_remove_rmap(struct page *page, bool compound)
 {
+	WARN_ON(is_lwkpg(page));
+
 	if (!PageAnon(page))
 		return page_remove_file_rmap(page, compound);
 
@@ -1936,6 +1943,7 @@ void hugepage_add_anon_rmap(struct page *page,
 	struct anon_vma *anon_vma = vma->anon_vma;
 	int first;
 
+	WARN_ON(is_lwkpg(page));
 	BUG_ON(!PageLocked(page));
 	BUG_ON(!anon_vma);
 	/* address might be in next vma when migration races vma_adjust */
@@ -1947,8 +1955,35 @@ void hugepage_add_anon_rmap(struct page *page,
 void hugepage_add_new_anon_rmap(struct page *page,
 			struct vm_area_struct *vma, unsigned long address)
 {
+	WARN_ON(is_lwkpg(page));
 	BUG_ON(address < vma->vm_start || address >= vma->vm_end);
 	atomic_set(compound_mapcount_ptr(page), 0);
 	__page_set_anon_rmap(page, vma, address, 1);
 }
 #endif /* CONFIG_HUGETLB_PAGE */
+
+#ifdef CONFIG_MOS_LWKMEM
+/*
+ * Do not modify Linux's global counters while setting up LWK pages.
+ */
+void lwkpage_add_rmap(struct page *page, struct vm_area_struct *vma,
+		unsigned long address)
+{
+	VM_BUG_ON_VMA(address < vma->vm_start || address >= vma->vm_end, vma);
+
+	if (PageCompound(page))
+		atomic_set(compound_mapcount_ptr(page), 0);
+	else
+		atomic_set(&page->_mapcount, 0);
+	__page_set_anon_rmap(page, vma, address, 1);
+}
+
+void lwkpage_remove_rmap(struct page *page)
+{
+	/* So far there is no multiple references to LWK pages */
+	if (PageCompound(page))
+		atomic_set(compound_mapcount_ptr(page), -1);
+	else
+		atomic_set(&page->_mapcount, -1);
+}
+#endif

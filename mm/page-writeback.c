@@ -39,6 +39,7 @@
 #include <linux/sched/signal.h>
 #include <linux/mm_inline.h>
 #include <trace/events/writeback.h>
+#include <linux/mos.h>
 
 #include "internal.h"
 
@@ -2550,6 +2551,9 @@ int set_page_dirty(struct page *page)
 {
 	struct address_space *mapping = page_mapping(page);
 
+	if (is_lwkpg(page)) /* LWK pages are assumed to be dirty */
+		return 0;
+
 	page = compound_head(page);
 	if (likely(mapping)) {
 		int (*spd)(struct page *) = mapping->a_ops->set_page_dirty;
@@ -2592,6 +2596,9 @@ EXPORT_SYMBOL(set_page_dirty);
 int set_page_dirty_lock(struct page *page)
 {
 	int ret;
+
+	if (is_lwkpg(page)) /* LWK pages are assumed to be dirty */
+		return 0;
 
 	lock_page(page);
 	ret = set_page_dirty(page);

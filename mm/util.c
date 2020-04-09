@@ -23,6 +23,7 @@
 #include <linux/processor.h>
 #include <linux/sizes.h>
 #include <linux/compat.h>
+#include <linux/mos.h>
 
 #include <linux/uaccess.h>
 
@@ -648,6 +649,9 @@ struct anon_vma *page_anon_vma(struct page *page)
 struct address_space *page_mapping(struct page *page)
 {
 	struct address_space *mapping;
+
+	if (is_lwkpg(page)) /* LWK page are anonymous */
+		return NULL;
 
 	page = compound_head(page);
 

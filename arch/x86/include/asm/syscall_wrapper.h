@@ -250,13 +250,6 @@ out0:								\
 	static inline long __do_sys##sname(void)
 #endif
 
-static inline void __mos_linux_enter(void *sys_wrap)
-{
-}
-
-static inline void __mos_linux_leave(void *sys_wrap)
-{
-}
 
 #ifndef COND_SYSCALL
 #define COND_SYSCALL(name) 							\
@@ -278,6 +271,49 @@ static inline void __mos_linux_leave(void *sys_wrap)
 asmlinkage long __x64_sys_getcpu(const struct pt_regs *regs);
 asmlinkage long __x64_sys_gettimeofday(const struct pt_regs *regs);
 asmlinkage long __x64_sys_time(const struct pt_regs *regs);
+
+#include <linux/mos.h>
+#ifdef CONFIG_MOS_MOVE_SYSCALLS
+
+/* We need to declare all syscalls that will be executed remotely */
+asmlinkage long __x64_sys_write(const struct pt_regs *regs);
+
+/*
+ * When 'm' is true, the optimizer can easily prove it statically--after
+ * all, the same symbol appears on both sides of an equal sign; this
+ * allows the compiler to elide the comparisons entirely.  When 'm' is
+ * false, a static proof by the optimizer isn't possible (except perhaps
+ * through type-based alias analysis, some of the time)--only the linker
+ * knows whether symbols with different names have different values.
+ *
+ * To ensure runtime tests are avoided in both cases, ask the optimizer
+ * whether a proof is possible and assume a non-match whenever it isn't.
+ *
+ * (Must be a macro to behave correctly, at least with GCC 4.8.3.)
+ */
+#define __mos_do_on_remote_cpu(s)				\
+	({							\
+		bool m = (/* Syscalls to execute remotely */	\
+			/* i.e.: s == __x64_sys_write || */	\
+			0);					\
+		__builtin_constant_p(m) ? m : false;		\
+	})
+#endif  /* CONFIG_MOS_MOVE_SYSCALLS */
+
+static inline void __mos_linux_enter(void *sys_wrap)
+{
+#ifdef CONFIG_MOS_MOVE_SYSCALLS
+	if (__mos_do_on_remote_cpu(sys_wrap))
+		mos_linux_enter(sys_wrap);
+#endif
+}
+static inline void __mos_linux_leave(void *sys_wrap)
+{
+#ifdef CONFIG_MOS_MOVE_SYSCALLS
+	if (__mos_do_on_remote_cpu(sys_wrap))
+		mos_linux_leave();
+#endif
+}
 
 
 #endif /* _ASM_X86_SYSCALL_WRAPPER_H */

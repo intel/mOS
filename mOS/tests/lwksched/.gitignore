@@ -1,0 +1,10 @@
+aff_scan
+fork_process
+thread_placement
+timer_preemption
+thread_priority
+uti_placement
+set_clone_attr
+uti_macros
+concurrent_placement
+mwait_api

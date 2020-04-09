@@ -28,6 +28,8 @@
 #include <linux/jhash.h>
 #include <linux/numa.h>
 #include <linux/llist.h>
+#include <linux/mos.h>
+#include <linux/sizes.h>
 
 #include <asm/page.h>
 #include <asm/pgtable.h>
@@ -640,6 +642,17 @@ EXPORT_SYMBOL_GPL(linear_hugepage_index);
  */
 unsigned long vma_kernel_pagesize(struct vm_area_struct *vma)
 {
+#ifdef CONFIG_MOS_LWKMEM
+	if (is_lwkmem(vma)) {
+		if (vma->vm_flags & VM_LWK_1G)
+			return SZ_1G;
+		else if (vma->vm_flags & VM_HUGEPAGE)
+			return SZ_2M;
+		else
+			return SZ_4K;
+	}
+#endif /* CONFIG_MOS_LWKMEM */
+
 	if (vma->vm_ops && vma->vm_ops->pagesize)
 		return vma->vm_ops->pagesize(vma);
 	return PAGE_SIZE;
@@ -3160,6 +3173,12 @@ void hugetlb_report_meminfo(struct seq_file *m)
 {
 	struct hstate *h;
 	unsigned long total = 0;
+#ifdef CONFIG_MOS_LWKMEM
+	bool lwk_only = IS_MOS_VIEW(current, MOS_VIEW_LWK) ||
+			IS_MOS_VIEW(current, MOS_VIEW_LWK_LOCAL);
+#else
+	bool lwk_only = false;
+#endif
 
 	if (!hugepages_supported())
 		return;
@@ -3176,28 +3195,36 @@ void hugetlb_report_meminfo(struct seq_file *m)
 				   "HugePages_Rsvd:    %5lu\n"
 				   "HugePages_Surp:    %5lu\n"
 				   "Hugepagesize:   %8lu kB\n",
-				   count,
-				   h->free_huge_pages,
-				   h->resv_huge_pages,
-				   h->surplus_huge_pages,
-				   (PAGE_SIZE << huge_page_order(h)) / 1024);
+				   lwk_only ? 0 : count,
+				   lwk_only ? 0 : h->free_huge_pages,
+				   lwk_only ? 0 : h->resv_huge_pages,
+				   lwk_only ? 0 : h->surplus_huge_pages,
+				   lwk_only ? 0 :
+					(PAGE_SIZE << huge_page_order(h)) /
+									1024);
 	}
 
-	seq_printf(m, "Hugetlb:        %8lu kB\n", total / 1024);
+	seq_printf(m, "Hugetlb:        %8lu kB\n", lwk_only ? 0 : total / 1024);
 }
 
 int hugetlb_report_node_meminfo(int nid, char *buf)
 {
 	struct hstate *h = &default_hstate;
+#ifdef CONFIG_MOS_LWKMEM
+	bool lwk_only = IS_MOS_VIEW(current, MOS_VIEW_LWK) ||
+			IS_MOS_VIEW(current, MOS_VIEW_LWK_LOCAL);
+#else
+	bool lwk_only = false;
+#endif
 	if (!hugepages_supported())
 		return 0;
 	return sprintf(buf,
 		"Node %d HugePages_Total: %5u\n"
 		"Node %d HugePages_Free:  %5u\n"
 		"Node %d HugePages_Surp:  %5u\n",
-		nid, h->nr_huge_pages_node[nid],
-		nid, h->free_huge_pages_node[nid],
-		nid, h->surplus_huge_pages_node[nid]);
+		nid, lwk_only ? 0 : h->nr_huge_pages_node[nid],
+		nid, lwk_only ? 0 : h->free_huge_pages_node[nid],
+		nid, lwk_only ? 0 : h->surplus_huge_pages_node[nid]);
 }
 
 void hugetlb_show_meminfo(void)

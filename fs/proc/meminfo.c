@@ -13,6 +13,7 @@
 #include <linux/vmstat.h>
 #include <linux/atomic.h>
 #include <linux/vmalloc.h>
+#include <linux/mos.h>
 #ifdef CONFIG_CMA
 #include <linux/cma.h>
 #endif
@@ -20,12 +21,30 @@
 #include <asm/pgtable.h>
 #include "internal.h"
 
+#ifdef CONFIG_MOS_LWKMEM
+/*
+ * If current task has mOS view set to 'lwk' or if its and mOS task then
+ * return true for all meminfo strings which are not in the exception list
+ * below
+ */
+#define mos_view_memory_filter(str)			\
+		((IS_MOS_VIEW(current, MOS_VIEW_LWK) || \
+		  IS_MOS_VIEW(current, MOS_VIEW_LWK_LOCAL)) && \
+		 strcmp(str, "MemTotal:       ") &&	\
+		 strcmp(str, "MemFree:        ") &&	\
+		 strcmp(str, "MemAvailable:   "))
+#else
+#define mos_view_memory_filter(str) 0
+#endif
+
 void __attribute__((weak)) arch_report_meminfo(struct seq_file *m)
 {
 }
 
 static void show_val_kb(struct seq_file *m, const char *s, unsigned long num)
 {
+	if (mos_view_memory_filter(s))
+		num = 0;
 	seq_put_decimal_ull_width(m, s, num << (PAGE_SHIFT - 10), 8);
 	seq_write(m, " kB\n", 4);
 }
@@ -39,6 +58,7 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 	unsigned long pages[NR_LRU_LISTS];
 	unsigned long sreclaimable, sunreclaim;
 	int lru;
+	bool lwk_only = false;
 
 	si_meminfo(&i);
 	si_swapinfo(&i);
@@ -55,6 +75,16 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 	available = si_mem_available();
 	sreclaimable = global_node_page_state(NR_SLAB_RECLAIMABLE);
 	sunreclaim = global_node_page_state(NR_SLAB_UNRECLAIMABLE);
+
+	if (IS_ENABLED(CONFIG_MOS_LWKMEM)) {
+		unsigned long linux_free = i.freeram;
+
+		lwk_only = IS_MOS_VIEW(current, MOS_VIEW_LWK) ||
+			   IS_MOS_VIEW(current, MOS_VIEW_LWK_LOCAL);
+		si_meminfo_node_mos(&i, NUMA_NO_NODE);
+		available = lwk_only ? i.freeram :
+				       available + i.freeram - linux_free;
+	}
 
 	show_val_kb(m, "MemTotal:       ", i.totalram);
 	show_val_kb(m, "MemFree:        ", i.freeram);
@@ -101,7 +131,7 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 	show_val_kb(m, "Slab:           ", sreclaimable + sunreclaim);
 	show_val_kb(m, "SReclaimable:   ", sreclaimable);
 	show_val_kb(m, "SUnreclaim:     ", sunreclaim);
-	seq_printf(m, "KernelStack:    %8lu kB\n",
+	seq_printf(m, "KernelStack:    %8lu kB\n", lwk_only ? 0 :
 		   global_zone_page_state(NR_KERNEL_STACK_KB));
 	show_val_kb(m, "PageTables:     ",
 		    global_zone_page_state(NR_PAGETABLE));
@@ -114,14 +144,14 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
 		    global_node_page_state(NR_WRITEBACK_TEMP));
 	show_val_kb(m, "CommitLimit:    ", vm_commit_limit());
 	show_val_kb(m, "Committed_AS:   ", committed);
-	seq_printf(m, "VmallocTotal:   %8lu kB\n",
+	seq_printf(m, "VmallocTotal:   %8lu kB\n", lwk_only ? 0 :
 		   (unsigned long)VMALLOC_TOTAL >> 10);
 	show_val_kb(m, "VmallocUsed:    ", vmalloc_nr_pages());
 	show_val_kb(m, "VmallocChunk:   ", 0ul);
 	show_val_kb(m, "Percpu:         ", pcpu_nr_pages());
 
 #ifdef CONFIG_MEMORY_FAILURE
-	seq_printf(m, "HardwareCorrupted: %5lu kB\n",
+	seq_printf(m, "HardwareCorrupted: %5lu kB\n", lwk_only ? 0 :
 		   atomic_long_read(&num_poisoned_pages) << (PAGE_SHIFT - 10));
 #endif
 

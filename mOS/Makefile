@@ -14,5 +14,13 @@
 # mOS: hybrid FWK/LWK for HPC
 #
 
+subdir-$(CONFIG_MOS_FOR_HPC) += tools
+
 obj-$(CONFIG_MOS_FOR_HPC) += mos.o
 obj-$(CONFIG_MOS_FOR_HPC) += lwkcpu.o lwkctrl.o mosras.o
+
+obj-$(CONFIG_MOS_MOVE_SYSCALLS) += thr_move.o
+obj-$(CONFIG_MOS_LWKMEM) += mem_mgmt.o
+obj-$(CONFIG_MOS_LWKMEM) += mmap.o
+obj-$(CONFIG_MOS_LWKMEM) += binfmt_elf.o
+obj-$(CONFIG_MOS_LWKMEM) += xpmem_utils.o

@@ -30,6 +30,7 @@ extern int lwkmem_partition_destroy(void);
 extern char *lwkmem_get_spec(void);
 extern int lwkmem_distribute_request(resource_size_t req, nodemask_t *mask,
 		resource_size_t *node_size);
+
 extern char lwkctrl_cpus_spec[LWKCTRL_CPUS_SPECSZ];
 extern char lwkctrl_cpu_profile_spec[LWKCTRL_CPU_PROFILE_SPECSZ];
 extern bool lwkmem_static_enabled;
