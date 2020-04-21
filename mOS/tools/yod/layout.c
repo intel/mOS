@@ -267,7 +267,7 @@ void _map_system_layout(void)
 static void _get_iteration_order(int *order, lwk_request_t *req)
 {
 	int i, n;
-	char descr[256], *d, *nthreads;
+	char descr[256], *d;
 
 	if ((strlen(req->layout_descriptor) == 0) ||
 	    (strcmp(req->layout_descriptor, SCATTER_STR) == 0))
@@ -276,8 +276,6 @@ static void _get_iteration_order(int *order, lwk_request_t *req)
 		strcpy(descr, COMPACT_ALIAS);
 	else
 		strcpy(descr, req->layout_descriptor);
-
-	nthreads = getenv("OMP_NUM_THREADS");
 
 	for (n = 0, d = descr; n < NDIMS; n++) {
 
@@ -309,34 +307,9 @@ static void _get_iteration_order(int *order, lwk_request_t *req)
 					  req->layout_descriptor);
 		}
 
-
 		if (count == -1)
-			if (order[n] == IDX_CPU && nthreads) {
-
-				unsigned int ncores =
-					yod_count_by(req->lwkcpus_request,
-						     YOD_CORE);
-
-				if (yodopt_parse_integer(nthreads, &count, 1, LONG_MAX))
-					yod_abort(-EINVAL,
-						  "Illegal OMP_NUM_THREADS value: \"%s\"",
-						  nthreads);
-
-				layout_topology[order[n]].max_count =
-					ncores ?
-					MAX(count / ncores, 1) :
+			layout_topology[order[n]].max_count =
 					layout_topology[order[n]].max_possible;
-
-				YOD_LOG(YOD_DEBUG,
-					"Defaulting threads/core to %d = (%s / %d)",
-					layout_topology[order[n]].max_count,
-					nthreads,
-					ncores);
-
-			} else {
-				layout_topology[order[n]].max_count =
-					layout_topology[order[n]].max_possible;
-			}
 		else
 			layout_topology[order[n]].max_count = count;
 	}

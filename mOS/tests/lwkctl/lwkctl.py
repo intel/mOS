@@ -20,9 +20,12 @@ import collections
 import math
 import fileinput
 import re
+import os
+lwkmem_present=os.path.exists('lwkmem/maptest')
+import time
 lwkmem_static=False
 
-def create_and_verify(obj, lwk_spec, utilcpus_req, lwkcpus_req, v='0', autogen=False):
+def create_and_verify(obj, lwk_spec, utilcpus_req, lwkcpus_req, v='0', autogen=False, lwkmem_enabled=True):
     def get_cpus():
         utilcpus = CpuSet(0)
         lwkcpus = CpuSet(0)
@@ -107,7 +110,9 @@ def create_and_verify(obj, lwk_spec, utilcpus_req, lwkcpus_req, v='0', autogen=F
 
     # Verify CPUs
     lwkcpus_auto_set = lwkcpus_auto()
-    if not autogen:
+    if autogen:
+        assert(lwkcpus_auto_set == True), 'The lwkcpus auto indicator is not set'
+    else:
         utilcpus, lwkcpus = get_cpus()
         if utilcpus != utilcpus_req:
             logging.error('Mismatch : Syscall CPUs')
@@ -117,16 +122,10 @@ def create_and_verify(obj, lwk_spec, utilcpus_req, lwkcpus_req, v='0', autogen=F
             logging.error('Mismatch : LWK CPUs')
             logging.error('Requested: {}'.format(lwkcpus_req.toList()))
             logging.error('Created  : {}'.format(lwkcpus.toList()))
-        if lwkcpus_auto_set:
-            logging.error('The lwkcpus_auto indicator is set')
 
         assert(utilcpus == utilcpus_req)
         assert(lwkcpus == lwkcpus_req)
-        assert(lwkcpus_auto_set == False)
-    else:
-        if not lwkcpus_auto_set:
-            logging.error('The lwkcpus_auto indicator is not set')
-            assert(lwkcpus_auto == True)
+        assert(lwkcpus_auto_set == False), 'The lwkcpus auto indicator is set'
 
     # Verify LWK CPU profile
     profile_req = get_profile(lwk_spec)
@@ -139,32 +138,28 @@ def create_and_verify(obj, lwk_spec, utilcpus_req, lwkcpus_req, v='0', autogen=F
         assert(profile_set == 'normal'), 'Mismatch: ' + msg
 
     # Verify LWK Memory
+    if lwkmem_enabled:
+        lwkmem_auto_set = lwkmem_auto()
+        if autogen:
+                assert(lwkmem_auto_set == True), 'The lwkmem auto indicator is not set'
+        else:
+            lwkmem_req = get_lwkmem(lwk_spec)
+            lwkmem_set = get_lwkmem()
+            msg = 'LWKMEM requested {} allocated {}'.format(lwkmem_req, lwkmem_set)
+            logging.debug(msg)
 
-    if not lwkmem_static and not autogen:
-        lwkmem_req = get_lwkmem(lwk_spec)
-        lwkmem_set = get_lwkmem()
-        msg = 'LWKMEM requested {} allocated {}'.format(lwkmem_req, lwkmem_set)
-        logging.debug(msg)
-
-        if lwkmem_req != 0:
-            assert(lwkmem_set > 0), 'LWK memory partition was not created'
+            if lwkmem_req != 0:
+                assert(lwkmem_set > 0), 'LWK memory partition was not created'
             assert(lwkmem_set <= lwkmem_req), 'Mismatch ' + msg
-
-    lwkmem_auto_set = lwkmem_auto()
-    if not autogen:
-        if lwkmem_auto_set:
-            logging.error('The lwkmem_auto indicator is set')
-            assert(lwkmem_auto_set == False)
-    else:
-        if not lwkmem_auto_set:
-            logging.error('The lwkmem_auto indicator is not set')
-            assert(lwkmem_auto_set == True)
+            assert(lwkmem_auto_set == False), 'The lwkmem auto indicator is set'
 
     # Run tests on LWK
+    time.sleep(1)
     yod(obj, '-u', 0, '../lwksched/aff_scan', '-efm')
 
-    if not lwkmem_static:
-        yod(obj, '../lwkmem/maptest', '--verbose', '--type', 'anonymous', '--num', 10, '--size', 4096, '--iterations', 10)
+    if lwkmem_enabled:
+        if autogen or get_lwkmem(lwk_spec) != 0:
+            yod(obj, '../lwkmem/maptest', '--verbose', '--type', 'anonymous', '--num', 10, '--size', 4096, '--iterations', 10)
 
     # Delete partition
     run(['lwkctl', '-v', v, '-d', '--force'], requiresRoot=True)
@@ -177,33 +172,18 @@ def create_and_verify(obj, lwk_spec, utilcpus_req, lwkcpus_req, v='0', autogen=F
     assert(lwkcpus == CpuSet(0))
     assert(profile_set == '')
 
-    if not lwkmem_static:
-        lwkmem_set = get_lwkmem()
-        assert(lwkmem_set == 0), 'Failed to delete LWKMEM partition'
+    if lwkmem_enabled:
+        assert(get_lwkmem() == 0), 'Failed to delete LWKMEM partition'
 
     # Run tests on Linux
+    time.sleep(1)
     run_bin(obj, '../lwksched/aff_scan')
 
 class Spec:
     def __init__(self):
-        global lwkmem_static
         self.topology = CpuTopology()
         assert(self.topology.allcpus.countCpus() > 0), "Invalid topology"
         self.cache = dict()
-
-        fname='/proc/cmdline'
-        idx1= idx2 = -1
-        for line in fileinput.input(fname, mode='r'):
-            idx1 = line.find('lwkmem_static')
-            if idx1 != -1:
-                idx2 = line.find('lwkmem=')
-        fileinput.close()
-
-        if idx1 != -1:
-            if idx2 != -1:
-                lwkmem_static = idx1 < idx2
-            else:
-                lwkmem_static = True
 
     # Create an LWKCPU partition spec that has fraction of CPUs (as specified
     # by ratio) assigned to LWK out of maximum possible LWK partition size on
@@ -360,14 +340,6 @@ class Spec:
             else:
                 return '{}:{}'.format(int(node), size)
 
-        if lwkmem_static:
-            op, rc = run(['lwkctl', '-v', '0', '-s', '-r'])
-            for token in op.split():
-                if token.startswith('lwkmem='):
-                    if token != 'lwkmem=':
-                        return token
-            return ''
-
         op, rc = run(['sync'], requiresRoot=True)
         logging.debug('sync returned rc={} {}'.format(rc,op))
         op, rc = run(['sh', '-c', 'echo 1 > /proc/sys/vm/drop_caches'], requiresRoot=True)
@@ -427,55 +399,92 @@ class Partition(TestCase):
     require = [ LWKCTL, YOD ]
 
     def test_valid_partition(self):
-        v = '3' if ARGS.test_debug else '0'
-
-        # Partition CPUs in following ratio between Linux and LWK
-        ratio = [ 0.25, 0.5, 0.75, 0.90 ]
-        for r in ratio:
+        def test_partition_ratio(r, lwkmem_enabled=False):
+            v = '3' if ARGS.test_debug else '0'
             logging.debug('Testing LWK CPUs fraction: {}'.format(r))
             lwkcpus_spec, utilcpus, lwkcpus = spec.create_lwkcpu_spec(r)
             self.assertNotEqual(lwkcpus_spec, 'lwkcpus=', 'Failed to create LWKCPU partition spec')
-            lwkmem_spec = spec.create_lwkmem_spec(r)
-            self.assertNotEqual(lwkmem_spec, 'lwkmem=', 'Failed to create LWKMEM partition spec')
-            s = '{} {}'.format(lwkcpus_spec, lwkmem_spec)
+
+            s = lwkcpus_spec
+            if lwkmem_enabled:
+                lwkmem_spec = spec.create_lwkmem_spec(r)
+                self.assertNotEqual(lwkmem_spec, 'lwkmem=', 'Failed to create LWKMEM partition spec')
+                s += ' {}'.format(lwkmem_spec)
+
             logging.debug('Testing LWK partition spec: {}'.format(s))
-            create_and_verify(self, s, utilcpus, lwkcpus, v)
+            create_and_verify(self, s, utilcpus, lwkcpus, v, False, lwkmem_enabled)
+
+
+        # Partition CPUs and memory in following ratio between Linux and LWK
+        ratio = [ 0.25, 0.5, 0.75, 0.90 ]
+        for r in ratio:
+            test_partition_ratio(r)
+            if lwkmem_present:
+                test_partition_ratio(r, lwkmem_enabled=True)
+
+        # Special case: create lwkcpus only partition but specify 'lwkmem='
+
+        # This should create a valid partition without LWK memory whether lwkmem is present or not.
+        # Save and restore of a partition could use this syntax.
+        lwkcpus_spec, utilcpus, lwkcpus = spec.create_lwkcpu_spec(0.25)
+        self.assertNotEqual(lwkcpus_spec, 'lwkcpus=', 'Failed to create LWKCPU partition spec')
+        s = '{} lwkmem='.format(lwkcpus_spec)
+        logging.debug('Testing LWK partition spec: {}'.format(s))
+        v = '3' if ARGS.test_debug else '0'
+        # We set lwkmem_enabled=True as we want to validate if it was set to 0 when using Linux memory.
+        create_and_verify(self, s, utilcpus, lwkcpus, v, False, lwkmem_enabled=True)
 
     def test_valid_no_syscall_cpus(self):
-        v = '3' if ARGS.test_debug else '0'
+        def test_subtest(lwkmem_enabled=False):
+            v = '3' if ARGS.test_debug else '0'
+            # Partition CPUs in following ratio between Linux and LWK
+            lwkcpus_spec, utilcpus, lwkcpus = spec.create_lwkcpu_spec(0.90)
+            self.assertNotEqual(lwkcpus_spec, 'lwkcpus=', 'Failed to create LWKCPU partition spec')
 
-        # Partition CPUs in following ratio between Linux and LWK
-        lwkcpus_spec, utilcpus, lwkcpus = spec.create_lwkcpu_spec(0.90)
-        self.assertNotEqual(lwkcpus_spec, 'lwkcpus=', 'Failed to create LWKCPU partition spec')
-        lwkmem_spec = spec.create_lwkmem_spec(0.90)
-        self.assertNotEqual(lwkmem_spec, 'lwkmem=', 'Failed to create LWKMEM partition spec')
+            if lwkmem_enabled:
+                lwkmem_spec = spec.create_lwkmem_spec(0.90)
+                self.assertNotEqual(lwkmem_spec, 'lwkmem=', 'Failed to create LWKMEM partition spec')
 
-        # No utility CPUs specified
-        # Extract the utility CPUs from the lwkcpus specification
-        regex = re.compile("[=:](\d+\.)")
-        for m in regex.finditer(lwkcpus_spec):
-            lwkcpus_spec = lwkcpus_spec.replace(m.group(1), '', 1)
+            # No utility CPUs specified
+            # Extract the utility CPUs from the lwkcpus specification
+            regex = re.compile("[=:](\d+\.)")
+            for m in regex.finditer(lwkcpus_spec):
+                lwkcpus_spec = lwkcpus_spec.replace(m.group(1), '', 1)
 
-        s = '{} {}'.format(lwkcpus_spec, lwkmem_spec)
-        logging.debug('Testing LWK partition spec: {}'.format(s))
-        create_and_verify(self, s, CpuSet(0), lwkcpus, v)
+            s = lwkcpus_spec
+            if lwkmem_enabled:
+                s += ' {}'.format(lwkmem_spec)
 
-        # Utility CPUs exist but are are not syscall targets
-        # Append the Utility CPUs to end of the lwkcpus specification
-        s = '{}:{}. {}'.format(lwkcpus_spec, utilcpus.toList(), lwkmem_spec)
-        logging.debug('Testing LWK partition spec: {}'.format(s))
-        create_and_verify(self, s, utilcpus, lwkcpus, v)
+            logging.debug('Testing LWK partition spec: {}'.format(s))
+            create_and_verify(self, s, CpuSet(0), lwkcpus, v, False, lwkmem_enabled)
+
+            # Utility CPUs exist but are are not syscall targets
+            # Append the Utility CPUs to end of the lwkcpus specification
+
+            s = '{}:{}.'.format(lwkcpus_spec, utilcpus.toList())
+            if lwkmem_enabled:
+                s += ' {}'.format(lwkmem_spec)
+
+            logging.debug('Testing LWK partition spec: {}'.format(s))
+            create_and_verify(self, s, utilcpus, lwkcpus, v, False, lwkmem_enabled)
+
+        test_subtest()
+        if lwkmem_present:
+            test_subtest(lwkmem_enabled=True)
 
     def test_lwkcpu_lwkmem_auto(self):
-        v = '3' if ARGS.test_debug else '0'
+        def test_subtest(lwkmem_enabled=False):
+            v = '3' if ARGS.test_debug else '0'
+            # Partition CPUs in following ratio between Linux and LWK
+            s = 'lwkcpus=auto'
+            if lwkmem_enabled:
+                s += ' {}'.format('lwkmem=auto')
+            logging.debug('Testing LWK partition spec: {}'.format(s))
+            create_and_verify(self, s, CpuSet(0), CpuSet(0), v, True, lwkmem_enabled)
 
-        # Partition CPUs in following ratio between Linux and LWK
-        lwkcpus_spec = 'lwkcpus=auto'
-        lwkmem_spec = 'lwkmem=auto'
-
-        s = '{} {}'.format(lwkcpus_spec, lwkmem_spec)
-        logging.debug('Testing LWK partition spec: {}'.format(s))
-        create_and_verify(self, s, CpuSet(0), CpuSet(0), v, True)
+        test_subtest()
+        if lwkmem_present:
+            test_subtest(lwkmem_enabled=True)
 
     @unittest.skipUnless(ARGS.all_tests, 'Long running test.')
     def test_recreate_repeat(self):
@@ -484,25 +493,34 @@ class Partition(TestCase):
             self.test_valid_partition()
 
     def test_invalid_partition(self):
-        v = '3' if ARGS.test_debug else '0'
+        def test_subtest(lwkcpus_spec, lwkmem_spec='', lwkmem_enabled=False):
+            v = '3' if ARGS.test_debug else '0'
+            s = lwkcpus_spec
+            if lwkmem_enabled:
+                s += ' {}'.format(lwkmem_spec)
+            logging.debug('Testing LWK partition: {}'.format(s))
+
+            out, rc = run(['lwkctl', '-v', v, '-c', s, '--force'], requiresRoot=True)
+            self.assertFalse(rc == 0, 'Created LWK partition for invalid spec: {}'.format(s))
 
         lwkcpus_spec, utilcpus, lwkcpus = spec.create_lwkcpu_spec(0.90)
         self.assertNotEqual(lwkcpus_spec, 'lwkcpus=', 'Failed to create LWKCPU partition spec')
-        lwkmem_spec = spec.create_lwkmem_spec(0.90)
-        self.assertNotEqual(lwkmem_spec, 'lwkmem=', 'Failed to create LWKMEM partition spec')
 
         # Manufacture an invalid spec by adding invalid CPU numbers
         N = spec.topology.allcpus.countCpus()
         lwkcpus_spec += ':{}.{}-{}'.format(N, N+1, N+10)
 
         # Try to create a partition with CPUs which are not present
-        s = '{} {}'.format(lwkcpus_spec, lwkmem_spec)
-        logging.debug('Testing LWK partition: {}'.format(s))
-
-        out, rc = run(['lwkctl', '-v', v, '-c', s, '--force'], requiresRoot=True)
-        self.assertFalse(rc == 0, 'Created LWK partition for invalid spec: {}'.format(s))
+        test_subtest(lwkcpus_spec)
+        if lwkmem_present:
+            lwkmem_spec = spec.create_lwkmem_spec(0.90)
+            self.assertNotEqual(lwkmem_spec, 'lwkmem=', 'Failed to create LWKMEM partition spec')
+            test_subtest(lwkcpus_spec, lwkmem_spec, lwkmem_enabled=True)
 
     def test_precise_yes(self):
+        if not lwkmem_present:
+            self.skipTest('Skipping as there is no LWKMEM')
+
         v = '3' if ARGS.test_debug else '0'
 
         lwkcpus_spec, utilcpus, lwkcpus = spec.create_lwkcpu_spec(0.90)
@@ -518,6 +536,9 @@ class Partition(TestCase):
         self.assertTrue(rc == 0, 'Could not create precise partition with available memory: {}'.format(s))
 
     def test_precise_yes_exceed(self):
+        if not lwkmem_present:
+            self.skipTest('Skipping as there is no LWKMEM')
+
             v = '3' if ARGS.test_debug else '0'
 
             lwkcpus_spec, utilcpus, lwkcpus = spec.create_lwkcpu_spec(0.90)
@@ -531,9 +552,12 @@ class Partition(TestCase):
             logging.debug('Testing LWK partition: {}'.format(s))
 
             out, rc = run(['lwkctl', '-v', v, '-c', s, '-p', 'yes', '--force'], requiresRoot=True)
-            self.assertFalse(rc == 0 and lwkmem_static == False, 'Created LWK partition when memory spec exceeding available: {}'.format(s))
+            self.assertFalse(rc == 0, 'Created LWK partition when memory spec exceeding available: {}'.format(s))
 
     def test_precise_no(self):
+        if not lwkmem_present:
+            self.skipTest('Skipping as there is no LWKMEM')
+
         v = '3' if ARGS.test_debug else '0'
 
         lwkcpus_spec, utilcpus, lwkcpus = spec.create_lwkcpu_spec(0.90)
@@ -550,6 +574,9 @@ class Partition(TestCase):
         self.assertTrue(rc == 0, 'Failed to create LWK partition for memory spec exceeding available: {}'.format(s))
 
     def test_precise_default(self):
+        if not lwkmem_present:
+            self.skipTest('Skipping as there is no LWKMEM')
+
         v = '3' if ARGS.test_debug else '0'
 
         lwkcpus_spec, utilcpus, lwkcpus = spec.create_lwkcpu_spec(0.90)
@@ -560,15 +587,17 @@ class Partition(TestCase):
         s = '{} {}'.format(lwkcpus_spec, lwkmem_spec)
 
         logging.debug('Testing spec: {}'.format(s))
-        create_and_verify(self, s, utilcpus, lwkcpus, v)
+        create_and_verify(self, s, utilcpus, lwkcpus, v, False, lwkmem_enabled=True)
 
     def test_invalid_spec(self):
         v = '3' if ARGS.test_debug else '0'
 
         lwkcpus_spec, utilcpus, lwkcpus = spec.create_lwkcpu_spec(0.90)
         self.assertNotEqual(lwkcpus_spec, 'lwkcpus=', 'Failed to create LWK partition spec')
-        lwkmem_spec = spec.create_lwkmem_spec(0.90)
-        self.assertNotEqual(lwkmem_spec, 'lwkmem=', 'Failed to create LWKMEM partition spec')
+
+        if lwkmem_present:
+            lwkmem_spec = spec.create_lwkmem_spec(0.90)
+            self.assertNotEqual(lwkmem_spec, 'lwkmem=', 'Failed to create LWKMEM partition spec')
 
         invalid_lwkcpu_spec = [ lwkcpus_spec.strip('lwkcpus='),    # Missing lwkcpus=
                                 lwkcpus_spec.strip('lwkcpus'),     # Missing lwkcpus
@@ -581,36 +610,53 @@ class Partition(TestCase):
             invalid_lwkcpu_spec += [ lwkcpus_spec.replace(':', ',', 1) ] # Missing delimiter ':' between mappings ]
 
         for s in invalid_lwkcpu_spec:
-            s = '{} {}'.format(s, lwkmem_spec)
+            if lwkmem_present:
+                s += ' {}'.format(lwkmem_spec)
+            logging.debug('Testing spec: ' + s)
+            out, rc = run(['lwkctl', '-v', v, '-c', s, '--force'], requiresRoot=True)
+            self.assertFalse(rc == 0, 'Created LWK partition for invalid spec: {}'.format(s))
+
+        # Try to create a partition with only lwkmem and no lwkcpus
+        if lwkmem_present:
+            s = lwkmem_spec
+            out, rc = run(['lwkctl', '-v', v, '-c', s, '--force'], requiresRoot=True)
+            self.assertFalse(rc == 0, 'Created LWK partition for invalid spec: {}'.format(s))
+
+        # Try to create a partition with lwkmem spec specified when there is no LWKMEM support
+        if lwkmem_present == False:
+            s += '{} lwkmem=4G'.format(lwkcpus_spec)
             logging.debug('Testing spec: ' + s)
             out, rc = run(['lwkctl', '-v', v, '-c', s, '--force'], requiresRoot=True)
             self.assertFalse(rc == 0, 'Created LWK partition for invalid spec: {}'.format(s))
 
     def test_busy_with_job(self):
-            v = '3' if ARGS.test_debug else '0'
+        v = '3' if ARGS.test_debug else '0'
 
-            lwkcpus_spec, utilcpus, lwkcpus = spec.create_lwkcpu_spec(0.90)
-            self.assertNotEqual(lwkcpus_spec, 'lwkcpus=', 'Failed to create LWKCPU partition spec')
-            # Request memory above what is available
+        lwkcpus_spec, utilcpus, lwkcpus = spec.create_lwkcpu_spec(0.90)
+        self.assertNotEqual(lwkcpus_spec, 'lwkcpus=', 'Failed to create LWKCPU partition spec')
+
+        s = lwkcpus_spec
+        if lwkmem_present:
             lwkmem_spec = spec.create_lwkmem_spec(0.9, True)
             self.assertNotEqual(lwkmem_spec, 'lwkmem=', 'Failed to create LWKMEM partition spec')
+            s += ' {}'.format(lwkmem_spec)
 
-            # Insert a jobid into the RAS subsystem:
-            rc = spec.write_to_ras_file('jobid', '1234567')
-            self.assertTrue(rc, 'Could not write to jobid file.')
+        # Insert a jobid into the RAS subsystem:
+        rc = spec.write_to_ras_file('jobid', '1234567')
+        self.assertTrue(rc, 'Could not write to jobid file.')
 
-            # Try to create a partition with larger memory than available
-            s = '{} {}'.format(lwkcpus_spec, lwkmem_spec)
-            logging.debug('Testing LWK partition: {}'.format(s))
+        # Try to create a partition
+        logging.debug('Testing LWK partition: {}'.format(s))
 
-            out, rc = run(['lwkctl', '-v', v, '-c', s,], requiresRoot=True)
-            self.assertFalse(rc == 0, 'Created LWK partition even though job is active.')
+        out, rc = run(['lwkctl', '-v', v, '-c', s,], requiresRoot=True)
+        self.assertFalse(rc == 0, 'Created LWK partition even though job is active.')
 
-            out, rc = run(['lwkctl', '-v', v, '-c', s, '--force'], requiresRoot=True)
-            self.assertTrue(rc == 0, 'Could not create LWK partition with --force.')
+        # Try to force create a partition
+        out, rc = run(['lwkctl', '-v', v, '-c', s, '--force'], requiresRoot=True)
+        self.assertTrue(rc == 0, 'Could not create LWK partition with --force.')
 
-            rc = spec.write_to_ras_file('jobid', ' ')
-            self.assertTrue(rc, 'Could not write to jobid file.')
+        rc = spec.write_to_ras_file('jobid', ' ')
+        self.assertTrue(rc, 'Could not write to jobid file.')
 
 class Profile(TestCase):
     require = [ LWKCTL, YOD ]
@@ -626,15 +672,20 @@ class Profile(TestCase):
         v = '3' if ARGS.test_debug else '0'
         lwkcpus_spec, utilcpus, lwkcpus = spec.create_lwkcpu_spec(0.90)
         self.assertNotEqual(lwkcpus_spec, 'lwkcpus=', 'Failed to create LWK partition spec')
-        lwkmem_spec = spec.create_lwkmem_spec(0.90)
-        self.assertNotEqual(lwkmem_spec, 'lwkmem=', 'Failed to create LWKMEM partition spec')
 
         for p in profiles:
             if p != '':
                 p = 'lwkcpu_profile={}'.format(p)
-                s = '{} {} {}'.format(lwkcpus_spec, p, lwkmem_spec)
+                s = '{} {}'.format(lwkcpus_spec, p)
             else:
-                s = '{} {}'.format(lwkcpus_spec, lwkmem_spec)
+                s = lwkcpus_spec
 
             logging.debug('Testing spec: {}'.format(s))
-            create_and_verify(self, s, utilcpus, lwkcpus, v)
+            create_and_verify(self, s, utilcpus, lwkcpus, v, False, lwkmem_enabled=False)
+
+            if lwkmem_present:
+                lwkmem_spec = spec.create_lwkmem_spec(0.90)
+                self.assertNotEqual(lwkmem_spec, 'lwkmem=', 'Failed to create LWKMEM partition spec')
+                s += ' {}'.format(lwkmem_spec)
+                logging.debug('Testing spec: {}'.format(s))
+                create_and_verify(self, s, utilcpus, lwkcpus, v, False, lwkmem_enabled=True)

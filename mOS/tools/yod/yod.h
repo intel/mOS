@@ -16,6 +16,7 @@
 #define __YOD_H
 
 #include <stdbool.h>
+#include <linux/types.h>
 #include "mos_cpuset.h"
 
 #define _unused_ __attribute__((unused))
@@ -74,13 +75,18 @@ enum mem_group_t {
 
 extern const char * const MEM_GROUPS[];
 
+/*
+ * Need to keep this in the same order as that of LWK_VMR_*
+ * in include/linux/moslwkmem.h
+ */
 enum mem_scopes_t {
-	YOD_SCOPE_MMAP = 0,
-	YOD_SCOPE_STACK = 1,
-	YOD_SCOPE_STATIC = 2,
-	YOD_SCOPE_BRK = 3,
-	YOD_NUM_MEM_SCOPES = 4,
-	YOD_SCOPE_ALL = 4,
+	YOD_SCOPE_DBSS = 0,
+	YOD_SCOPE_HEAP = 1,
+	YOD_SCOPE_MMAP = 2,
+	YOD_SCOPE_TSTACK = 3,
+	YOD_SCOPE_STACK = 4,
+	YOD_NUM_MEM_SCOPES = 5,
+	YOD_SCOPE_ALL = 5,
 	YOD_SCOPE_UNKNOWN = -1
 };
 
@@ -88,6 +94,32 @@ enum rank_layout_t {
 	YOD_RANK_COMPACT = 0,
 	YOD_RANK_SCATTER = 1,
 	YOD_RANK_DISABLE = 2
+};
+
+enum page_types_t {
+	PG_TYPE_4K = 0,
+	PG_TYPE_2M = 1,
+	PG_TYPE_4M = 2,
+	PG_TYPE_1G = 3,
+	PG_TYPE_UNKNOWN = -1
+};
+
+/*
+ * Need to keep this in the same order as that of LWK_PF_*
+ * in include/linux/moslwkmem.h
+ */
+enum page_fault_levels_t {
+	PF_LEVEL_NOFAULT = 0,
+	PF_LEVEL_ONEFAULT = 1,
+	PF_LEVEL_UNKNOWN = -1
+};
+
+enum policy_types_t {
+	MEMPOLICY_NORMAL = 0,
+	MEMPOLICY_RANDOM,
+	MEMPOLICY_INTERLEAVE,
+	MEMPOLICY_INTERLEAVE_RANDOM,
+	MEMPOLICY_UNKNOWN
 };
 
 struct lock_options_t {
@@ -165,7 +197,6 @@ struct yod_plugin {
 	 * @param[in/out] n As input, this describes the array size of
 	 *   lwkmem_reserved.  As output, it describes the actual size of the
 	 *   results (i.e., the number of NIDs in the lwkmem_reserved array).
-
 	 */
 	void (*get_reserved_lwkmem)(size_t *lwkmem_reserved, size_t *n);
 
@@ -179,6 +210,12 @@ struct yod_plugin {
 	 *   could not be fulfilled.
 	 */
 	int (*request_lwk_memory)(size_t *lwkmem_request, size_t n);
+
+	/**
+	 * Read bitmask that indicates NUMA nodes that are online.
+	 *   @param[out] bitmask of NUMA nodes that are online.
+	 */
+	int (*get_numa_nodes_online)(mos_cpuset_t *set);
 
 	/**
 	 * Request the specified ordering of CPU usage within the selected
@@ -234,11 +271,12 @@ struct yod_plugin {
 	int (*set_options)(char *options, size_t length);
 
 	/**
-	 * Writes memory domain information to the LWK.
-	 * @param[in] order The information to be written.
+	 * Writes memory policy information to the LWK.
+	 * @param[in] mempolicy_info, the information to be written.
+	 * @param[in] len size of information to be written in bytes.
 	 * @return 0 if the request was succeessful.
 	 */
-	int (*set_lwkmem_domain_info)(char *order);
+	int (*set_lwkmem_mempolicy_info)(char *mempolicy_info, size_t len);
 
 	/**
 	 * Get mOS view of current process
@@ -271,6 +309,65 @@ typedef struct envelope_t {
 	struct envelope_t *next;
 } envelope_t;
 
+/*
+ * Mempory policy info buffer passed to LWK
+ *
+ * +------------------------+
+ * | Common header          |
+ * +------------------------+
+ * | Mempolicy-dbss         |
+ * +------------------------+
+ * | Mempolicy-heap         |
+ * +------------------------+
+ * | Mempolicy-anon_private |
+ * +------------------------+
+ * | Mempolicy-tstack       |
+ * +------------------------+
+ * | Mempolicy-stack        |
+ * +------------------------+
+ */
+
+#define LWKMEM_MEMPOL_LIST_MAX			16 /* Max number of lists */
+#define LWKMEM_MEMPOL_MAX_NODES_PER_LIST	16 /* Max nodes per list  */
+#define LWKMEM_MEMPOL_LONGS_PER_LIST		((LWKMEM_MEMPOL_MAX_NODES_PER_LIST + 7) / 8)
+#define LWKMEM_MEMPOL_EOL			((unsigned char) 0xff)
+
+/*
+ * CAUTION: Any changes to structures lwkmem_mempolicy_info_header_t and
+ *          lwkmem_mempolicy_info_t structure needs to update the LWK memory
+ *          policy info store method lwk_mm_set_mempolicy_info() that interprets
+ *          the user buffer as per below format. Failing to do so may result in
+ *          LWK seeing inconsistent memory policy info for the process and
+ *          reject such format.
+ */
+typedef struct lwkmem_mempolicy_info_header_t {
+	__u64 header_size;	  /* Size of this structure               */
+	__u64 info_size;	  /* Size of lwkmem_mempolicy_info_t      */
+	__u64 nvmrs;		  /* Number of VMRs mempolicy info is for */
+	__u64 nlists_max;	  /* Max number of lists per set          */
+	__u64 nlists_valid;	  /* Actual number of lists valid         */
+	__u64 max_longs_per_list; /* Max number of 64 bit fields per list */
+} lwkmem_mempolicy_info_header_t;
+
+typedef struct lwkmem_mempolicy_info_t {
+	/*
+	 * Each 64 bit entry has 8 elements of the list each 8 bit in size.
+	 * First element starting at byte 0, second byte 1, so on. An entry
+	 * of 0xFF indicates the end of the list.
+	 */
+	__u64 above_threshold[LWKMEM_MEMPOL_LIST_MAX][LWKMEM_MEMPOL_LONGS_PER_LIST];
+	/*
+	 * Each 64 bit entry has 8 elements of the list each 8 bit in size.
+	 * First element starting at byte 0, second byte 1, so on. An entry
+	 * of 0xFF indicates the end of the list.
+	 */
+	__u64 below_threshold[LWKMEM_MEMPOL_LIST_MAX][LWKMEM_MEMPOL_LONGS_PER_LIST];
+	__u64 threshold;
+	__u64 max_page_size;
+	__u64 pagefault_level;
+	__u64 policy_type;
+} lwkmem_mempolicy_info_t;
+
 typedef struct lwk_request_t {
 	size_t lwkmem_size;
 	size_t lwkmem_size_by_group[YOD_MAX_GROUPS];
@@ -287,13 +384,14 @@ typedef struct lwk_request_t {
 	size_t options_idx;
 	size_t lwkmem_domain_info[YOD_NUM_MEM_GROUPS][YOD_MAX_NIDS];
 	size_t lwkmem_domain_info_len[YOD_NUM_MEM_GROUPS];
-	char lwkmem_domain_info_str[4096];
 	struct memory_preferences_t {
 		enum mem_group_t lower_order[YOD_NUM_MEM_GROUPS];
 		enum mem_group_t upper_order[YOD_NUM_MEM_GROUPS];
 		unsigned long threshold;
+		unsigned long max_page_size;
+		unsigned long pagefault_level;
+		unsigned long policy_type;
 	} memory_preferences[YOD_NUM_MEM_SCOPES];
-	bool memory_preferences_present;
 
 	void (*memsize_resolver)(struct lwk_request_t *this);
 	void (*lwkcpus_resolver)(struct lwk_request_t *this);

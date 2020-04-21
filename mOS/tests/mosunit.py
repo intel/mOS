@@ -118,7 +118,8 @@ def mos_core_teardown():
     restore_lwk_partition()
 
 def lwkctl_precheck():
-    return top_level_is_present('lwkctl/*') and top_level_is_present('lwksched.*') and top_level_is_present('lwkmem/lwkmem.*')
+    #return top_level_is_present('lwkctl/*') and top_level_is_present('lwksched.*') and top_level_is_present('lwkmem/lwkmem.*')
+    return top_level_is_present('lwkctl/*') and top_level_is_present('lwksched.*')
 
 def lwkctl_setup():
     save_lwk_partition()

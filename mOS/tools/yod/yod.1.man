@@ -135,15 +135,6 @@ NUMA domains for CPUs.  Disabling the layout will not prescribe any specific lay
 of the ranks with respect to NUMA domains.  This option is a hint and requires additional
 support from the underlying MPI launch mechanism.
 .TP
-.B --aligned-mmap \fIthreshold[:alignment]\fP
-For \fIthreshold\fP values greater than zero, private, anonymous mmaps of size >=
-\fIthreshold\fP are aligned on the boundary defined by \fIalignment\fP.  For
-\fIthreshold\fP equal to zero, mmap alignment is disabled.  Negative values for
-\fIthreshold\fP are illegal.  The \fIalignment\fP value must be at least 8K and must
-be a multilpe of 4K.  If omitted, the default value of \fIalignment\fP is 1G.  Both
-\fIthreshold\fP and \fIalignment\fP values may be specified in integer or symbolic
-format (4K, 2M, 1G, etc.).
-.TP
 .B --brk-clear-length \fIsize\fP
 For non-negative \fIsize\fP values, \fIsize\fP defines the number of bytes to clear
 (zero) at the beginning of the expanded region when the brk system call expands
@@ -156,6 +147,45 @@ Sets the mOS view of process being launched.  If \fBlwk\fP is specified, the
 process will see only LWK global resources but not Linux resources.  If \fBall\fP
 is specified, the process will see both LWK and Linux resources.  The default is
 \fBall\fP.
+.TP
+.B --maxpage \fIscope:maxpage\fP
+Sets the largest page size that can be used for a virtual memory region.
+\fIscope\fP can be \fBdbss\fP for .data/.bss area, \fBheap\fP for brk area,
+\fBanon_private\fP for private anonymous area, \fBtstack\fP for thread stacks,
+\fBstack\fP for process stack or \fBall\fP for all LWK memory backed areas.
+\fImaxpage\fP can be either \fB4k, 2m,\fP or \fB1g\fP. Setting for multiple virtual
+memory regions can be specified by using separator \fI'/'\fP between settings of each
+virtual memory region. One can specify a different \fImaxpage\fP for each region.
+If setting for a virtual memory region is not specified then by default the largest
+page size supported by the hardware is used for that region, unless interleaving
+is active. If interleaving is active, then the default maximum page size is 2m.
+
+.TP
+.B --pagefault \fIscope:level\fP
+Sets the page faulting level that can be used for a virtual memory region.
+\fIscope\fP can be \fBdbss\fP for .data/.bss area, \fBheap\fP for brk area,
+\fBanon_private\fP for private anonymous area, \fBtstack\fP for thread stacks,
+\fBstack\fP for process stack or \fBall\fP for all LWK memory backed areas.
+\fIlevel\fP can be either \fBnofault\fP or \fBonefault\fP. Setting for multiple virtual
+memory regions can be specified by using separator \fI'/'\fP between settings of each
+virtual memory region. One can specify a different \fIlevel\fP for each region.
+If setting for a virtual memory region is not specified then a default setting of
+nofault is applied.
+
+.TP
+.B --mempolicy \fIscope:type\fP
+Sets the memory policy type that can be used for a virtual memory region.
+\fIscope\fP can be \fBdbss\fP for .data/.bss area, \fBheap\fP for brk area,
+\fBanon_private\fP for private anonymous area, \fBtstack\fP for thread stacks,
+\fBstack\fP for process stack or \fBall\fP for all LWK memory backed areas.
+\fItype\fP can be either \fBnormal\fP, \fBrandom\fP, \fBinterleave\fP, or
+\fBinterleave_random\fP. Setting for multiple virtual memory regions can be specified
+by using separator \fI'/'\fP between settings of each virtual memory region.
+One can specify a different \fItype\fP for each region. If setting for a virtual
+memory region is not specified then a default setting of \fB'interleave'\fP is applied
+if there is at least more than 1 NUMA domains reserved for a memory type otherwise
+the default setting is \fB'normal'\fP
+
 .TP
 .B --dry-run
 Do not actually reserve resources and launch.
@@ -244,15 +274,13 @@ from a node, tile and core perspective, but will initially consume one
 CPU per each reserved core before scheduling work on the remaining CPUs
 of the reserved cores.
 
-If the OMP_NUM_THREADS environment variable is set, the \fB:<count>\fP
-suffix for the \fBcpu\fP term defaults to OMP_NUM_THREADS divided by the
-number of reserved cores, or 1, whichever is larger.
-
 .SH MEMORY PREFERENCES
 
 Preferences have the form \fBscope[:size]:order\fP.  The \fBscope\fP term
-identifies a general form of memory usage and is one of \fBmmap, brk, stack,
-static\fP or \fBall.\fP.
+identifies a virtual memory region and can be \fBdbss\fP for .data/.bss area,
+\fBheap\fP for brk area, \fBanon_private\fP for private anonymous area,
+\fBtstack\fP for thread stacks, \fBstack\fP for process stack or \fBall\fP
+for all LWK memory backed areas.
 
 .PP
 The \fBorder\fP term lists types of memory in order of preference.  This is
@@ -345,14 +373,28 @@ Reserves LWK CPUs 48-71 and 75% of the designated LWK memory.
 Gives precedence to DRAM for all memory allocations.
 
 .TP
-.B yod -p mmap:dram/mmap:65536:hbm
+.B yod -p anon_private:dram/anon_private:65536:hbm
 Gives precedence to DRAM for private, anonymous mmaps of less than 64K and
 also gives precedence to HBM for private, anonymous mmaps of 64K or larger.
 
 .TP
-.B yod -p all:dram/mmap:65536:hbm
+.B yod -p all:dram/anon_private:65536:hbm
 Gives precedence to DRAM for all memory allocations, except private, anonymous
 mmaps of 64K or larger.
+
+.TP
+.B yod --maxpage heap:2m/anon_private:1g
+Set largest page size that can be used for heap to 2m and that of private
+anonymous maps to 1g
+
+.TP
+.B yod --pagefault heap:nofault/anon_private:onefault
+Pagefaults are disabled for heap area and a single page fault is used per
+mmaped virtual memory area to allocate and map all pages of that area.
+
+.TP
+.B yod --mempolicy all:interleave
+Memory policy of all VMRs are set to interleave.
 
 .SH ENVIRONMENT VARIABLES
 

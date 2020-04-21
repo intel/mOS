@@ -32,11 +32,12 @@
 #define MOS_SYSFS_LWKMEM_RESERVED (MOS_SYSFS_ROOT "lwkmem_reserved")
 #define MOS_SYSFS_LWKMEM_REQUEST (MOS_SYSFS_ROOT "lwkmem_request")
 #define MOS_SYSFS_LWKCPUS_SEQUENCE (MOS_SYSFS_ROOT "lwkcpus_sequence")
-#define MOS_SYSFS_LWKMEM_DOMAIN_INFO (MOS_SYSFS_ROOT "lwkmem_domain_info")
+#define MOS_SYSFS_LWKMEM_MEMPOLICY_INFO (MOS_SYSFS_ROOT "lwkmem_mempolicy_info")
 #define MOS_SYSFS_LWK_OPTIONS (MOS_SYSFS_ROOT "lwk_options")
 #define MOS_SYSFS_LWK_PROCESSES (MOS_SYSFS_ROOT "lwkprocesses")
 #define CPUINFO "/proc/cpuinfo"
 #define CPU_ONLINE "/sys/devices/system/cpu/online"
+#define NODES_ONLINE "/sys/devices/system/node/online"
 #define THREAD_SIBLINGS "/sys/devices/system/cpu/cpu%d/topology/thread_siblings_list"
 #define CACHE_LEVEL "/sys/devices/system/cpu/cpu%d/cache/index%d/level"
 #define L2_SIBLINGS "/sys/devices/system/cpu/cpu%d/cache/index%d/shared_cpu_list"
@@ -543,6 +544,12 @@ static int mos_request_lwk_memory(size_t *mem, size_t n)
 	}
 }
 
+/* We re-use cpulist parsing code to read online NUMA nodes */
+static int mos_get_numa_nodes_online(mos_cpuset_t *set)
+{
+	return mos_sysfs_get_cpulist(NODES_ONLINE, set);
+}
+
 static int lock_fd = -1;
 
 static int mos_get_local_rank(int *local_rank, int *local_n_ranks)
@@ -859,10 +866,10 @@ static int mos_lwkcpus_sequence_request(char *layout)
 			       layout, strlen(layout));
 }
 
-static int mos_set_lwkmem_domain_info(char *info)
+static int mos_set_lwkmem_mempolicy_info(char *mempolicy_info, size_t len)
 {
-	return mos_sysfs_write(MOS_SYSFS_LWKMEM_DOMAIN_INFO,
-			       info, strlen(info));
+	return mos_sysfs_write(MOS_SYSFS_LWKMEM_MEMPOLICY_INFO,
+			       mempolicy_info, len);
 }
 
 static int mos_set_options(char *options, size_t len)
@@ -919,12 +926,13 @@ struct yod_plugin mos_plugin = {
 	.get_designated_lwkmem = mos_get_designated_lwkmem,
 	.get_reserved_lwkmem = mos_get_reserved_lwkmem,
 	.request_lwk_memory = mos_request_lwk_memory,
+	.get_numa_nodes_online = mos_get_numa_nodes_online,
 	.lock = mos_combo_lock,
 	.unlock = mos_combo_unlock,
 	.get_distance_map = mos_get_distance_map,
 	.lwkcpus_sequence_request = mos_lwkcpus_sequence_request,
 	.set_options = mos_set_options,
-	.set_lwkmem_domain_info = mos_set_lwkmem_domain_info,
+	.set_lwkmem_mempolicy_info = mos_set_lwkmem_mempolicy_info,
 	.get_mos_view = mos_get_mos_view,
 	.set_mos_view = mos_set_mos_view,
 	.get_lwk_processes = mos_get_lwk_processes,

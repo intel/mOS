@@ -36,7 +36,7 @@
 #define LWKMEM_REQUEST "lwkmem_request"
 #define SEQUENCE_REQUEST "lwkcpus_sequence"
 #define LWK_UTIL_THREADS_REQUEST "lwk_util_threads"
-#define LWKMEM_DOMAIN_INFO_REQUEST "lwkmem_domain_info"
+#define LWKMEM_MEMPOLICY_INFO_REQUEST "lwkmem_mempolicy_info"
 #define LWK_OPTIONS "lwk_options"
 #define DISTANCE_N "distance%zd"
 #define MAX_CPUS 1024
@@ -45,7 +45,7 @@ static char *tst_get_file_name(const char *name, char *buffer, size_t len)
 {
 	int n = snprintf(buffer, len, "/tmp/%s/yod/%s", getenv("USER"), name);
 
-	if (n >= len)
+	if (n >= (int)len)
 		yod_abort(-1, "Buffer overflow constructing test file %s", name);
 
 	return buffer;
@@ -372,12 +372,12 @@ static int tst_set_options(char *options, size_t len)
 	return 0;
 }
 
-static int tst_set_lwkmem_domain_info(char *info)
+static int tst_set_lwkmem_mempolicy_info(char *info, size_t len)
 {
 	char path[256];
 
-	tst_write_raw(tst_get_file_name(LWKMEM_DOMAIN_INFO_REQUEST, path, sizeof(path)),
-		      info, strlen(info) + 1);
+	tst_write_raw(tst_get_file_name(LWKMEM_MEMPOLICY_INFO_REQUEST, path, sizeof(path)),
+		      info, len);
 	return 0;
 }
 
@@ -401,7 +401,7 @@ static struct yod_plugin tst_plugin = {
 	.get_distance_map = tst_get_distance_map,
 	.lwkcpus_sequence_request = tst_lwkcpus_sequence_request,
 	.set_options = tst_set_options,
-	.set_lwkmem_domain_info = tst_set_lwkmem_domain_info,
+	.set_lwkmem_mempolicy_info = tst_set_lwkmem_mempolicy_info,
 	.get_lwk_processes = tst_get_lwk_processes,
 };
 

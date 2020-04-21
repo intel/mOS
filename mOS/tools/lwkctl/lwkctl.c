@@ -26,10 +26,12 @@
 #include <limits.h>
 #include <sys/user.h>
 #include <sys/file.h>
+#include <signal.h>
 
 #include "lwkctl.h"
 
 #define HELPSTR(s)		(s ? s : "")
+#define LWKCTL_DEL_STR		"0"
 #define PROC_MOS_VIEW		"/proc/self/mos_view"
 #define PROC_MOS_VIEW_LEN 	20
 #define VM_DROP_CACHE_ALL	"3"
@@ -121,6 +123,9 @@ bool lwkmem_precise;
 
 static const char *amax = "auto:max";
 static const char *abal = "auto";
+
+struct sigaction signal_action;
+static int terminating_signal;
 
 /*
  * Prints usage of lwkctl command
@@ -1441,7 +1446,7 @@ static int lwkctl_delete(char *p)
 	atexit(lwkctl_start_irqbalance);
 	lwkctl_stop_irqbalance();
 
-	rc = __lwkctl_delete("lwkcpus= lwkmem=");
+	rc = __lwkctl_delete(LWKCTL_DEL_STR);
 	if (!rc) {
 		char *s_cpus;
 
@@ -1516,6 +1521,22 @@ static void precise_spec_update(char **partition_spec)
 	*(new_spec + written) = '\0';
 	free(*partition_spec);
 	*partition_spec = new_spec;
+}
+
+static void lwkconfig_cleanup(void)
+{
+	int rc;
+
+	/*
+	 * If a terminating signal occurred any time after the call to the
+	 * kernel via lwkconfig, delete the partially constructed lwk partition.
+	 */
+	if (terminating_signal) {
+		rc = lwkctl_delete(NULL);
+		LC_LOG(LC_DEBUG,
+		    "Partition deletion due to signal %s. rc=%d",
+		    (terminating_signal == SIGTERM) ? "SIGTERM" : "SIGINT", rc);
+	}
 }
 
 /*
@@ -1666,7 +1687,7 @@ static int lwkctl_create(char *p)
 			}
 		}
 
-		rc = __lwkctl_delete("lwkcpus= lwkmem=");
+		rc = __lwkctl_delete(LWKCTL_DEL_STR);
 
 		if (rc) {
 			lwkctl_abort(rc,
@@ -1735,6 +1756,7 @@ static int lwkctl_create(char *p)
 	/* Sync and drop Linux's clean caches */
 	vm_drop_clean_caches();
 
+	atexit(lwkconfig_cleanup);
 	rc = mos_sysfs_set_lwkconfig(partition_spec);
 
 	if (rc) {
@@ -2069,6 +2091,18 @@ static void lwkctl_sysfs_unlock(void)
 	LC_LOG(LC_GORY, "(<) %s() fd=%d", __func__, lock_fd);
 }
 
+static void handle_terminating_signal(int sig)
+{
+	/*
+	 * Its not safe to do much in a signal handler (e.g. most syscalls).
+	 * Set an indicator that will be checked in main and drive the cleanup
+	 * from there. The existence of this handler will prevent the immediate
+	 * termination of the process and prevent the bypassing of the calls to
+	 * the atexit handlers.
+	 */
+	terminating_signal = sig;
+}
+
 /*
  * Entry point to lwkctl command
  *
@@ -2081,6 +2115,12 @@ int main(int argc, char **argv)
 {
 	int rc = 0;
 	char view[PROC_MOS_VIEW_LEN] = { "all" };
+
+	signal_action.sa_handler = &handle_terminating_signal;
+	if (sigaction(SIGTERM, &signal_action, NULL) < 0)
+		LC_LOG(LC_WARN, "Failure setting SIGTERM signal handler.");
+	if (sigaction(SIGINT, &signal_action, NULL) < 0)
+		LC_LOG(LC_WARN, "Failure setting SIGINT signal handler.");
 
 	/*
 	 * lwkctl needs to have full system view i.e. its mOS view
@@ -2151,6 +2191,13 @@ out:
 		free(lc_opts.create);
 	if (lc_opts.delete)
 		free(lc_opts.delete);
+	if (terminating_signal) {
+		/* atexit handlers will run at the return from main */
+		LC_LOG(LC_WARN, "Abnormally terminating due to signal %s",
+		    (terminating_signal == SIGTERM) ? "SIGTERM" : "SIGINT");
+		rc = -1;
+	}
+
 	return rc;
 }
 

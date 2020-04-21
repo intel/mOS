@@ -53,10 +53,11 @@ static const enum mem_group_t DEFAULT_MEMORY_ORDER[] = {
 };
 
 static const char * const SCOPES[] = {
-	"mmap",
+	"dbss",
+	"heap",
+	"anon_private",
+	"tstack",
 	"stack",
-	"static",
-	"brk",
 	"all"
 };
 
@@ -73,6 +74,32 @@ static const char * const MAP_TYPES[] = {
 	"mem_group",
 };
 
+const char * const PAGE_TYPES[] = {
+	"4k",
+	"2m",
+	"4m",
+	"1g"
+};
+
+const char * const PAGE_FAULT_LEVELS[] = {
+	"nofault",
+	"onefault"
+};
+
+static const __u64 PAGE_SIZES[] = {
+	1UL << 12,
+	1UL << 21,
+	1UL << 22,
+	1UL << 30
+};
+
+const char * const MEMPOLICY_TYPES[] = {
+	"normal",
+	"random",
+	"interleave",
+	"interleave_random"
+};
+
 /*
  * Values for command line options that do not have short
  * versions (used by getopt_long, below)
@@ -86,12 +113,18 @@ static const char * const MAP_TYPES[] = {
 #define YOD_OPT_ALIGNED_MMAP (YOD_OPT_BASE | 0x0007)
 #define YOD_OPT_BRK_CLEAR_LEN (YOD_OPT_BASE | 0x0008)
 #define YOD_OPT_MOSVIEW (YOD_OPT_BASE | 0x0009)
+#define YOD_OPT_LWKMEM_DISABLE (YOD_OPT_BASE | 0x000A)
+#define YOD_OPT_MAXPAGE (YOD_OPT_BASE | 0x000B)
+#define YOD_OPT_PAGEFAULT (YOD_OPT_BASE | 0x000C)
+#define YOD_OPT_MEMPOLICY (YOD_OPT_BASE | 0x000D)
 
 /*
  * yod state.
  */
 
 static struct map_type_t *yod_maps[YOD_NUM_MAP_ELEMS];
+
+static bool explicit_maxpage[YOD_NUM_MEM_SCOPES];
 
 int yod_verbosity = YOD_CRIT;
 int mpi_localnranks = 0;
@@ -101,7 +134,7 @@ static struct yod_plugin *plugin = &mos_plugin;
 static int dry_run = 0;
 static int num_util_threads;
 static unsigned long requested_lwk_mem = -1;
-static float requested_lwk_mem_fraction = 0.0;
+static double requested_lwk_mem_fraction = 0.0;
 static mos_cpuset_t *requested_lwk_cpus;
 static int all_lwk_cpus_specified = 0;
 static int requested_lwk_cores = -1;
@@ -110,6 +143,7 @@ static mos_cpuset_t *designated_lwkcpus;
 static mos_cpuset_t *reserved_lwkcpus;
 static char extra_help[4096];
 static unsigned int resource_algorithm_index;
+static bool lwkmem_disabled;
 
 static struct lock_options_t lock_options = {
 	.timeout_millis = 60 * 1000, /* one minute */
@@ -161,6 +195,22 @@ struct help_text {
 	{0, 0, "data segment is expanded via brk."},
 	{"--mosview", "<view>", "Specifies the mOS view to be set for the"},
 	{0, 0, "LWK process - lwk or all (default)"},
+	{"--lwkmem-disable", 0, "Do not use LWK memory for this process."},
+	{"--maxpage", "<scope:maxpage>", "Set the upper limit on page size for virtual memory regions."},
+	{0, 0, "Settings for multiple regions can be specified using"},
+	{0, 0, "separator '/' between them."},
+	{0, 0, "scope    - dbss, heap, anon_private, tstack, stack, or all"},
+	{0, 0, "maxpage  - 4k, 2m, 1g"},
+	{"--pagefault", "<scope:pf_level>", "Set pagefault level for virtual memory regions."},
+	{0, 0, "Settings for multiple regions can be specified using"},
+	{0, 0, "separator '/' between them."},
+	{0, 0, "scope    - dbss, heap, anon_private, tstack, stack, or all"},
+	{0, 0, "pf_level - nofault, onefault"},
+	{"--mempolicy", "<scope:type>", "Set memory policy type for virtual memory regions."},
+	{0, 0, "Settings for multiple regions can be specified using"},
+	{0, 0, "separator '/' between them."},
+	{0, 0, "scope    - dbss, heap, anon_private, tstack, stack, or all"},
+	{0, 0, "type - normal, random, interleave, interleave_random"},
 	{"--verbose, -v", "<level>", "Sets verbosity of yod."},
 	{0, 0, "be used for this job."}
 };
@@ -960,10 +1010,17 @@ static void yodopt_check_for_cpus_already_specified(void)
 
 static void yodopt_check_for_mem_already_specified(void)
 {
-	if (!no_lwkmem_requested())
+	if (!lwkmem_disabled && !no_lwkmem_requested())
 		yod_abort(-EINVAL,
 			  "Specify only one of --mem/-M, --resources/-R."
 			  );
+}
+
+static void assert_lwkmem_enabled(void)
+{
+	if (lwkmem_disabled)
+		yod_abort(-EINVAL,
+			  "Conflicting memory option with --lwkmem-disable");
 }
 
 /** Converts opt to a long int value.  Expects opt to look exactly like
@@ -1211,6 +1268,7 @@ static int yodopt_util_threads(const char *opt)
 
 static int yodopt_mem(const char *opt)
 {
+	assert_lwkmem_enabled();
 	yodopt_check_for_mem_already_specified();
 
 	if (strcmp("all", opt) == 0) {
@@ -1286,9 +1344,11 @@ static int yodopt_lwk_resources(const char *opt)
 
 	if (strcmp("all", opt) == 0) {
 		requested_lwk_cores = INT_MAX;
-		requested_lwk_mem = LONG_MAX;
 		lwk_req.lwkcpus_resolver = all_available_lwk_cores_resolver;
-		lwk_req.memsize_resolver = all_available_memsize_resolver;
+		if (!lwkmem_disabled) {
+			requested_lwk_mem = LONG_MAX;
+			lwk_req.memsize_resolver = all_available_memsize_resolver;
+		}
 		fraction = 1.0;
 	} else if (strncmp("file:", opt, strlen("file:")) == 0) {
 		yodopt_process_resource_file(opt + strlen("file:"));
@@ -1303,10 +1363,13 @@ static int yodopt_lwk_resources(const char *opt)
 		requested_lwk_cores = fraction *
 			yod_count_by(get_designated_lwkcpus(), YOD_CORE);
 		lwk_req.lwkcpus_resolver = n_cores_lwkcpu_resolver;
-		requested_lwk_mem = (unsigned long)(fraction *
-				    yod_get_lwkmem(YOD_DESIGNATED));
-		requested_lwk_mem_fraction = fraction;
-		lwk_req.memsize_resolver = memsize_by_ratio_resolver;
+
+		if (!lwkmem_disabled) {
+			requested_lwk_mem = (unsigned long)(fraction *
+						yod_get_lwkmem(YOD_DESIGNATED));
+			requested_lwk_mem_fraction = fraction;
+			lwk_req.memsize_resolver = memsize_by_ratio_resolver;
+		}
 	} else {
 		yod_abort(-EINVAL, "Bad argument for --resources/-R.");
 	}
@@ -1344,6 +1407,7 @@ static int yodopt_resource_algorithm(const char *opt)
 
 static int yodopt_mem_algorithm(const char *opt)
 {
+	assert_lwkmem_enabled();
 	mem_algorithm =
 	    label_to_int(opt, YOD_MEM_ALGORITHMS,
 			 ARRAY_SIZE(YOD_MEM_ALGORITHMS));
@@ -1399,32 +1463,6 @@ static void yodopt_rank_layout(const char *descr)
 			  descr);
 }
 
-static bool yodopt_is_set(const char *opt)
-{
-	int offs = 0;
-	int olen = strlen(opt);
-	int maxoffs = lwk_req.options_idx +
-		strlen(lwk_req.options + lwk_req.options_idx);
-
-	while (offs < maxoffs) {
-
-		if (lwk_req.options[offs] == '\0') {
-			offs++;
-			continue;
-		}
-
-		if (strncmp(lwk_req.options + offs, opt, olen))
-			goto next;
-
-		if (lwk_req.options[offs + olen] == '=')
-			return true;
-next:
-		offs += strlen(lwk_req.options + offs);
-	}
-
-	return false;
-}
-
 static void yodopt_option(const char *opt)
 {
 	size_t offset, this_opt_len;
@@ -1467,6 +1505,7 @@ static void yodopt_aligned_mmap(const char *opt)
 	long threshold = -1, alignment = -1;
 	int rc;
 
+	assert_lwkmem_enabled();
 	copy = strdup(opt);
 	if (!copy)
 		yod_abort(-ENOMEM, "Out of memory");
@@ -1516,6 +1555,7 @@ static void yodopt_brk_clear_length(const char *opt)
 	char buffer[256];
 	int rc;
 
+	assert_lwkmem_enabled();
 	if (yodopt_parse_memsize(opt, &length))
 		goto illegal;
 
@@ -1532,9 +1572,189 @@ static void yodopt_brk_clear_length(const char *opt)
 	yod_abort(-EINVAL, "Illegal brk-clear-length argument: %s", opt);
 }
 
+static void yodopt_maxpage(const char *opt)
+{
+	int s;
+	char *arg, *arg_start;
+	char *pref_s, *scope_s, *maxpg_s;
+	enum mem_scopes_t scope;
+	enum page_types_t maxpg;
+
+	arg = strdup(opt);
+	arg_start = arg;
+
+	if (!arg)
+		yod_abort(-ENOMEM, "Could not copy: %s", opt);
+
+	while ((pref_s = strsep(&arg, "/"))) {
+		if (strlen(pref_s) == 0)
+			continue;
+
+		scope_s = strsep(&pref_s, ":");
+		maxpg_s = strsep(&pref_s, ":");
+
+		if (pref_s)
+			yod_abort(-EINVAL,
+				  "Invalid maxpage: Extraneous characters afer %s:%s",
+				  scope_s,
+				  maxpg_s);
+
+		if (!scope_s || !maxpg_s)
+			yod_abort(-EINVAL,
+				  "Invalid arguments to set maxpage");
+
+		scope = label_to_int(scope_s, SCOPES, ARRAY_SIZE(SCOPES));
+		if (scope == YOD_SCOPE_UNKNOWN)
+			yod_abort(-EINVAL,
+				  "Invalid scope to set maxpage: \"%s\"",
+				  scope_s);
+
+		maxpg = label_to_int(maxpg_s, PAGE_TYPES, ARRAY_SIZE(PAGE_TYPES));
+		if (maxpg == PG_TYPE_UNKNOWN)
+			yod_abort(-EINVAL,
+				  "Invalid page type to set maxpage: \"%s\"",
+				  maxpg_s);
+
+		if (scope == YOD_SCOPE_ALL) {
+			for (s = 0; s < YOD_NUM_MEM_SCOPES; s++) {
+				lwk_req.memory_preferences[s].max_page_size = PAGE_SIZES[maxpg];
+				explicit_maxpage[s] = true;
+			}
+		} else {
+			lwk_req.memory_preferences[scope].max_page_size = PAGE_SIZES[maxpg];
+			explicit_maxpage[scope] = true;
+		}
+	}
+	free(arg_start);
+}
+
+static void yodopt_pagefault_level(const char *opt)
+{
+	int s;
+	char *arg, *arg_start;
+	char *pref_s, *scope_s, *pf_level_s;
+	enum mem_scopes_t scope;
+	enum page_fault_levels_t pf_level;
+
+	assert_lwkmem_enabled();
+	arg = strdup(opt);
+	arg_start = arg;
+
+	if (!arg)
+		yod_abort(-ENOMEM, "Could not copy: %s", opt);
+
+	while ((pref_s = strsep(&arg, "/"))) {
+		if (strlen(pref_s) == 0)
+			continue;
+
+		scope_s = strsep(&pref_s, ":");
+		pf_level_s = strsep(&pref_s, ":");
+
+		if (pref_s)
+			yod_abort(-EINVAL,
+				  "Invalid pagefault level: Extraneous characters afer %s:%s",
+				  scope_s,
+				  pf_level_s);
+
+		if (!scope_s || !pf_level_s)
+			yod_abort(-EINVAL,
+				  "Invalid arguments to set pagefault level");
+
+		scope = label_to_int(scope_s, SCOPES, ARRAY_SIZE(SCOPES));
+		if (scope == YOD_SCOPE_UNKNOWN)
+			yod_abort(-EINVAL,
+				  "Invalid scope to set pagefault level: \"%s\"",
+				  scope_s);
+
+		pf_level = label_to_int(pf_level_s, PAGE_FAULT_LEVELS, ARRAY_SIZE(PAGE_FAULT_LEVELS));
+		if (pf_level == PF_LEVEL_UNKNOWN)
+			yod_abort(-EINVAL,
+				  "Invalid pagefault level: \"%s\"",
+				  pf_level_s);
+
+		if (scope == YOD_SCOPE_ALL) {
+			for (s = 0; s < YOD_NUM_MEM_SCOPES; s++)
+				lwk_req.memory_preferences[s].pagefault_level = pf_level;
+		} else
+			lwk_req.memory_preferences[scope].pagefault_level = pf_level;
+	}
+	free(arg_start);
+}
+
+static void yodopt_mempolicy_type(const char *opt)
+{
+	int s;
+	char *arg, *arg_start;
+	char *pref_s, *scope_s, *policy_type_s;
+	enum mem_scopes_t scope;
+	enum policy_types_t policy_type;
+
+	assert_lwkmem_enabled();
+	arg = strdup(opt);
+	arg_start = arg;
+
+	if (!arg)
+		yod_abort(-ENOMEM, "Could not copy: %s", opt);
+
+	while ((pref_s = strsep(&arg, "/"))) {
+		if (strlen(pref_s) == 0)
+			continue;
+
+		scope_s = strsep(&pref_s, ":");
+		policy_type_s = strsep(&pref_s, ":");
+
+		if (pref_s)
+			yod_abort(-EINVAL,
+				  "Invalid memory policy type: Extraneous characters afer %s:%s",
+				  scope_s,
+				  policy_type_s);
+
+		if (!scope_s || !policy_type_s)
+			yod_abort(-EINVAL,
+				  "Invalid arguments to set memory policy type");
+
+		scope = label_to_int(scope_s, SCOPES, ARRAY_SIZE(SCOPES));
+		if (scope == YOD_SCOPE_UNKNOWN)
+			yod_abort(-EINVAL,
+				  "Invalid scope to set memory policy type: \"%s\"",
+				  scope_s);
+
+		policy_type = label_to_int(policy_type_s, MEMPOLICY_TYPES, ARRAY_SIZE(MEMPOLICY_TYPES));
+		if (policy_type == MEMPOLICY_UNKNOWN)
+			yod_abort(-EINVAL,
+				  "Invalid memory policy type: \"%s\"",
+				  policy_type_s);
+
+		if (scope == YOD_SCOPE_ALL) {
+			for (s = 0; s < YOD_NUM_MEM_SCOPES; s++)
+				lwk_req.memory_preferences[s].policy_type = policy_type;
+		} else
+			lwk_req.memory_preferences[scope].policy_type = policy_type;
+	}
+	free(arg_start);
+}
+static void yod_set_default_memory_preferences(void)
+{
+	struct memory_preferences_t *pref;
+	int s;
+
+	assert_lwkmem_enabled();
+
+	for (s = 0; s < YOD_NUM_MEM_SCOPES; s++) {
+		pref = &lwk_req.memory_preferences[s];
+		pref->threshold = 1;
+		pref->max_page_size = s != YOD_SCOPE_HEAP ? ((__u64)1) << 30 : ((__u64)1) << 21;
+		pref->pagefault_level = PF_LEVEL_NOFAULT;
+		pref->policy_type = MEMPOLICY_UNKNOWN;
+		memcpy(pref->lower_order, DEFAULT_MEMORY_ORDER, sizeof(DEFAULT_MEMORY_ORDER));
+		memcpy(pref->upper_order, DEFAULT_MEMORY_ORDER, sizeof(DEFAULT_MEMORY_ORDER));
+	}
+}
+
 static void yodopt_memory_preference(const char *opt)
 {
-	char *arg, *pref_s, *scope_s, *threshold_s, *order_s, *group_s;
+	char *arg, *arg_start, *pref_s;
+	char *scope_s, *threshold_s, *order_s, *group_s;
 	int g, s;
 	enum mem_scopes_t scope;
 	long int threshold;
@@ -1542,21 +1762,10 @@ static void yodopt_memory_preference(const char *opt)
 	int order_i;
 	struct memory_preferences_t *pref;
 
-	/* Lazy initialization of preferences -- everything set to default
-	 * order:
-	 */
-	if (!lwk_req.memory_preferences_present) {
-		for (s = 0; s < YOD_NUM_MEM_SCOPES; s++) {
-			pref = &lwk_req.memory_preferences[s];
-			pref->threshold = 1;
-			memcpy(pref->lower_order, DEFAULT_MEMORY_ORDER, sizeof(DEFAULT_MEMORY_ORDER));
-			memcpy(pref->upper_order, DEFAULT_MEMORY_ORDER, sizeof(DEFAULT_MEMORY_ORDER));
-		}
-
-		lwk_req.memory_preferences_present = true;
-	}
+	assert_lwkmem_enabled();
 
 	arg = strdup(opt);
+	arg_start = arg;
 
 	while ((pref_s = strsep(&arg, "/"))) {
 
@@ -1580,8 +1789,12 @@ static void yodopt_memory_preference(const char *opt)
 			threshold_s = "1";
 		}
 
-		scope = label_to_int(scope_s, SCOPES, ARRAY_SIZE(SCOPES));
+		if (!order_s)
+			yod_abort(-EINVAL,
+				"Invalid memory preference for scope: %s",
+				scope_s);
 
+		scope = label_to_int(scope_s, SCOPES, ARRAY_SIZE(SCOPES));
 		if (scope == YOD_SCOPE_UNKNOWN)
 			yod_abort(-EINVAL,
 				  "Invalid memory preference scope: \"%s\"",
@@ -1630,7 +1843,6 @@ static void yodopt_memory_preference(const char *opt)
 		 * structure:
 		 */
 		if (scope == YOD_SCOPE_ALL) {
-			pref = &lwk_req.memory_preferences[0];
 			for (s = 0; s < YOD_NUM_MEM_SCOPES; s++) {
 				pref = &(lwk_req.memory_preferences[s]);
 				if (threshold == 1)
@@ -1647,7 +1859,7 @@ static void yodopt_memory_preference(const char *opt)
 		}
 	}
 
-	free(arg);
+	free(arg_start);
 }
 
 static void yodopt_mosview(const char *opt)
@@ -1868,11 +2080,12 @@ static void resolve_options(lwk_request_t *req)
 	int rc;
 	size_t i;
 	enum mem_group_t g;
+	mos_cpuset_t *numa_nodes_online = NULL;
 
 	/* --cores/-C requires that --mem/-M is also specified. */
 
 	if ((requested_lwk_cores != -1 || requested_lwk_cpus != NULL) &&
-	    no_lwkmem_requested())
+	    !lwkmem_disabled && no_lwkmem_requested())
 		yod_abort(-EINVAL,
 			  "--cores/-C requires --mem/-M to also be specified.");
 
@@ -1883,9 +2096,20 @@ static void resolve_options(lwk_request_t *req)
 		yod_abort(-EINVAL,
 			  "--mem/-M requires either --cores/-C or --cpus/-c to also be specified.");
 
+	/*
+	 * Implicitly disable LWKMEM usage if there is no designated
+	 * LWK memory. In this case yod just ignores all memory related
+	 * arguments and kernel is expected to ignore LWK memory related
+	 * yod options.
+	 */
+	if (yod_get_lwkmem(YOD_DESIGNATED) == 0) {
+		lwkmem_disabled = true;
+		YOD_LOG(YOD_DEBUG, "LWK memory not found. Disabling LWK memory usage.");
+	}
+
 	/* Fill in any missing resolvers and such. */
 
-	if (!req->memsize_resolver)
+	if (!lwkmem_disabled && !req->memsize_resolver)
 		req->memsize_resolver = all_available_memsize_resolver;
 
 	if (!req->lwkcpus_resolver)
@@ -1899,22 +2123,30 @@ static void resolve_options(lwk_request_t *req)
 	 *         reserved for this launch.
 	 * ----------------------------------------------------------------- */
 
-	req->n_nids = ARRAY_SIZE(req->lwkmem_designated);
-	plugin->get_designated_lwkmem(req->lwkmem_designated, &req->n_nids);
-	plugin->get_reserved_lwkmem(req->lwkmem_reserved, &req->n_nids);
+	if (!lwkmem_disabled) {
+		req->n_nids = ARRAY_SIZE(req->lwkmem_designated);
+		plugin->get_designated_lwkmem(req->lwkmem_designated, &req->n_nids);
+		plugin->get_reserved_lwkmem(req->lwkmem_reserved, &req->n_nids);
 
-	for (i = 0; i < YOD_MAX_NIDS; i++) {
-		g = yod_nid_to_mem_group(i);
-		if (g == YOD_MEM_GROUP_UNKNOWN)
-			break;
-		req->n_groups = g < (int)req->n_groups ? req->n_groups : (size_t)g + 1;
+		for (i = 0; i < YOD_MAX_NIDS; i++) {
+			g = yod_nid_to_mem_group(i);
+			if (g == YOD_MEM_GROUP_UNKNOWN)
+				break;
+			req->n_groups = g < (int)req->n_groups ? req->n_groups : (size_t)g + 1;
+		}
+
+		req->memsize_resolver(req);
+
+		if (req->lwkmem_size > yod_get_lwkmem(YOD_DESIGNATED))
+			yod_abort(-EINVAL, "Requested memory exceeds memory designated for LWK usage.");
+	} else {
+		numa_nodes_online = mos_cpuset_alloc_validate();
+		if (plugin->get_numa_nodes_online(numa_nodes_online))
+			yod_abort(-EINVAL, "Failed to read the number of online NUMA nodes");
+		req->n_nids = mos_cpuset_cardinality(numa_nodes_online);
+		if (req->n_nids <= 0)
+			yod_abort(-EINVAL, "Invalid number of online NUMA nodes detected");
 	}
-
-	req->memsize_resolver(req);
-
-
-	if (req->lwkmem_size > yod_get_lwkmem(YOD_DESIGNATED))
-		yod_abort(-EINVAL, "Requested memory exceeds memory designated for LWK usage.");
 
 	/* -----------------------------------------------------------------
 	 * Step 2: determine the overall set of LWK CPUs to be requested for
@@ -1927,89 +2159,36 @@ static void resolve_options(lwk_request_t *req)
 	 * Step 3: Resolve any lingering memory selections.
 	 * ----------------------------------------------------------------- */
 
-	rc = req->memory_selection_algorithm(req);
-	if (rc)
-		yod_abort(rc, "Could not construct LWK memory request.");
+	if (!lwkmem_disabled) {
+		rc = req->memory_selection_algorithm(req);
+		if (rc)
+			yod_abort(rc, "Could not construct LWK memory request.");
+	}
 
 	YOD_LOG(YOD_DEBUG, "Requesting LWK CPUs     : %s",
 		 mos_cpuset_to_list_validate(req->lwkcpus_request));
-	YOD_LOG(YOD_DEBUG, "Requesting LWK memory   : %'ld / 0x%lX", req->lwkmem_size, req->lwkmem_size);
+	if (!lwkmem_disabled)
+		YOD_LOG(YOD_DEBUG, "Requesting LWK memory   : %'ld / 0x%lX", req->lwkmem_size, req->lwkmem_size);
 
 	rc = req->layout_algorithm(req);
 	if (rc)
 		yod_abort(rc, "Failed in layout algorithm.");
-
-	req->lwkmem_domain_info_str[0] = '\0';
-
-	for (g = 0; g < (int)req->n_groups; g++) {
-
-		if (req->lwkmem_domain_info_len[g] <= 0)
-			continue;
-
-		if (strlen(req->lwkmem_domain_info_str) > 0)
-			STR_APPEND(req->lwkmem_domain_info_str,
-				   sizeof(req->lwkmem_domain_info_str), " ");
-
-		STR_APPEND(req->lwkmem_domain_info_str,
-			   sizeof(req->lwkmem_domain_info_str),
-			   "%s=", MEM_GROUPS[g]);
-
-		for (i = 0; i < req->lwkmem_domain_info_len[g]; i++)
-			STR_APPEND(req->lwkmem_domain_info_str,
-				   sizeof(req->lwkmem_domain_info_str),
-				   i > 0 ? ",%zd" : "%zd",
-				   req->lwkmem_domain_info[g][i]);
-	}
-
-	/* -----------------------------------------------------------------
-	 * Step 4: Set memory preferences.
-	 * ----------------------------------------------------------------- */
-
-	if (lwk_req.memory_preferences_present) {
-		char option[8192], buf[1024];
-		int s, g, i;
-		enum mem_group_t *order;
-		struct memory_preferences_t *pref;
-
-		strcpy(option, "lwkmem-memory-preferences=");
-
-		for (s = 0; s < YOD_NUM_MEM_SCOPES; s++) {
-			pref = &lwk_req.memory_preferences[s];
-
-			for (i = 0; i < 2; i++) {
-				if (i == 0) {
-					snprintf(buf, sizeof(buf), "/%s:", SCOPES[s]);
-					order = pref->lower_order;
-				} else if (pref->threshold > 1) {
-					snprintf(buf, sizeof(buf), "/%s:%ld:", SCOPES[s],
-						 pref->threshold);
-					order =	pref->upper_order;
-				} else {
-					continue;
-				}
-
-				STR_APPEND(option, sizeof(option), buf);
-
-				for (g = 0; g < YOD_NUM_MEM_GROUPS; g++) {
-					STR_APPEND(option, sizeof(option), MEM_GROUPS[order[g]]);
-					STR_APPEND(option, sizeof(option), ",");
-				}
-			}
-		}
-
-		yodopt_option(option);
-	}
-
 }
 
 static void parse_options(int argc, char **argv)
 {
+	int c, opt_index;
+	char opt_string[] = {"+c:C:M:p:R:U:u:x:y:o:v:h"};
+
 	static struct option options[] = {
 		{"cpus", required_argument, 0, 'c'},
 		{"cores", required_argument, 0, 'C'},
 		{"util_threads", required_argument, 0, 'u'},
 		{"mem", required_argument, 0, 'M'},
 		{"memory-preference", required_argument, 0, 'p'},
+		{"maxpage", required_argument, 0, YOD_OPT_MAXPAGE},
+		{"pagefault", required_argument, 0, YOD_OPT_PAGEFAULT},
+		{"mempolicy", required_argument, 0, YOD_OPT_MEMPOLICY},
 		{"resources", required_argument, 0, 'R'},
 		{"resource_algorithm", required_argument, 0,
 		 YOD_OPT_RESOURCE_ALGORITHM},
@@ -2021,18 +2200,33 @@ static void parse_options(int argc, char **argv)
 		 YOD_OPT_BRK_CLEAR_LEN},
 		{"mosview", required_argument, 0, YOD_OPT_MOSVIEW},
 		{"opt", required_argument, 0, 'o'},
+		{"lwkmem-disable", no_argument, 0, YOD_OPT_LWKMEM_DISABLE},
 		{"help", no_argument, 0, 'h'},
 		{"verbose", required_argument, 0, 'v'},
 		{"dry-run", no_argument, 0, YOD_OPT_DRYRUN},
 		{0, 0, 0, 0},
 	};
 
+	/* Parse options that are mutually exclusive to others options. */
+	/* Disable printing error as we check only for few options here. */
+	opterr = 0;
+	while ((c = getopt_long(argc, argv, opt_string, options, NULL)) != -1) {
+		if (c == YOD_OPT_LWKMEM_DISABLE) {
+			lwkmem_disabled = true;
+			break;
+		}
+	}
+
+	/* Set default memory preferences in case if user doesn't specify one */
+	if (!lwkmem_disabled)
+		yod_set_default_memory_preferences();
+
+	/* Reset scan in argv and enable printing error */
+	optind = 0;
+	opterr = 1;
 	while (1) {
 
-		int c;
-		int opt_index = 0;
-
-		c = getopt_long(argc, argv, "+c:C:M:p:R:U:u:x:y:o:v:h", options,
+		c = getopt_long(argc, argv, opt_string, options,
 				&opt_index);
 
 		if (c == -1)
@@ -2070,6 +2264,18 @@ static void parse_options(int argc, char **argv)
 			yodopt_memory_preference(optarg);
 			break;
 
+		case YOD_OPT_MAXPAGE:
+			yodopt_maxpage(optarg);
+			break;
+
+		case YOD_OPT_PAGEFAULT:
+			yodopt_pagefault_level(optarg);
+			break;
+
+		case YOD_OPT_MEMPOLICY:
+			yodopt_mempolicy_type(optarg);
+			break;
+
 		case YOD_OPT_RESOURCE_ALGORITHM:
 			yodopt_resource_algorithm(optarg);
 			break;
@@ -2100,6 +2306,10 @@ static void parse_options(int argc, char **argv)
 
 		case 'o':
 			yodopt_option(optarg);
+			break;
+
+		case YOD_OPT_LWKMEM_DISABLE:
+			/* Noop here as it is already parsed once previously */
 			break;
 
 		case 'h':{
@@ -2151,13 +2361,140 @@ static void set_mos_view(char *view_requested)
 	}
 }
 
+static void write_mempolicy_normal(unsigned char *buffer)
+{
+	lwkmem_mempolicy_info_t *mempolicy_info, *info;
+	lwkmem_mempolicy_info_header_t *mempolicy_info_header;
+	struct memory_preferences_t *pref;
+	enum mem_group_t g, gvalid_above, gvalid_below;
+	unsigned char *byte;
+	char *line;
+	unsigned long line_size = 4096;
+	int s, n, rc, domain_len;
+
+	YOD_LOG(YOD_DEBUG, "Setting memory policy: normal");
+
+	/* Build common header */
+	mempolicy_info_header = (lwkmem_mempolicy_info_header_t *) buffer;
+	mempolicy_info_header->header_size = sizeof(lwkmem_mempolicy_info_header_t);
+	mempolicy_info_header->info_size = sizeof(lwkmem_mempolicy_info_t);
+	mempolicy_info_header->nvmrs = YOD_NUM_MEM_SCOPES;
+	mempolicy_info_header->nlists_max = LWKMEM_MEMPOL_LIST_MAX;
+	mempolicy_info_header->max_longs_per_list = LWKMEM_MEMPOL_LONGS_PER_LIST;
+	mempolicy_info_header->nlists_valid = 0;
+
+	for (g = 0; g < (int)lwk_req.n_groups; g++) {
+		/* Skip a memory type not present */
+		if (lwk_req.lwkmem_domain_info_len[g] <= 0)
+			continue;
+		mempolicy_info_header->nlists_valid++;
+	}
+
+	YOD_LOG(YOD_DEBUG, "header_size        : %llu", mempolicy_info_header->header_size);
+	YOD_LOG(YOD_DEBUG, "info_size          : %llu", mempolicy_info_header->info_size);
+	YOD_LOG(YOD_DEBUG, "nvmrs              : %llu", mempolicy_info_header->nvmrs);
+	YOD_LOG(YOD_DEBUG, "nlists_max         : %llu", mempolicy_info_header->nlists_max);
+	YOD_LOG(YOD_DEBUG, "nlists_valid       : %llu", mempolicy_info_header->nlists_valid);
+	YOD_LOG(YOD_DEBUG, "max_longs_per_list : %llu", mempolicy_info_header->max_longs_per_list);
+
+	/* Build mempolicy info per virtual memory regions  */
+	mempolicy_info = (lwkmem_mempolicy_info_t *)(buffer + mempolicy_info_header->header_size);
+	for (s = 0; s < YOD_NUM_MEM_SCOPES; s++) {
+		pref = &(lwk_req.memory_preferences[s]);
+
+		info = mempolicy_info + s;
+
+		gvalid_above = 0;
+		gvalid_below = 0;
+		info->threshold = pref->threshold;
+		info->pagefault_level = pref->pagefault_level;
+		for (g = 0; g < (int) lwk_req.n_groups; g++) {
+			domain_len = lwk_req.lwkmem_domain_info_len[pref->upper_order[g]];
+			if (domain_len) {
+				if (domain_len > LWKMEM_MEMPOL_MAX_NODES_PER_LIST) {
+					yod_abort(-1, "NUMA domains of type [%s] [%d] > supported list length [%d]",
+						MEM_GROUPS[pref->upper_order[g]], domain_len,
+						LWKMEM_MEMPOL_MAX_NODES_PER_LIST);
+				}
+
+				if (domain_len > 1 && pref->policy_type == MEMPOLICY_UNKNOWN)
+					pref->policy_type = MEMPOLICY_INTERLEAVE;
+
+				byte = (unsigned char *)&info->above_threshold[gvalid_above++];
+				for (n = 0; n < domain_len; n++)
+					byte[n] = lwk_req.lwkmem_domain_info[pref->upper_order[g]][n];
+				/* Mark end of list */
+				if (n < LWKMEM_MEMPOL_MAX_NODES_PER_LIST)
+					byte[n] = LWKMEM_MEMPOL_EOL;
+			}
+
+			domain_len = lwk_req.lwkmem_domain_info_len[pref->lower_order[g]];
+			if (domain_len) {
+				if (domain_len > LWKMEM_MEMPOL_MAX_NODES_PER_LIST) {
+					yod_abort(-1, "NUMA domains of type [%s] [%d] > supported list length [%d]",
+						MEM_GROUPS[pref->lower_order[g]], domain_len,
+						LWKMEM_MEMPOL_MAX_NODES_PER_LIST);
+				}
+
+				byte = (unsigned char *)&info->below_threshold[gvalid_below++];
+				for (n = 0; n < domain_len; n++)
+					byte[n] = lwk_req.lwkmem_domain_info[pref->lower_order[g]][n];
+				/* Mark end of list */
+				if (n < LWKMEM_MEMPOL_MAX_NODES_PER_LIST)
+					byte[n] = LWKMEM_MEMPOL_EOL;
+			}
+		}
+
+		if (pref->policy_type == MEMPOLICY_UNKNOWN)
+			pref->policy_type = MEMPOLICY_NORMAL;
+		info->policy_type = pref->policy_type;
+		if (pref->policy_type == MEMPOLICY_INTERLEAVE && !explicit_maxpage[s])
+			pref->max_page_size = ((__u64)1) << 21;
+		info->max_page_size = pref->max_page_size;
+		/* Debug prints */
+		YOD_LOG(YOD_DEBUG, "[%s] : threshold %llu maxpg %llu pflvl %llu policy %llu",
+			SCOPES[s], info->threshold, info->max_page_size,
+			info->pagefault_level, info->policy_type);
+
+		if (yod_verbosity >= YOD_DEBUG) {
+			line = (char *) malloc(line_size);
+			if (line) {
+				for (g = 0; g < (int) gvalid_above; g++) {
+					byte = (unsigned char *)&info->above_threshold[g];
+					rc = snprintf(line, line_size, "above_threshold[%d]: ", g);
+					for (n = 0; n < LWKMEM_MEMPOL_MAX_NODES_PER_LIST; n++) {
+						if (byte[n] == LWKMEM_MEMPOL_EOL)
+							break;
+						rc += snprintf(line+rc, line_size-rc, "%s%d",
+							       n ? ", " : "", byte[n]);
+					}
+					YOD_LOG(YOD_DEBUG, "%s", line);
+				}
+
+				for (g = 0; g < (int) gvalid_below; g++) {
+					byte = (unsigned char *)&info->below_threshold[g];
+					rc = snprintf(line, line_size, "below_threshold[%d]: ", g);
+					for (n = 0; n < LWKMEM_MEMPOL_MAX_NODES_PER_LIST; n++) {
+						if (byte[n] == LWKMEM_MEMPOL_EOL)
+							break;
+						rc += snprintf(line+rc, line_size-rc, "%s%d",
+							       n ? ", " : "", byte[n]);
+					}
+					YOD_LOG(YOD_DEBUG, "%s", line);
+				}
+				free(line);
+			}
+		}
+	}
+}
+
 int main(int argc, char **argv)
 {
 
 	char *verbose_env, *tst_plugin, *options, *mpi_env;
 	int rc;
 	char *timeout_str;
-	size_t i, total_mem;
+	size_t total_mem;
 	char mem_str[PATH_MAX];
 
 	verbose_env = getenv("YOD_VERBOSE");
@@ -2246,6 +2583,11 @@ int main(int argc, char **argv)
 			  strerror(-rc));
 	YOD_LOG(YOD_INFO, "Utility thread count: %d", num_util_threads);
 
+	/*
+	 * Even if lwkmem usage is disabled (implicitly or explicitly)
+	 * we request zero LWK memory to kernel to indicate that we do
+	 * not use LWK memory for this process.
+	 */
 	rc = plugin->request_lwk_memory(lwk_req.lwkmem_request, lwk_req.n_nids);
 
 	if (rc != 0)
@@ -2256,19 +2598,26 @@ int main(int argc, char **argv)
 	YOD_LOG(YOD_INFO, "LWK memory requested: %s total %zd MiB",
 		mem_str, total_mem >> 20);
 
-	rc = plugin->set_lwkmem_domain_info(lwk_req.lwkmem_domain_info_str);
+	/* Set LWK memory policy information if LWK memory is enabled */
+	if (!lwkmem_disabled) {
+		unsigned char *buffer;
+		size_t mempolicy_info_size;
 
-	if (rc)
-		yod_abort(rc, "Could not write memory domain information.");
+		/* Allocate buffer to hold mempolicy info format, see yod.h  */
+		mempolicy_info_size = sizeof(lwkmem_mempolicy_info_header_t);
+		mempolicy_info_size += sizeof(lwkmem_mempolicy_info_t) * YOD_NUM_MEM_SCOPES;
 
-	YOD_LOG(YOD_INFO, "Domain info: %s", lwk_req.lwkmem_domain_info_str);
+		buffer = malloc(mempolicy_info_size);
+		if (!buffer)
+			yod_abort(-ENOMEM, "Could not allocate mempolicy info");
+		memset(buffer, 0, mempolicy_info_size);
 
-	if (!yodopt_is_set("lwkmem-interleave")) {
-		for (i = 0; i < lwk_req.n_groups; i++)
-			if (lwk_req.lwkmem_domain_info_len[i] > 1) {
-				yodopt_option("lwkmem-interleave=2m");
-				break;
-			}
+		write_mempolicy_normal(buffer);
+		rc = plugin->set_lwkmem_mempolicy_info((char *)buffer, mempolicy_info_size);
+		free(buffer);
+
+		if (rc)
+			yod_abort(-1, "Failed to write memory policy information");
 	}
 
 	rc = plugin->set_options(lwk_req.options, lwk_req.options_idx +
