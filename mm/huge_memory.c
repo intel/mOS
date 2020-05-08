@@ -33,6 +33,7 @@
 #include <linux/oom.h>
 #include <linux/numa.h>
 #include <linux/page_owner.h>
+#include <linux/mos.h>
 
 #include <asm/tlb.h>
 #include <asm/pgalloc.h>
@@ -2292,6 +2293,11 @@ void vma_adjust_trans_huge(struct vm_area_struct *vma,
 			     unsigned long end,
 			     long adjust_next)
 {
+	if (is_lwkvma(vma)) {
+		lwkmem_vma_adjust(vma, start, end);
+		start = end = 0;
+	}
+
 	/*
 	 * If the new start address isn't hpage aligned and it could
 	 * previously contain an hugepage: check if we need to split
@@ -2321,6 +2327,12 @@ void vma_adjust_trans_huge(struct vm_area_struct *vma,
 		struct vm_area_struct *next = vma->vm_next;
 		unsigned long nstart = next->vm_start;
 		nstart += adjust_next;
+
+		if (is_lwkvma(next)) {
+			lwkmem_vma_adjust(next, nstart, next->vm_end);
+			return;
+		}
+
 		if (nstart & ~HPAGE_PMD_MASK &&
 		    (nstart & HPAGE_PMD_MASK) >= next->vm_start &&
 		    (nstart & HPAGE_PMD_MASK) + HPAGE_PMD_SIZE <= next->vm_end)

@@ -47,6 +47,7 @@
 #include <linux/pkeys.h>
 #include <linux/oom.h>
 #include <linux/sched/mm.h>
+#include <linux/mos.h>
 
 #include <linux/uaccess.h>
 #include <asm/cacheflush.h>
@@ -249,6 +250,12 @@ SYSCALL_DEFINE1(brk, unsigned long, brk)
 		 * mm->brk will be restored from origbrk.
 		 */
 		mm->brk = brk;
+
+		/* Do not unmap pages when heap shrinks for LWK heap */
+		if (is_lwkmem_enabled(current) &&
+		    !is_lwkvmr_disabled(LWK_VMR_HEAP))
+			goto success;
+
 		ret = __do_munmap(mm, newbrk, oldbrk-newbrk, &uf, true);
 		if (ret < 0) {
 			mm->brk = origbrk;
@@ -256,6 +263,56 @@ SYSCALL_DEFINE1(brk, unsigned long, brk)
 		} else if (ret == 1) {
 			downgraded = true;
 		}
+		goto success;
+	}
+
+	if (is_lwkmem_enabled(current) && !is_lwkvmr_disabled(LWK_VMR_HEAP)) {
+		next = find_vma(mm, oldbrk);
+
+		/*
+		 * VMA corresponding to the heap already exists that overlaps
+		 * with the requested expansion.
+		 */
+		if (next && next->vm_start <= oldbrk) {
+			/*
+			 * Is heap expanded outside current heap VMA?,
+			 * if yes then expand pre-existing VMA's end.
+			 */
+			if (newbrk > next->vm_end) {
+				/* Overflow? */
+				if (next->vm_next &&
+				    (newbrk + PAGE_SIZE >
+				    vm_start_gap(next->vm_next)))
+					goto out;
+				if (do_brk_flags(next->vm_end,
+					newbrk - next->vm_end,
+					VM_LWK | VM_LWK_HEAP | VM_LWK_EXTRA,
+					&uf))
+					goto out;
+			}
+		} else {
+			/* If a VMA exists after heap, check for overflow */
+			if (next && newbrk + PAGE_SIZE > vm_start_gap(next))
+				goto out;
+
+			if (do_brk_flags(oldbrk, newbrk-oldbrk,
+				VM_LWK | VM_LWK_HEAP | VM_LWK_EXTRA, &uf) < 0)
+				goto out;
+			next = find_vma(mm, oldbrk);
+		}
+
+		/*
+		 * We can not rely on VMA of heap for new end of heap and
+		 * instead need to explicitly pass @newbrk because in case
+		 * if @newbrk was within pre-existing VMA for heap then
+		 * it's vm_end would not define the current end of heap.
+		 */
+		if (!is_lwkvma(next)) {
+			LWKMEM_ERROR("Not a LWK VMA for heap");
+			goto out;
+		}
+		lwkmem_clear_heap(next, oldbrk, newbrk);
+		mm->brk = brk;
 		goto success;
 	}
 
@@ -276,7 +333,7 @@ success:
 	else
 		mmap_write_unlock(mm);
 	userfaultfd_unmap_complete(mm, &uf);
-	if (populate)
+	if (populate || is_lwkmem_nofault(VM_LWK | VM_LWK_HEAP))
 		mm_populate(oldbrk, newbrk - oldbrk);
 	return brk;
 
@@ -1172,6 +1229,14 @@ struct vm_area_struct *vma_merge(struct mm_struct *mm,
 	if (vm_flags & VM_SPECIAL)
 		return NULL;
 
+	/*
+	 * Do not merge LWK VMAs in general, with exception for
+	 * heap which we know will be covered by a single VMA and
+	 * expanded upon a vma_merge().
+	 */
+	if ((vm_flags & VM_LWK) && !(vm_flags & VM_LWK_HEAP))
+		return NULL;
+
 	next = vma_next(mm, prev);
 	area = next;
 	if (area && area->vm_end == end)		/* cases 6, 7, 8 */
@@ -1560,6 +1625,22 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 			 * Set pgoff according to addr for anon_vma.
 			 */
 			pgoff = addr >> PAGE_SHIFT;
+
+			if (is_lwkmem_enabled(current)) {
+				if (flags & (MAP_STACK | MAP_NORESERVE)) {
+					if (!is_lwkvmr_disabled(LWK_VMR_TSTACK))
+						vm_flags |= VM_LWK_TSTACK |
+							    VM_LWK |
+							    VM_LWK_EXTRA;
+					break;
+				}
+
+				if (!is_lwkvmr_disabled(LWK_VMR_ANON_PRIVATE)) {
+					vm_flags |= VM_LWK_ANON_PRIVATE;
+					vm_flags |= VM_LWK | VM_LWK_EXTRA;
+					break;
+				}
+			}
 			break;
 		default:
 			return -EINVAL;
@@ -1583,7 +1664,8 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 	addr = mmap_region(file, addr, len, vm_flags, pgoff, uf);
 	if (!IS_ERR_VALUE(addr) &&
 	    ((vm_flags & VM_LOCKED) ||
-	     (flags & (MAP_POPULATE | MAP_NONBLOCK)) == MAP_POPULATE))
+	     (flags & (MAP_POPULATE | MAP_NONBLOCK)) == MAP_POPULATE ||
+	     is_lwkmem_nofault(vm_flags)))
 		*populate = len;
 	return addr;
 }
@@ -1846,6 +1928,8 @@ unsigned long mmap_region(struct file *file, unsigned long addr,
 			goto free_vma;
 	} else {
 		vma_set_anonymous(vma);
+		if (is_lwkvma(vma))
+			vma_set_lwkvma(vma);
 	}
 
 	/* Allow architectures to sanity-check the vm_flags */
@@ -1916,7 +2000,7 @@ unacct_error:
 	return error;
 }
 
-static unsigned long unmapped_area(struct vm_unmapped_area_info *info)
+unsigned long unmapped_area(struct vm_unmapped_area_info *info)
 {
 	/*
 	 * We implement the search by looking for an rbtree node that
@@ -2279,6 +2363,9 @@ get_unmapped_area(struct file *file, unsigned long addr, unsigned long len,
 		 */
 		pgoff = 0;
 		get_area = shmem_get_unmapped_area;
+	} else if ((flags & MAP_PRIVATE) && (flags & MAP_ANONYMOUS) &&
+		   is_lwkmem_enabled(current)) {
+		get_area = lwkmem_get_unmapped_area_ops();
 	}
 
 	addr = get_area(file, addr, len, pgoff, flags);
@@ -2768,6 +2855,13 @@ int __split_vma(struct mm_struct *mm, struct vm_area_struct *vma,
 	else
 		err = vma_adjust(vma, vma->vm_start, addr, vma->vm_pgoff, new);
 
+	/*
+	 * Adjust LWK VMA mapped range in the new VMA, For old VMA
+	 * it will be adjusted in vma_adjust() call above.
+	 */
+	if (is_lwkvma(new) && !err)
+		lwkmem_vma_adjust(new, new->vm_start, new->vm_end);
+
 	/* Success. */
 	if (!err)
 		return 0;
@@ -3070,9 +3164,17 @@ static int do_brk_flags(unsigned long addr, unsigned long len, unsigned long fla
 	pgoff_t pgoff = addr >> PAGE_SHIFT;
 	int error;
 	unsigned long mapped_addr;
+	unsigned long vm_lwk_flags;
 
 	/* Until we need other flags, refuse anything except VM_EXEC. */
-	if ((flags & (~VM_EXEC)) != 0)
+	if (!(flags & VM_LWK) && (flags & (~VM_EXEC)) != 0)
+		return -EINVAL;
+	/*
+	 * For LWK memory requests, add vm_flags used by LWK heap, dbss
+	 * and VM_LWK_EXTRA to the exception list.
+	 */
+	vm_lwk_flags = VM_LWK | VM_LWK_HEAP | VM_LWK_DBSS | VM_LWK_EXTRA;
+	if ((flags & VM_LWK) && (flags & (~(VM_EXEC | vm_lwk_flags))) != 0)
 		return -EINVAL;
 	flags |= VM_DATA_DEFAULT_FLAGS | VM_ACCOUNT | mm->def_flags;
 
@@ -3119,6 +3221,8 @@ static int do_brk_flags(unsigned long addr, unsigned long len, unsigned long fla
 	vma->vm_pgoff = pgoff;
 	vma->vm_flags = flags;
 	vma->vm_page_prot = vm_get_page_prot(flags);
+	if (is_lwkvma(vma))
+		vma_set_lwkvma(vma);
 	vma_link(mm, vma, prev, rb_link, rb_parent);
 out:
 	perf_event_mmap(vma);
@@ -3339,6 +3443,11 @@ struct vm_area_struct *copy_vma(struct vm_area_struct **vmap,
 			new_vma->vm_ops->open(new_vma);
 		vma_link(mm, new_vma, prev, rb_link, rb_parent);
 		*need_rmap_locks = false;
+
+		 /* Adjust LWK VMA mapped range in the new VMA */
+		if (is_lwkvma(new_vma))
+			lwkmem_vma_adjust(new_vma, new_vma->vm_start,
+					  new_vma->vm_end);
 	}
 	return new_vma;
 

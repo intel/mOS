@@ -52,4 +52,6 @@ comment "RCU_NOCB_CPU recommended for mOS"
 comment "!RCU_FAST_NO_HZ recommended for mOS"
 	depends on RCU_FAST_NO_HZ
 
+source "mOS/lwkmem/Kconfig"
+
 endif	# if MOS_FOR_HPC

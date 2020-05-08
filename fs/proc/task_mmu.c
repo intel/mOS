@@ -19,6 +19,7 @@
 #include <linux/shmem_fs.h>
 #include <linux/uaccess.h>
 #include <linux/pkeys.h>
+#include <linux/mos.h>
 
 #include <asm/elf.h>
 #include <asm/tlb.h>
@@ -313,6 +314,22 @@ show_map_vma(struct seq_file *m, struct vm_area_struct *vma)
 			goto done;
 		}
 
+		if (is_lwkvma(vma)) {
+			if (vma->vm_flags & VM_LWK_STACK)
+				name = "[stack] [LWK]";
+			else if (vma->vm_flags & VM_LWK_TSTACK)
+				name = "[tstack] [LWK]";
+			else if (vma->vm_flags & VM_LWK_ANON_PRIVATE)
+				name = "[anon_private] [LWK]";
+			else if (vma->vm_flags & VM_LWK_HEAP)
+				name = "[heap] [LWK]";
+			else if (vma->vm_flags & VM_LWK_DBSS)
+				name = "[dbss] [LWK]";
+			else
+				name = "[unknown] [LWK]";
+			goto done;
+		}
+
 		if (vma->vm_start <= mm->brk &&
 		    vma->vm_end >= mm->start_brk) {
 			name = "[heap]";
@@ -570,6 +587,38 @@ static void smaps_pmd_entry(pmd_t *pmd, unsigned long addr,
 }
 #endif
 
+static void smaps_lwk_pud_entry(pud_t *pud, unsigned long addr,
+		struct mm_walk *walk)
+{
+	struct mem_size_stats *mss = walk->private;
+	struct vm_area_struct *vma = walk->vma;
+	bool locked = !!(vma->vm_flags & VM_LOCKED);
+	struct page *page;
+
+	page = pud_page(*pud);
+	if (!page)
+		return;
+	if (PageAnon(page))
+		mss->anonymous_thp += HPAGE_PUD_SIZE;
+	smaps_account(mss, page, true, pud_young(*pud), pud_dirty(*pud), locked);
+}
+
+static void smaps_lwk_pmd_entry(pmd_t *pmd, unsigned long addr,
+		struct mm_walk *walk)
+{
+	struct mem_size_stats *mss = walk->private;
+	struct vm_area_struct *vma = walk->vma;
+	bool locked = !!(vma->vm_flags & VM_LOCKED);
+	struct page *page;
+
+	page = pmd_page(*pmd);
+	if (!page)
+		return;
+	if (PageAnon(page))
+		mss->anonymous_thp += HPAGE_PMD_SIZE;
+	smaps_account(mss, page, true, pmd_young(*pmd), pmd_dirty(*pmd), locked);
+}
+
 static int smaps_pte_range(pmd_t *pmd, unsigned long addr, unsigned long end,
 			   struct mm_walk *walk)
 {
@@ -577,6 +626,13 @@ static int smaps_pte_range(pmd_t *pmd, unsigned long addr, unsigned long end,
 	pte_t *pte;
 	spinlock_t *ptl;
 
+	if (is_lwkvma(vma)) {
+		ptl = pmd_lock(walk->mm, pmd);
+		if (pmd_present(*pmd))
+			smaps_lwk_pmd_entry(pmd, addr, walk);
+		spin_unlock(ptl);
+		goto out;
+	}
 	ptl = pmd_trans_huge_lock(pmd, vma);
 	if (ptl) {
 		smaps_pmd_entry(pmd, addr, walk);
@@ -597,6 +653,34 @@ static int smaps_pte_range(pmd_t *pmd, unsigned long addr, unsigned long end,
 	pte_unmap_unlock(pte - 1, ptl);
 out:
 	cond_resched();
+	return 0;
+}
+
+static int smaps_pmd_range(pud_t *pud, unsigned long addr, unsigned long end,
+			   struct mm_walk *walk)
+{
+	struct vm_area_struct *vma = walk->vma;
+
+#ifndef CONFIG_TRANSPARENT_HUGEPAGE
+	spinlock_t *ptl;
+#endif
+
+	if (is_lwkvma(vma)) {
+#ifdef CONFIG_TRANSPARENT_HUGEPAGE
+		/* When the page walker is processing the PUD range and making
+		 * callbacks for PUD entries, it has called pud_trans_huge_lock
+		 * which locks the pud (which actually locks the entire page
+		 * table because pud table locks are not split).
+		 */
+#else
+		ptl = pud_lock();
+#endif
+		if (pud_present(*pud))
+			smaps_lwk_pud_entry(pud, addr, walk);
+#ifndef CONFIG_TRANSPARENT_HUGEPAGE
+		spin_unlock(ptl);
+#endif
+	}
 	return 0;
 }
 
@@ -712,11 +796,13 @@ static int smaps_hugetlb_range(pte_t *pte, unsigned long hmask,
 
 static const struct mm_walk_ops smaps_walk_ops = {
 	.pmd_entry		= smaps_pte_range,
+	.pud_entry 		= smaps_pmd_range,
 	.hugetlb_entry		= smaps_hugetlb_range,
 };
 
 static const struct mm_walk_ops smaps_shmem_walk_ops = {
 	.pmd_entry		= smaps_pte_range,
+	.pud_entry 		= smaps_pmd_range,
 	.hugetlb_entry		= smaps_hugetlb_range,
 	.pte_hole		= smaps_pte_hole,
 };
