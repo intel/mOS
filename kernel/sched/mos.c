@@ -345,13 +345,14 @@ static void uncommit_cpu(struct task_struct *p)
 	struct mos_rq *mos_rq;
 	int cpu = p->mos.cpu_home;
 	int underflow = 0;
+	unsigned long flags;
 
 	if (cpu < 0)
 		return;
 	mos_rq = &cpu_rq(cpu)->mos;
 	p->mos.cpu_home = -1;
 
-	raw_spin_lock(&mos_rq->lock);
+	raw_spin_lock_irqsave(&mos_rq->lock, flags);
 	if (p->mos.thread_type == mos_thread_type_normal) {
 		if (mos_rq->compute_commits > 0)
 			mos_rq->compute_commits--;
@@ -364,7 +365,7 @@ static void uncommit_cpu(struct task_struct *p)
 		else
 			underflow = 1;
 	}
-	raw_spin_unlock(&mos_rq->lock);
+	raw_spin_unlock_irqrestore(&mos_rq->lock, flags);
 
 	trace_mos_cpu_uncommit(p, cpu, mos_rq->compute_commits,
 				mos_rq->utility_commits, underflow);
@@ -375,11 +376,12 @@ static void commit_cpu(struct task_struct *p, int cpu)
 	struct mos_rq *mos_rq;
 	unsigned int newval = 0;
 	int overflow = 0;
+	unsigned long flags;
 
 	if (cpu < 0)
 		return;
 	mos_rq = &cpu_rq(cpu)->mos;
-	raw_spin_lock(&mos_rq->lock);
+	raw_spin_lock_irqsave(&mos_rq->lock, flags);
 	if (p->mos.thread_type == mos_thread_type_normal) {
 		if (mos_rq->compute_commits < INT_MAX) {
 			newval = ++mos_rq->compute_commits;
@@ -395,7 +397,7 @@ static void commit_cpu(struct task_struct *p, int cpu)
 		} else
 			overflow = 1;
 	}
-	raw_spin_unlock(&mos_rq->lock);
+	raw_spin_unlock_irqrestore(&mos_rq->lock, flags);
 	p->mos.cpu_home = cpu;
 	trace_mos_cpu_commit(p, cpu, mos_rq->compute_commits,
 			     mos_rq->utility_commits, overflow);
