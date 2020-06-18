@@ -1018,7 +1018,7 @@ static unsigned long lwkmem_get_dynamic_memory(int nid, unsigned long size,
 					       struct list_head *head)
 {
 	int rc;
-	unsigned long flags, nr_pages;
+	unsigned long flags, nr_pages, nr_ms_skipped;
 	unsigned long total_size, block_size;
 	unsigned long start_pfn, end_pfn, pfn, pfn_next;
 
@@ -1051,6 +1051,7 @@ static unsigned long lwkmem_get_dynamic_memory(int nid, unsigned long size,
 	end_pfn = zone_end_pfn(zone_movable);
 	start_pfn = SECTION_ALIGN_UP(start_pfn);
 	end_pfn = SECTION_ALIGN_DOWN(end_pfn);
+	nr_ms_skipped = 0;
 
 	while (start_pfn < end_pfn && total_size < size) {
 		/* Get the next available contiguous region */
@@ -1059,7 +1060,10 @@ static unsigned long lwkmem_get_dynamic_memory(int nid, unsigned long size,
 		while (pfn < end_pfn) {
 			page = pfn_to_page(pfn);
 			if (!pfn_present(pfn) || !pfn_valid(pfn) ||
-			     PageReserved(page)) {
+			     PageReserved(page) ||
+			     PageHWPoison(page)) {
+				if (page && PageHWPoison(page))
+					nr_ms_skipped++;
 				if (pfn == start_pfn) {
 					start_pfn++;
 					start_pfn = SECTION_ALIGN_UP(start_pfn);
@@ -1103,6 +1107,12 @@ static unsigned long lwkmem_get_dynamic_memory(int nid, unsigned long size,
 				pfn - 1,  pfn - start_pfn);
 		}
 		start_pfn = pfn_next;
+	}
+
+	if (nr_ms_skipped) {
+		mos_ras(MOS_LWKCTL_WARNING,
+			"Node %d: skipped %lu sections with hwpoisoned pages",
+			nid, nr_ms_skipped);
 	}
 	spin_unlock_irqrestore(&zone_movable->lock, flags);
 
