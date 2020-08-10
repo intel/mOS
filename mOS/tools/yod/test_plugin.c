@@ -45,7 +45,7 @@ static char *tst_get_file_name(const char *name, char *buffer, size_t len)
 {
 	int n = snprintf(buffer, len, "/tmp/%s/yod/%s", getenv("USER"), name);
 
-	if (n >= len)
+	if (n >= (int)len)
 		yod_abort(-1, "Buffer overflow constructing test file %s", name);
 
 	return buffer;
