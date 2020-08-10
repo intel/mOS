@@ -71,6 +71,7 @@
 #include <linux/dax.h>
 #include <linux/oom.h>
 #include <linux/numa.h>
+#include <linux/mos.h>
 
 #include <asm/io.h>
 #include <asm/mmu_context.h>
@@ -380,6 +381,12 @@ void free_pgtables(struct mmu_gather *tlb, struct vm_area_struct *vma,
 		 */
 		unlink_anon_vmas(vma);
 		unlink_file_vma(vma);
+
+		if (is_lwkmem(vma)) {
+			free_pgd_range(tlb, addr, vma->vm_end, floor, next? next->vm_start: ceiling);
+			vma = next;
+			continue;
+		}
 
 		if (is_vm_hugetlb_page(vma)) {
 			hugetlb_free_pgd_range(tlb, addr, vma->vm_end,
@@ -755,7 +762,8 @@ copy_one_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
 	 * in the parent and the child
 	 */
 	if (is_cow_mapping(vm_flags) && pte_write(pte)) {
-		ptep_set_wrprotect(src_mm, addr, src_pte);
+		if (!is_lwkmem(vma))
+			ptep_set_wrprotect(src_mm, addr, src_pte);
 		pte = pte_wrprotect(pte);
 	}
 
@@ -1049,6 +1057,11 @@ again:
 			if (unlikely(!page))
 				continue;
 
+			if (is_lwkpg(page)) {
+				rss[mm_counter(page)]--;
+				continue;
+			}
+
 			if (!PageAnon(page)) {
 				if (pte_dirty(ptent)) {
 					force_flush = 1;
@@ -1278,7 +1291,9 @@ static void unmap_single_vma(struct mmu_gather *tlb,
 				__unmap_hugepage_range_final(tlb, vma, start, end, NULL);
 				i_mmap_unlock_write(vma->vm_file->f_mapping);
 			}
-		} else
+		} else if (is_lwkmem(vma) || is_lwkxpmem(vma))
+			unmap_lwkmem_range(tlb, vma, start, end, details);
+		else
 			unmap_page_range(tlb, vma, start, end, details);
 	}
 }
@@ -1903,6 +1918,12 @@ int remap_pfn_range(struct vm_area_struct *vma, unsigned long addr,
 	unsigned long remap_pfn = pfn;
 	int err;
 
+	if (is_lwkmem(vma)) {
+		pr_err("WARN:%s() LWKMEM addr %lx pfn %ld size %ld prot %lx\n",
+			__func__, addr, pfn, size, prot.pgprot);
+		return -EINVAL;
+	}
+
 	/*
 	 * Physically remapped pages are special. Tell the
 	 * rest of the world about it:
@@ -2329,6 +2350,8 @@ static vm_fault_t wp_page_copy(struct vm_fault *vmf)
 	struct mem_cgroup *memcg;
 	struct mmu_notifier_range range;
 
+	WARN_ON(is_lwkmem(vma));
+
 	if (unlikely(anon_vma_prepare(vma)))
 		goto oom;
 
@@ -2389,7 +2412,7 @@ static vm_fault_t wp_page_copy(struct vm_fault *vmf)
 		 */
 		set_pte_at_notify(mm, vmf->address, vmf->pte, entry);
 		update_mmu_cache(vma, vmf->address, vmf->pte);
-		if (old_page) {
+		if (old_page && !is_lwkpg(old_page)) {
 			/*
 			 * Only after switching the pte to the new page may
 			 * we remove the mapcount here. Otherwise another
@@ -2431,7 +2454,7 @@ static vm_fault_t wp_page_copy(struct vm_fault *vmf)
 	 * the above ptep_clear_flush_notify() did already call it.
 	 */
 	mmu_notifier_invalidate_range_only_end(&range);
-	if (old_page) {
+	if (old_page && !is_lwkpg(old_page)) {
 		/*
 		 * Don't let another task, with possibly unlocked vma,
 		 * keep the mlocked page.
@@ -3930,6 +3953,8 @@ static vm_fault_t __handle_mm_fault(struct vm_area_struct *vma,
 	vmf.pud = pud_alloc(mm, p4d, address);
 	if (!vmf.pud)
 		return VM_FAULT_OOM;
+	if (unlikely(is_lwkxpmem(vma) && vma->vm_ops->fault))
+		return vma->vm_ops->fault(&vmf);
 	if (pud_none(*vmf.pud) && __transparent_hugepage_enabled(vma)) {
 		ret = create_huge_pud(&vmf);
 		if (!(ret & VM_FAULT_FALLBACK))

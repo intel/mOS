@@ -21,6 +21,8 @@
 #include <asm/mmu_context.h>
 #include <asm/pgtable.h>
 #include <asm/tlbflush.h>
+#include <linux/mos.h>
+#include <linux/sizes.h>
 
 #include "internal.h"
 
@@ -854,8 +856,32 @@ retry:
 			goto out;
 		}
 		cond_resched();
+#ifdef CONFIG_MOS_LWKMEM
+		if (is_lwkmem(vma)) {
+			page = lwkmem_user_to_page(vma->vm_mm, start,
+						  &ctx.page_mask);
+			if (page) {
+				/* We assume that LWK pages handed out via GUP
+				 * will be written to.  Mark the page as a dirty
+				 * LWK page.
+				 */
+				set_lwkpg_dirty(page);
+				SetPageDirty(page);
 
+				if (ctx.page_mask == SZ_2M)
+					ctx.page_mask = HPAGE_PMD_NR - 1;
+				else if (ctx.page_mask == SZ_1G)
+					ctx.page_mask = (1 <<
+					      (PUD_SHIFT-PMD_SHIFT)) - 1;
+				else
+					ctx.page_mask = 0;
+			}
+		} else
+			page = follow_page_mask(vma, start, foll_flags,
+				&ctx);
+#else
 		page = follow_page_mask(vma, start, foll_flags, &ctx);
+#endif  /* CONFIG_MOS_LWKMEM */
 		if (!page) {
 			ret = faultin_page(tsk, vma, start, &foll_flags,
 					nonblocking);
@@ -2286,6 +2312,9 @@ static void gup_pgd_range(unsigned long addr, unsigned long end,
 	unsigned long next;
 	pgd_t *pgdp;
 
+	if (is_mostask())
+		return;
+
 	pgdp = pgd_offset(current->mm, addr);
 	do {
 		pgd_t pgd = READ_ONCE(*pgdp);
@@ -2440,13 +2469,6 @@ int get_user_pages_fast(unsigned long start, int nr_pages,
 	if (unlikely(!access_ok((void __user *)start, len)))
 		return -EFAULT;
 
-	/*
-	 * The FAST_GUP case requires FOLL_WRITE even for pure reads,
-	 * because get_user_pages() may need to cause an early COW in
-	 * order to avoid confusing the normal COW routines. So only
-	 * targets that are already writable are safe to do by just
-	 * looking at the page tables.
-	 */
 	if (IS_ENABLED(CONFIG_HAVE_FAST_GUP) &&
 	    gup_fast_permitted(start, end)) {
 		local_irq_disable();

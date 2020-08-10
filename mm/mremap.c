@@ -279,9 +279,11 @@ unsigned long move_page_tables(struct vm_area_struct *vma,
 				if (moved)
 					continue;
 			}
-			split_huge_pmd(vma, old_pmd, old_addr);
-			if (pmd_trans_unstable(old_pmd))
-				continue;
+			if (!is_lwkmem(vma)) {
+				split_huge_pmd(vma, old_pmd, old_addr);
+				if (pmd_trans_unstable(old_pmd))
+					continue;
+			}
 		} else if (extent == PMD_SIZE) {
 #ifdef CONFIG_HAVE_MOVE_PMD
 			/*

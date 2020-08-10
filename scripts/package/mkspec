@@ -26,6 +26,11 @@ fi
 if grep -q CONFIG_DRM=y .config; then
 	PROVIDES=kernel-drm
 fi
+if  grep -q CONFIG_MOS_FOR_HPC=y .config; then
+	L=
+else
+        L=DEL
+fi
 
 PROVIDES="$PROVIDES kernel-$KERNELRELEASE"
 __KERNELRELEASE=$(echo $KERNELRELEASE | sed -e "s/-/_/g")
@@ -75,6 +80,14 @@ $S$M	%description -n kernel-devel
 $S$M	This package provides kernel headers and makefiles sufficient to build modules
 $S$M	against the $__KERNELRELEASE kernel package.
 $S$M
+$L	%package mOS
+$L	Summary: Tools package for Linux/mOS $__KERNELRELEASE kernel
+$L	Group: System Environment/Kernel
+$L	AutoReqProv: no
+$L	%description -n kernel-mOS
+$L	This package provides tools necessary to use mOS features in
+$L	the $__KERNELRELEASE kernel package.
+$L
 $S	%prep
 $S	%setup -q
 $S
@@ -134,10 +147,28 @@ $M	/lib/modules/$KERNELRELEASE
 $M	%exclude /lib/modules/$KERNELRELEASE/build
 $M	%exclude /lib/modules/$KERNELRELEASE/source
 	/boot/*
+$L	/usr/bin/*
+$L	/etc/udev/rules.d/*
 
 	%files headers
 	%defattr (-, root, root)
 	/usr/include
+
+$L
+$L	%post mOS
+$L	ldconfig
+$L	ln -fs libmos.so.1 /usr/lib/libmos.so
+$L	ln -fs libxpmem.so.0 /usr/lib/libxpmem.so
+$L
+$L	%files mOS
+$L	%defattr (-, root, root)
+$L	/usr/lib/libmos*
+$L	/usr/lib/libxpmem*
+$L	/usr/include/mos.h
+$L	/usr/include/uti.h
+$L	/usr/include/xpmem.h
+$L	/usr/share/man/man1/*
+$L	/usr/share/man/man2/*
 $S$M
 $S$M	%files devel
 $S$M	%defattr (-, root, root)
