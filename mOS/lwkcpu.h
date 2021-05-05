@@ -34,8 +34,6 @@ extern int lwkcpu_down(unsigned int cpu);
 extern int lwkcpu_up_multiple(cpumask_var_t request, cpumask_var_t booted);
 extern int lwkcpu_down_multiple(cpumask_var_t request, cpumask_var_t shutdown);
 extern int lwkcpu_reset(unsigned int cpu);
-extern int lwkcpu_parse_args(char *arg, cpumask_t *lwkcpus,
-			     cpumask_t *syscall_cpus);
 extern void lwkcpu_set_state(enum cpuhp_state state, bool val);
 extern int lwkcpu_state_init(char *profile);
 extern void lwkcpu_state_deinit(void);

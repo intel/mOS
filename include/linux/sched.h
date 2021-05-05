@@ -731,9 +731,6 @@ struct task_struct {
 	const cpumask_t			*cpus_ptr;
 	cpumask_t			cpus_mask;
 
-#ifdef CONFIG_MOS_MOVE_SYSCALLS
-	cpumask_t mos_savedmask;
-#endif
 #ifdef CONFIG_MOS_FOR_HPC
 	int mos_nesting;
 #endif

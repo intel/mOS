@@ -39,7 +39,7 @@ class Basics(TestCase):
         'lwkmem':                   statmode('r--r--r--'),
         'lwkmem_request':           statmode('-w--w--w-'),
         'lwkmem_reserved':          statmode('r--r--r--'),
-        'lwkmem_domain_info':       statmode('-w--w--w-'),
+        'lwkmem_mempolicy_info':    statmode('-w--w--w-'),
         'lwk_options':              statmode('-w--w--w-'),
         'utility_cpus':             statmode('r--r--r--'),
         'utility_cpus_mask':        statmode('r--r--r--'),

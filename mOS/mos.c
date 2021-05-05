@@ -1,6 +1,6 @@
 /*
  * Multi Operating System (mOS)
- * Copyright (c) 2016-2017 Intel Corporation.
+ * Copyright (c) 2016-2020 Intel Corporation.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -33,7 +33,7 @@
 #undef pr_fmt
 #define pr_fmt(fmt)	"mOS: " fmt
 
-#define MOS_VERSION	"0.8"
+#define MOS_VERSION	"0.9"
 
 static cpumask_var_t lwkcpus_map;
 static cpumask_var_t utility_cpus_map;
@@ -50,7 +50,6 @@ static bool lwkmem_precise;
  *       by other LWK components in mOS.
  */
 
-DEFINE_PER_CPU(cpumask_t, mos_syscall_mask);
 DEFINE_PER_CPU(cpumask_t, lwkcpus_mask);
 
 struct mos_process_callbacks_elem_t {
@@ -218,6 +217,9 @@ static struct mos_process_t *mos_get_process(void)
 		process->num_lwkcpus = 0;
 		process->num_util_threads = 0;
 
+		/* Mark current process as mOS LWK process. */
+		current->mos_flags |= MOS_IS_LWK_PROCESS;
+
 		atomic_set(&process->alive, 1); /* count the current thread */
 
 		list_for_each_entry(elem, &mos_process_callbacks, list) {
@@ -382,8 +384,6 @@ static int _cpus_request_set(cpumask_var_t request, cpumask_var_t target)
 	}
 
 	cpumask_or(target, target, request);
-
-	current->mos_flags |= MOS_IS_LWK_PROCESS;
 out:
 	return rc;
 }
@@ -438,6 +438,11 @@ static int _lwkcpus_request_set(cpumask_var_t request)
 	}
 
  out:
+	if (rc) {
+		/* In case of error clear the CPUs that we marked reserved */
+		cpumask_andnot(lwkcpus_reserved_map,
+			       lwkcpus_reserved_map, request);
+	}
 	return rc;
 }
 
@@ -653,10 +658,7 @@ static ssize_t lwkmem_request_store(struct kobject *kobj,
 
 	mutex_lock(&mos_sysfs_mutex);
 
-	current->mos_flags |= MOS_IS_LWK_PROCESS;
-
 	rc = count;
-
 	process = mos_get_process();
 
 	if (!process) {
@@ -898,112 +900,35 @@ static ssize_t lwk_options_store(struct kobject *kobj,
 	return rc;
 }
 
-static ssize_t lwkmem_domain_info_store(struct kobject *kobj,
+static ssize_t lwkmem_mempolicy_info_store(struct kobject *kobj,
 				    struct kobj_attribute *attr,
 				    const char *buff, size_t count)
 {
-	ssize_t rc;
-	numa_nodes_t nids;
-	size_t n;
-	char *str = 0, *typ_str, *nids_str, *nid_str;
-	enum lwkmem_type_t typ;
+	ssize_t rc = -EINVAL;
 	struct mos_process_t *mosp = current->mos_process;
 
-	pr_debug("(>) %s buff=\"%s\" count=%ld\n", __func__, buff, count);
-
-	if (!zalloc_numa_nodes_array(&nids))
-		return -ENOMEM;
-
-	mutex_lock(&mos_sysfs_mutex);
 
 	if (!mosp) {
 		mos_ras(MOS_LWK_PROCESS_ERROR,
-			"Attempted to set domain information for a non-LWK process.");
-		rc = -EINVAL;
-		goto out;
+			"Attempted to set mempolicy for a non-LWK process.");
+		return -EINVAL;
 	}
 
-	str = kstrdup(buff, GFP_KERNEL);
-
-	if (!str) {
-		rc = -ENOMEM;
-		goto out;
+	if (!buff || !count) {
+		mos_ras(MOS_LWK_PROCESS_ERROR,
+			"Invalid buffer argument");
+		return -EINVAL;
 	}
 
-	/* Information is passed along as a space-delimited sequence of
-	 * <type>=<nid>[,<nid>...] phrases.  Each phrase is parsed, converted
-	 * to an array of NIDs and lwkmem_type_t, and ultimately passed along
-	 * to the memory subsystem.
-	 */
-	while ((typ_str = strsep(&str, " "))) {
+	mutex_lock(&mos_sysfs_mutex);
 
-		if (strlen(typ_str) == 0)
-			continue;
-
-		nids_str = strchr(typ_str, '=');
-
-		if (!nids_str) {
-			rc = -EINVAL;
-			goto out;
-		}
-
-		*nids_str++ = '\0';
-
-		if (strcmp(typ_str, "hbm") == 0)
-			typ = lwkmem_hbm;
-		else if (strcmp(typ_str, "dram") == 0)
-			typ = lwkmem_dram;
-		else if (strcmp(typ_str, "nvram") == 0)
-			typ = lwkmem_nvram;
-		else {
-			rc = -EINVAL;
-			mos_ras(MOS_LWK_PROCESS_ERROR,
-				"Unrecognized memory type: %s.", typ_str);
-			goto out;
-		}
-
-		n = 0;
-
-		while ((nid_str = strsep(&nids_str, ","))) {
-
-			if (n == MAX_NUMNODES) {
-				mos_ras(MOS_LWK_PROCESS_ERROR,
-					"Overflow in lwkmem_domain_info buffer.");
-				rc = -EINVAL;
-				goto out;
-			}
-
-			rc = kstrtoul(nid_str, 0, nids + n);
-
-			if (rc) {
-				mos_ras(MOS_LWK_PROCESS_ERROR,
-					"Attempted to write invalid value to lwkmem_domain_info: %s.",
-					nid_str);
-				rc = -EINVAL;
-				goto out;
-			}
-
-			n++;
-
-		}
-
-		if (lwkmem_set_domain_info) {
-			rc = lwkmem_set_domain_info(mosp, typ, nids, n);
-			if (rc) {
-				mos_ras(MOS_LWK_PROCESS_ERROR,
-					"Non-zero return code %ld from lwkmem_set_domain_info.",
-					rc);
-				rc = -EINVAL;
-				goto out;
-			}
-		}
+	if (lwkmem_set_mempolicy_info) {
+		rc = lwkmem_set_mempolicy_info(buff, count);
+		if (rc == 0)
+			rc = count;
 	}
 
-	rc = count;
- out:
 	mutex_unlock(&mos_sysfs_mutex);
-	kfree(str);
-	free_numa_nodes_array(nids);
 	return rc;
 }
 
@@ -1011,14 +936,14 @@ static int validate_lwkcpus_spec(char *lwkcpus_parm)
 {
 	cpumask_var_t to, from, new_lwkcpus, new_syscallcpus;
 	char *mutable_param_start, *mutable_param, *s_to, *s_from;
-	int rc = -1;
+	int rc = -EINVAL;
 
 	mutable_param_start = mutable_param = kstrdup(lwkcpus_parm, GFP_KERNEL);
 	if (!mutable_param) {
 		mos_ras(MOS_LWKCTL_FAILURE,
 			"Failure duplicating CPU param_value string in %s.",
 			__func__);
-		return rc;
+		return -ENOMEM;
 	}
 	if (!zalloc_cpumask_var(&to, GFP_KERNEL) ||
 	    !zalloc_cpumask_var(&from, GFP_KERNEL) ||
@@ -1026,7 +951,7 @@ static int validate_lwkcpus_spec(char *lwkcpus_parm)
 	    !zalloc_cpumask_var(&new_lwkcpus, GFP_KERNEL)) {
 		mos_ras(MOS_LWKCTL_FAILURE, "Could not allocate cpumasks.");
 		kfree(mutable_param_start);
-		return -1;
+		return -ENOMEM;
 	}
 	while ((s_to = strsep(&mutable_param, ":"))) {
 		if (!(s_from = strchr(s_to, '.'))) {
@@ -1034,16 +959,16 @@ static int validate_lwkcpus_spec(char *lwkcpus_parm)
 			s_from = s_to;
 			s_to = strchr(s_to, '\0');
 		} else
-			*(s_from++) = '\0';
+			*s_from++ = '\0';
 		if (cpulist_parse(s_to, to) < 0 ||
-		cpulist_parse(s_from, from) < 0) {
-			mos_ras(MOS_LWKCTL_FAILURE,
+		    cpulist_parse(s_from, from) < 0) {
+			mos_ras(MOS_LWKCTL_WARNING,
 				"Invalid character in CPU specification.");
 			goto out;
 		}
 		/* Maximum of one syscall target CPU allowed per LWKCPU range */
 		if ((cpumask_weight(to) > 1) && !cpumask_empty(from)) {
-			mos_ras(MOS_LWKCTL_FAILURE,
+			mos_ras(MOS_LWKCTL_WARNING,
 				"More than one syscall target CPU specified.");
 			goto out;
 		}
@@ -1052,15 +977,22 @@ static int validate_lwkcpus_spec(char *lwkcpus_parm)
 		/* Build the set of syscall CPUs */
 		cpumask_or(new_syscallcpus, new_syscallcpus, to);
 	}
+
+	if (cpumask_empty(new_lwkcpus)) {
+		mos_ras(MOS_LWKCTL_WARNING,
+			"No cpus specified for LWKCPU partition: %s",
+			lwkcpus_parm);
+		goto out;
+	}
 	if (cpumask_intersects(new_lwkcpus, cpu_online_mask)) {
-		mos_ras(MOS_LWKCTL_FAILURE,
+		mos_ras(MOS_LWKCTL_WARNING,
 			"Overlap detected. LWK CPUs: %*pbl Online CPUs: %*pbl.",
 			cpumask_pr_args(new_lwkcpus),
 			cpumask_pr_args(cpu_online_mask));
 		goto out;
 	}
 	if (cpumask_intersects(new_lwkcpus, new_syscallcpus)) {
-		mos_ras(MOS_LWKCTL_FAILURE,
+		mos_ras(MOS_LWKCTL_WARNING,
 			"Overlap detected. LWK CPUs: %*pbl syscall CPUs: %*pbl.",
 			cpumask_pr_args(new_lwkcpus),
 			cpumask_pr_args(new_syscallcpus));
@@ -1085,172 +1017,195 @@ out:
  *		for LWK CPUS 2,3,4,5,6,7,9 and CPU 10 will be the target
  *		for LWK CPUS 10,11,13,14
  */
-int lwk_config_lwkcpus(char *param_value, char *lwkcpu_profile)
+int lwk_config_lwkcpus(char *param_value, char *profile)
 {
 	cpumask_var_t to;
 	cpumask_var_t from;
 	cpumask_var_t new_utilcpus;
 	cpumask_var_t new_lwkcpus;
-	cpumask_var_t back_to_linux;
 
 	unsigned cpu;
 	char *s_to, *s_from;
-	int rc = -1;
+	int rc = -EINVAL;
 	bool return_cpus;
-	char *mutable_param_start, *mutable_param;
+	char *mutable_param, *mutable_param_start = NULL;
 
-	mutable_param_start = mutable_param = kstrdup(param_value, GFP_KERNEL);
-
-	if (!mutable_param) {
+	if (param_value && param_value[0] == '\0') {
 		mos_ras(MOS_LWKCTL_FAILURE,
-			"Failure duplicating CPU param_value string in %s.",
-			__func__);
+			"LWK partition without CPUs is not supported");
 		return rc;
 	}
 
-	return_cpus = (param_value[0] == '\0') ? 1 : 0;
+	/* Is this a delete or create operation? */
+	return_cpus = !param_value;
 
-	if (!cpumask_empty(lwkcpus_map) && !return_cpus) {
-		mos_ras(MOS_LWKCTL_FAILURE,
-			"Attempt to modify existing LWKCPU configuration. Not supported.");
-		kfree(mutable_param_start);
-		return rc;
-	}
+	/*
+	 * Return success if we are asked to delete a partition
+	 * when there is no existing LWK partition.
+	 */
+	if (return_cpus && cpumask_empty(lwkcpus_map))
+		return 0;
 
 	if (!zalloc_cpumask_var(&to, GFP_KERNEL) ||
 	    !zalloc_cpumask_var(&from, GFP_KERNEL) ||
-	    !zalloc_cpumask_var(&back_to_linux, GFP_KERNEL) ||
 	    !zalloc_cpumask_var(&new_utilcpus, GFP_KERNEL) ||
-		!zalloc_cpumask_var(&new_lwkcpus, GFP_KERNEL)) {
+	    !zalloc_cpumask_var(&new_lwkcpus, GFP_KERNEL)) {
 		mos_ras(MOS_LWKCTL_FAILURE, "Could not allocate cpumasks.");
-		kfree(mutable_param_start);
-		return rc;
+		return -ENOMEM;
 	}
 
 	if (return_cpus) {
-		/* Save the mask of LWK CPUs being returned */
-		cpumask_copy(back_to_linux, lwkcpus_map);
-		/* Remove syscall migrations from the currently configured LWK CPUs */
-		for_each_cpu(cpu, lwkcpus_map) {
-			cpumask_t *syscall_mask;
+		rc = lwkcpu_partition_destroy(lwkcpus_map);
 
-			syscall_mask = per_cpu_ptr(&mos_syscall_mask, cpu);
-			cpumask_clear(to);
-			cpumask_set_cpu(cpu, to);
-			cpumask_copy(syscall_mask, to);
-		}
-		pr_info("Returning CPUs to Linux: %*pbl\n",
-				cpumask_pr_args(back_to_linux));
-
-	} else {
-
-		if (validate_lwkcpus_spec(param_value))
+		/*
+		 * No fallback necessary for delete flow as we have
+		 * not yet modified global masks.
+		 */
+		if (rc)
 			goto out;
 
+		/*
+		 * On success,
+		 *
+		 * At this point CPUs that were previously LWKCPUs are
+		 * offlined, LWK scheduler de-activated and there are no LWK
+		 * processes running. So below changes are safe.
+		 *
+		 *  - reset CPU hotplug state markings that we had done before
+		 *    during partition creation for filtering of CPU hotplug
+		 *    states.
+		 *  - reset per CPU syscall migration masks from CPUs that were
+		 *    previously LWK CPUs.
+		 *  - reset per CPU LWK CPU mask from all CPUs.
+		 */
+		lwkcpu_state_deinit();
+
+		/* Reset per CPU LWK CPU mask */
+		for_each_possible_cpu(cpu)
+			cpumask_clear(per_cpu_ptr(&lwkcpus_mask, cpu));
+		pr_info("Returning CPUs to Linux: %*pbl\n",
+			cpumask_pr_args(lwkcpus_map));
+	} else {
+		mutable_param = kstrdup(param_value, GFP_KERNEL);
+		mutable_param_start = mutable_param;
+		if (!mutable_param) {
+			mos_ras(MOS_LWKCTL_FAILURE,
+				"Failure duplicating CPU string in %s.",
+				__func__);
+			rc = -ENOMEM;
+			goto out;
+		}
+
+		/*
+		 * Compute and update utility CPU masks for each
+		 * LWKCPU in the new specification.
+		 */
 		while ((s_to = strsep(&mutable_param, ":"))) {
 			if (!(s_from = strchr(s_to, '.'))) {
 				/* No syscall target defined */
 				s_from = s_to;
 				s_to = strchr(s_to, '\0');
 			} else
-				*(s_from++) = '\0';
+				*s_from++ = '\0';
 			cpulist_parse(s_to, to);
 			cpulist_parse(s_from, from);
-			for_each_cpu(cpu, from) {
-				cpumask_t *mask;
-
-				mask = per_cpu_ptr(&mos_syscall_mask, cpu);
-				if (!cpumask_weight(to)) {
-					cpumask_clear(mask);
-					cpumask_set_cpu(cpu, mask);
-				} else
-					cpumask_copy(mask, to);
-			}
-			if (cpumask_weight(to) == 0) {
-				pr_info(
-				    "LWK CPUs %*pbl will not ship syscalls to Linux\n",
-				    cpumask_pr_args(from));
-			} else if (!cpumask_empty(from)) {
-				pr_info(
-				    "LWK CPUs %*pbl will ship syscalls to Linux CPU %*pbl\n",
-				    cpumask_pr_args(from),
-				    cpumask_pr_args(to));
-			}
-			/* Build the set of LWK and Utility CPUs */
+			/* Build the new LWK and Utility CPUs masks */
 			cpumask_or(new_lwkcpus, new_lwkcpus, from);
 			cpumask_or(new_utilcpus, new_utilcpus, to);
 		}
 		pr_info("Configured LWK CPUs: %*pbl\n",
-				cpumask_pr_args(new_lwkcpus));
+			cpumask_pr_args(new_lwkcpus));
 		pr_info("Configured Utility CPUs: %*pbl\n",
-		  cpumask_pr_args(new_utilcpus));
+			cpumask_pr_args(new_utilcpus));
 
-	}
-
-	if (!cpumask_empty(back_to_linux)) {
-		rc = lwkcpu_partition_destroy(back_to_linux);
-		if (!rc)
-			lwkcpu_state_deinit();
-	}
-	/* Let each CPU have its own copy of the lwkcpus mask. This gets
-	 * interrogated on each system call.
-	 */
-	for_each_possible_cpu(cpu)
-		cpumask_copy(per_cpu_ptr(&lwkcpus_mask, cpu), new_lwkcpus);
-
-	if (!cpumask_empty(new_lwkcpus)) {
-		bool profile_set = false;
-
-		if (lwkcpu_profile) {
-			if (lwkcpu_state_init(lwkcpu_profile)) {
-				mos_ras(MOS_LWKCTL_WARNING,
-					"Failed to set lwkcpu_profile: %s.",
-					lwkcpu_profile);
-			} else
-				profile_set = true;
+		/* Let each CPU have its own copy of the lwkcpus mask. This gets
+		 * interrogated on each system call.
+		 */
+		for_each_possible_cpu(cpu) {
+			cpumask_copy(per_cpu_ptr(&lwkcpus_mask, cpu),
+				     new_lwkcpus);
 		}
 
-		if (!profile_set)
-			if (lwkcpu_state_init(LWKCPU_PROF_NOR))
-				mos_ras(MOS_LWKCTL_WARNING,
+		/* Set CPU hotplug state filtering for LWKCPUs if requested */
+		if (profile && lwkcpu_state_init(profile)) {
+			mos_ras(MOS_LWKCTL_WARNING,
+				"lwkcpu_profile: %s failed, trying %s profile",
+				profile, LWKCPU_PROF_NOR);
+			profile = NULL;
+		}
+
+		/*
+		 * Fallback to normal filtering of CPU hotplug states if
+		 * setting the requested profile failed or user did not
+		 * specify one.
+		 */
+		rc = 0;
+		if (!profile) {
+			rc = lwkcpu_state_init(LWKCPU_PROF_NOR);
+			if (rc) {
+				mos_ras(MOS_LWKCTL_FAILURE,
 					"Failed to set lwkcpu_profile: %s.",
 					LWKCPU_PROF_NOR);
+			}
+		}
 
-		rc = lwkcpu_partition_create(new_lwkcpus);
+		/* If we succeded in setting lwkcpu_profile proceed further */
+		if (!rc) {
+			rc = lwkcpu_partition_create(new_lwkcpus);
+			if (rc)
+				lwkcpu_state_deinit();
+		}
+
+		/*
+		 * In case of failure clear the
+		 * LWKCPUs mask that we had set before attempting to create
+		 * LWKCPU partition. Failure could be either due to the
+		 * inability to set CPU hotplug filtering or CPU partition
+		 * creation itself failed. This reset of masks is safe as
+		 * CPUs are still offlined and there are no active LWK tasks.
+		 */
+		if (rc) {
+			/* Reset per cpu lwkcpus_mask */
+			for_each_possible_cpu(cpu)
+				cpumask_clear(per_cpu_ptr(&lwkcpus_mask, cpu));
+			goto out;
+		}
 	}
 
-	if (rc)
-		goto out;
+	/*
+	 * If we are here we succeded in fulfilling the user request which is
+	 * either delete or create LWKCPU partition. So we do updates that are
+	 * common upon these successful operations.
+	 */
 
 	/* Update the sysfs cpu masks */
-	cpumask_clear(lwkcpus_map);
-	cpumask_clear(utility_cpus_map);
 	cpumask_copy(lwkcpus_map, new_lwkcpus);
 	cpumask_copy(utility_cpus_map, new_utilcpus);
 
+	/* Update LWKCPU spec gloabl strings: lwkcpus=, lwkcpu_profile=  */
+	snprintf(lwkctrl_cpus_spec, LWKCTRL_CPUS_SPECSZ, "%s",
+		 param_value ? param_value : "");
+	snprintf(lwkctrl_cpu_profile_spec, LWKCTRL_CPU_PROFILE_SPECSZ, "%s",
+		 return_cpus ? "" : profile ? profile : LWKCPU_PROF_NOR);
+	/* status success */
 	rc = 0;
 out:
 	free_cpumask_var(to);
 	free_cpumask_var(from);
 	free_cpumask_var(new_utilcpus);
 	free_cpumask_var(new_lwkcpus);
-	free_cpumask_var(back_to_linux);
 	kfree(mutable_param_start);
 	return rc;
 }
 
 int lwk_config_lwkmem(char *param_value)
 {
-	int rc = -EINVAL;
+	int rc;
 
-	if (lwkmem_static_enabled || !param_value)
-		goto out;
-
-	if (param_value[0] == '\0')
+	if (!param_value)
 		rc = lwkmem_partition_destroy();
 	else
 		rc = lwkmem_partition_create(param_value, lwkmem_precise);
-out:
 	return rc;
 }
 
@@ -1277,191 +1232,254 @@ static ssize_t lwk_config_store(struct kobject *kobj,
 				const char *buff, size_t count)
 {
 	ssize_t rc = -EINVAL;
-	char *tmp, *tmp_start, *s_keyword, *s_value;
 	char *lwkcpus, *lwkcpu_profile, *lwkmem, *auto_config;
+	char *old_lwkcpus, *old_lwkcpu_profile;
+	char *tmp, *tmp_start, *s_keyword, *s_value;
 	bool delete_lwkcpu, delete_lwkmem;
 
 	lwkcpus = lwkcpu_profile = lwkmem = auto_config = NULL;
+	old_lwkcpus = old_lwkcpu_profile = NULL;
+	tmp = tmp_start = s_keyword = s_value = NULL;
 	delete_lwkcpu = delete_lwkmem = false;
+
+	if (!buff)
+		return -EINVAL;
+
 	mutex_lock(&mos_sysfs_mutex);
 
-	tmp_start = tmp = kstrdup(buff, GFP_KERNEL);
-	if (!tmp)
-		goto out;
+	pr_info("Kernel processing request: [%s]\n", buff);
 
-	while ((s_keyword = strsep(&tmp, " "))) {
-		if (strlen(s_keyword) == 0)
-			continue;
-		if (!(s_value = strchr(s_keyword, '='))) {
-			mos_ras(MOS_LWKCTL_FAILURE,
-				"Failed to find sign[=] to set a keyword: %s.",
-				s_keyword);
-			goto out;
-		}
-		*s_value++ = '\0';
-		if (*s_value == '\n')
-			*s_value = '\0';
-		if (strcmp(s_keyword, "lwkcpus") == 0) {
-			kfree(lwkcpus);
-			strreplace(s_value, '\n', '\0');
-			lwkcpus = kstrdup(s_value, GFP_KERNEL);
-			if (!lwkcpus)
-				goto out;
-			delete_lwkcpu = lwkcpus[0] == '\0';
-		} else if (!strcmp(s_keyword, "lwkcpu_profile")) {
-			kfree(lwkcpu_profile);
-			strreplace(s_value, '\n', '\0');
-			lwkcpu_profile = kstrdup(s_value, GFP_KERNEL);
-			if (!lwkcpu_profile)
-				goto out;
-		} else if (!strcmp(s_keyword, "lwkmem")) {
-			kfree(lwkmem);
-			strreplace(s_value, '\n', '\0');
-			lwkmem = kstrdup(s_value, GFP_KERNEL);
-			if (!lwkmem)
-				goto out;
-			delete_lwkmem = lwkmem[0] == '\0';
-		} else if (!strcmp(s_keyword, "auto")) {
-			kfree(auto_config);
-			strreplace(s_value, '\n', '\0');
-			auto_config = kstrdup(s_value, GFP_KERNEL);
-			if (!auto_config)
-				goto out;
-		} else if (!strcmp(s_keyword, "precise")) {
-			strreplace(s_value, '\n', '\0');
-			if (!strcmp(s_value, "yes"))
-				lwkmem_precise = true;
-			else if (!strcmp(s_value, "no"))
-				lwkmem_precise = false;
-			else
-				goto out;
-		} else {
-			mos_ras(MOS_LWKCTL_WARNING,
-				"Unsupported keyword: %s was ignored.",
-				s_keyword);
-		}
-	}
-	if (auto_config && lwk_validate_auto(auto_config)) {
-		mos_ras(MOS_LWKCTL_FAILURE,
-			"Unsupported auto configuration data=%s", auto_config);
-		kfree(auto_config);
-		goto out;
-	}
-	kfree(lwkauto);
-	lwkauto = auto_config;
+	/* Check if its a request to delete existing LWK partition */
+	if (buff[0] == '0') {
+		delete_lwkcpu = strcmp(lwkctrl_cpus_spec, "") != 0;
+		delete_lwkmem = strcmp(lwkmem_get_spec(), "") != 0;
 
-	if (lwkcpus && lwkmem && !lwkmem_static_enabled) {
-		if (delete_lwkcpu != delete_lwkmem) {
-			mos_ras(MOS_LWKCTL_FAILURE,
-				"Can not create %s and delete %s partition.",
-				delete_lwkcpu ? "lwkmem" : "lwkcpu",
-				delete_lwkcpu ? "lwkcpu" : "lwkmem");
-			goto out;
-		}
-
-		if (delete_lwkcpu) {
-			if (lwk_config_lwkcpus(lwkcpus, lwkcpu_profile) < 0) {
-				mos_ras(MOS_LWKCTL_FAILURE,
-					"Failure processing: lwkcpus=%s",
-					lwkcpus);
-				goto out;
-			}
-			if (lwk_config_lwkmem(lwkmem) < 0) {
-				mos_ras(MOS_LWKCTL_FAILURE,
-					"Failure processing: lwkmem=%s",
-					lwkmem);
-				goto out;
-			}
-		} else {
-			if (lwk_config_lwkmem(lwkmem) < 0) {
-				mos_ras(MOS_LWKCTL_FAILURE,
-					"Failure processing: lwkmem=%s",
-					lwkmem);
-				goto out;
-			}
-			if (lwk_config_lwkcpus(lwkcpus, lwkcpu_profile) < 0) {
-				mos_ras(MOS_LWKCTL_FAILURE,
-					"Failure processing: lwkcpus=%s",
-					lwkcpus);
-				if (lwk_config_lwkmem("") < 0)
-					mos_ras(MOS_LWKCTL_FAILURE,
-						"Failure returning LWK memory");
-				goto out;
-			}
-		}
-		/* Update LWKCPU and LWKCPU profile specs */
-		snprintf(lwkctrl_cpus_spec, LWKCTRL_CPUS_SPECSZ,
-			 "%s", lwkcpus);
-
-		if (delete_lwkcpu)
-			lwkctrl_cpu_profile_spec[0] = '\0';
-		else {
-			if (lwkcpu_profile &&
-			    strcmp(lwkcpu_profile, LWKCPU_PROF_NOR) &&
-			    strcmp(lwkcpu_profile, LWKCPU_PROF_DBG)) {
-				snprintf(lwkctrl_cpu_profile_spec,
-					LWKCTRL_CPU_PROFILE_SPECSZ, "%s",
-					LWKCPU_PROF_NOR);
-			} else {
-				snprintf(lwkctrl_cpu_profile_spec,
-					LWKCTRL_CPU_PROFILE_SPECSZ, "%s",
-					lwkcpu_profile ?
-					lwkcpu_profile : LWKCPU_PROF_NOR);
-			}
-		}
-		rc = count;
-	} else {
-		if (!lwkmem_static_enabled) {
-			mos_ras(MOS_LWKCTL_FAILURE,
-				"Can not execute %s specification alone.",
-				lwkcpus ? "lwkcpus" : "lwkmem");
-			goto out;
-		}
-
-		if (lwkcpus) {
-			if (lwk_config_lwkcpus(lwkcpus, lwkcpu_profile) < 0) {
-				mos_ras(MOS_LWKCTL_FAILURE,
-					"Failure processing: lwkcpus=%s",
-					lwkcpus);
-				goto out;
-			}
-			/* Update LWKCPU and LWKCPU profile specs */
-			snprintf(lwkctrl_cpus_spec, LWKCTRL_CPUS_SPECSZ,
-				 "%s", lwkcpus);
-
-			if (delete_lwkcpu)
-				lwkctrl_cpu_profile_spec[0] = '\0';
-			else {
-				if (lwkcpu_profile &&
-				    strcmp(lwkcpu_profile, LWKCPU_PROF_NOR) &&
-				    strcmp(lwkcpu_profile, LWKCPU_PROF_DBG)) {
-					snprintf(lwkctrl_cpu_profile_spec,
-						LWKCTRL_CPU_PROFILE_SPECSZ,
-						"%s", LWKCPU_PROF_NOR);
-				} else {
-					snprintf(lwkctrl_cpu_profile_spec,
-						LWKCTRL_CPU_PROFILE_SPECSZ,
-						"%s", lwkcpu_profile ?
-						lwkcpu_profile :
-						LWKCPU_PROF_NOR);
-				}
-			}
+		/* There is nothing to do, return success */
+		if (!delete_lwkcpu && !delete_lwkmem) {
 			rc = count;
+			goto out;
 		}
 
-		if (lwkmem) {
+		if (!delete_lwkcpu && delete_lwkmem) {
+			/*
+			 * Unexpected LWK partition state found. We make an
+			 * attempt to fix by proceeding to delete it. Also
+			 * flag RAS failure events at the same time.
+			 */
+			mos_ras(MOS_LWKCTL_FAILURE,
+				"Invalid state of LWK partition: only LWKMEM");
+		}
+	} else {
+		/* Parse syntax for a create operation */
+		tmp_start = tmp = kstrdup(buff, GFP_KERNEL);
+		if (!tmp) {
+			rc = -ENOMEM;
+			goto out;
+		}
+
+		while ((s_keyword = strsep(&tmp, " "))) {
+			if (strlen(s_keyword) == 0)
+				continue;
+			if (!(s_value = strchr(s_keyword, '='))) {
+				mos_ras(MOS_LWKCTL_FAILURE,
+					"Failed to find [=] for keyword: %s",
+					s_keyword);
+				goto out;
+			}
+			*s_value++ = '\0';
+			if (*s_value == '\n')
+				*s_value = '\0';
+			if (strcmp(s_keyword, "lwkcpus") == 0) {
+				strreplace(s_value, '\n', '\0');
+				kfree(lwkcpus);
+				lwkcpus = kstrdup(s_value, GFP_KERNEL);
+				if (!lwkcpus) {
+					rc = -ENOMEM;
+					goto out;
+				}
+			} else if (!strcmp(s_keyword, "lwkcpu_profile")) {
+				kfree(lwkcpu_profile);
+				strreplace(s_value, '\n', '\0');
+				lwkcpu_profile = kstrdup(s_value, GFP_KERNEL);
+				if (!lwkcpu_profile) {
+					rc = -ENOMEM;
+					goto out;
+				}
+			} else if (!strcmp(s_keyword, "lwkmem")) {
+				kfree(lwkmem);
+				strreplace(s_value, '\n', '\0');
+				/* Its a valid syntax to specify 'lwkmem='
+				 * it means user requested an LWK partition
+				 * without LWK memory. Such an LWK partition
+				 * will have only LWK CPUs.
+				 */
+				lwkmem = kstrdup(s_value, GFP_KERNEL);
+				if (!lwkmem) {
+					rc = -ENOMEM;
+					goto out;
+				}
+			} else if (!strcmp(s_keyword, "auto")) {
+				kfree(auto_config);
+				strreplace(s_value, '\n', '\0');
+				auto_config = kstrdup(s_value, GFP_KERNEL);
+				if (!auto_config) {
+					rc = -ENOMEM;
+					goto out;
+				}
+			} else if (!strcmp(s_keyword, "precise")) {
+				strreplace(s_value, '\n', '\0');
+				if (!strcmp(s_value, "yes"))
+					lwkmem_precise = true;
+				else if (!strcmp(s_value, "no"))
+					lwkmem_precise = false;
+				else
+					goto out;
+			} else {
+				mos_ras(MOS_LWKCTL_WARNING,
+					"Unsupported keyword: %s was ignored.",
+					s_keyword);
+			}
+		}
+		/*
+		 * It is incorrect to specify anything without
+		 * specifying lwkcpus for a create operation.
+		 */
+		if (!lwkcpus) {
 			mos_ras(MOS_LWKCTL_WARNING,
-				"Cannot %s(lwkmem=%s).  Partition is static.",
-				delete_lwkmem ? "delete" : "create",
-				lwkmem);
-			rc = lwkcpus ? rc : -EINVAL;
+				"Invalid LWK spec [%s], no lwkcpus specified",
+				buff);
+			goto out;
+		}
+
+		/* Catch invalid specification for create operation */
+		rc = validate_lwkcpus_spec(lwkcpus);
+		if (rc)
+			goto out;
+
+		/*
+		 * Reset rc, error flow assumes that
+		 * this is set to default error code
+		 */
+		rc = -EINVAL;
+
+		/* Deny attempt to overwrite an existing LWK partition */
+		if (!cpumask_empty(lwkcpus_map)) {
+			mos_ras(MOS_LWKCTL_FAILURE,
+				"Unsupported: modifying LWKCPU config.");
+			goto out;
+		}
+
+		if (auto_config && lwk_validate_auto(auto_config)) {
+			mos_ras(MOS_LWKCTL_WARNING,
+				"Unsupported auto configuration data=%s",
+				auto_config);
+			goto out;
 		}
 	}
+
+	/*
+	 * Ok by now all parsing, input validation, syntax checking,
+	 * are all done, so let us get to the real thing.
+	 */
+
+	/*
+	 * NOTE: on RAS messages,
+	 *
+	 * In the below code unless it is a kernel failure caused directly
+	 * by this function we print warning level RAS messages and let the
+	 * called function from here decide if the RAS level should be warning
+	 * or error based on what really happened within that function.
+	 */
+
+	/* LWK partition delete operation */
+	if (delete_lwkcpu || delete_lwkmem) {
+		/*
+		 * Save old specification just in case we need to fallback
+		 * to old config later.
+		 */
+		old_lwkcpus = kstrdup(lwkctrl_cpus_spec, GFP_KERNEL);
+		old_lwkcpu_profile = kstrdup(lwkctrl_cpu_profile_spec,
+					     GFP_KERNEL);
+
+		if (delete_lwkcpu && lwk_config_lwkcpus(NULL, NULL) < 0) {
+			mos_ras(MOS_LWKCTL_WARNING,
+				"Failed to delete LWKCPU partition");
+			goto out;
+		}
+
+		if (delete_lwkmem && lwk_config_lwkmem(NULL) < 0) {
+			mos_ras(MOS_LWKCTL_WARNING,
+				"Failed to delete LWKMEM partition");
+
+			/* Try to restore old LWKCPU partition */
+			if (delete_lwkcpu && old_lwkcpus &&
+			    old_lwkcpu_profile &&
+			    lwk_config_lwkcpus(old_lwkcpus,
+					       old_lwkcpu_profile)) {
+				mos_ras(MOS_LWKCTL_FAILURE,
+					"Failed to revert to lwkcpus=%s lwkcpu_profile=%s",
+					old_lwkcpus, old_lwkcpu_profile);
+			}
+			goto out;
+		}
+
+		/* Clear auto indicator */
+		kfree(lwkauto);
+		lwkauto = NULL;
+	} else {
+		/* LWK partition create operation */
+		if (lwkmem && lwk_config_lwkmem(lwkmem) < 0) {
+			mos_ras(MOS_LWKCTL_WARNING,
+				"Failure processing: lwkmem=%s", lwkmem);
+			goto out;
+		}
+
+		if (lwkcpus &&
+		    lwk_config_lwkcpus(lwkcpus, lwkcpu_profile) < 0) {
+			mos_ras(MOS_LWKCTL_WARNING,
+				"Failure processing: lwkcpus=%s", lwkcpus);
+			if (lwkmem && strcmp(lwkmem, "") &&
+			    lwk_config_lwkmem(NULL) < 0) {
+				mos_ras(MOS_LWKCTL_FAILURE,
+					"Failure returning LWK memory");
+			}
+			goto out;
+		}
+
+		/* Clear partitioned LWK memory */
+		if (lwkmem && strcmp(lwkmem, "") &&
+		    lwkmem_partition_clear_memory() < 0) {
+			/* Return CPUs */
+			if (lwkcpus && lwk_config_lwkcpus(NULL, NULL) < 0)
+				mos_ras(MOS_LWKCTL_FAILURE,
+					"Failed to return LWK CPUs");
+			if (lwk_config_lwkmem(NULL) < 0)
+				mos_ras(MOS_LWKCTL_FAILURE,
+					"Failed to return LWK memory");
+			goto out;
+		}
+
+		/* Set auto indicator if specififed */
+		if (auto_config) {
+			kfree(lwkauto);
+			lwkauto = auto_config;
+		}
+	}
+	rc = count;
 out:
+	if (rc == -ENOMEM)
+		mos_ras(MOS_LWKCTL_FAILURE, "No free kernel memory");
+
+	if (rc < 0)
+		kfree(auto_config);
 	kfree(lwkcpus);
 	kfree(lwkcpu_profile);
+	kfree(old_lwkcpus);
+	kfree(old_lwkcpu_profile);
 	kfree(lwkmem);
 	kfree(tmp_start);
+	pr_info("Kernel processing request: [%s] [%s]\n\n",
+		buff, rc == count ? "SUCCESS" : "FAILED");
 	mutex_unlock(&mos_sysfs_mutex);
 	return rc;
 }
@@ -1508,8 +1526,8 @@ static struct kobj_attribute lwkcpus_sequence_attr =
 static struct kobj_attribute lwk_util_threads_attr =
 						__ATTR_WO(lwk_util_threads);
 static struct kobj_attribute lwk_options_attr = __ATTR_WO(lwk_options);
-static struct kobj_attribute lwkmem_domain_info_attr =
-						__ATTR_WO(lwkmem_domain_info);
+static struct kobj_attribute lwkmem_mempolicy_info_attr =
+					__ATTR_WO(lwkmem_mempolicy_info);
 static struct kobj_attribute lwk_config_attr = __ATTR_RW(lwk_config);
 static  struct attribute *mos_attributes[] = {
 	&version_attr.attr,
@@ -1526,7 +1544,7 @@ static  struct attribute *mos_attributes[] = {
 	&lwkcpus_sequence_attr.attr,
 	&lwk_util_threads_attr.attr,
 	&lwk_options_attr.attr,
-	&lwkmem_domain_info_attr.attr,
+	&lwkmem_mempolicy_info_attr.attr,
 	&utility_cpus_attr.attr,
 	&utility_cpus_mask_attr.attr,
 	&lwk_config_attr.attr,
@@ -1560,7 +1578,7 @@ static int __init mos_sysfs_init(void)
 
 	lwkcpus_request_attr.attr.mode |= S_IWGRP;
 	lwkcpus_request_mask_attr.attr.mode |= S_IWGRP;
-	lwkmem_domain_info_attr.attr.mode |= S_IWGRP;
+	lwkmem_mempolicy_info_attr.attr.mode |= S_IWGRP;
 	lwkmem_request_attr.attr.mode |= S_IWGRP;
 	lwkcpus_sequence_attr.attr.mode |= S_IWGRP;
 	lwk_options_attr.attr.mode |= S_IWGRP;

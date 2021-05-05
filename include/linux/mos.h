@@ -22,6 +22,7 @@
 #include <linux/cpuhotplug.h>
 #include <linux/mm.h>
 #include <linux/mosras.h>
+#include <linux/moslwkmem.h>
 
 #ifdef CONFIG_MOS_FOR_HPC
 /*
@@ -95,10 +96,6 @@ extern void get_mos_view_cpumask(struct cpumask *dst,
 			const struct cpumask *src);
 extern ssize_t cpumap_print_mos_view_cpumask(bool list,
 			char *buf, const struct cpumask *mask);
-
-enum lwkmem_kind_t {kind_4k = 0, kind_2m, kind_4m, kind_1g, kind_last};
-extern unsigned long lwk_page_shift[];
-enum lwkmem_type_t {lwkmem_dram = 0, lwkmem_hbm, lwkmem_nvram, lwkmem_type_last };
 
 struct mos_process_t {
 	struct list_head list;
@@ -176,9 +173,8 @@ extern int lwkmem_request(struct mos_process_t *mos_p, unsigned long *mem,
 extern int lwkmem_get_debug_level(void) __attribute__((weak));
 extern void lwkmem_set_debug_level(int level) __attribute__((weak));
 extern void lwkmem_release(struct mos_process_t *mos_p) __attribute__((weak));
-extern int lwkmem_set_domain_info(struct mos_process_t *mos_p,
-	       enum lwkmem_type_t typ, unsigned long *nids,
-	       size_t n) __attribute__((weak));
+extern int lwkmem_set_mempolicy_info(const char *buff, size_t size)
+	__attribute__((weak));
 
 /* Needed by LWKCTL module to trigger the creation of default LWK partition */
 extern int lwk_config_lwkcpus(char *param_value, char *profile);
@@ -190,9 +186,6 @@ extern int lwk_config_lwkmem(char *param_value);
  * init/main.c during kernel bootup.
  */
 extern void lwkctl_def_partition(void);
-#ifdef CONFIG_MOS_LWKMEM
-/* Memory additions go here */
-#endif
 
 #ifdef CONFIG_MOS_SCHEDULER
 /* Scheduler additions go here */

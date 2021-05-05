@@ -1,6 +1,6 @@
 /*
  * Multi Operating System (mOS)
- * Copyright (c) 2016, Intel Corporation.
+ * Copyright (c) 2016-2020, Intel Corporation.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -21,9 +21,6 @@
 #undef pr_fmt
 #define pr_fmt(fmt)	"mOS: " fmt
 
-
-static	cpumask_t to;
-static	cpumask_t from;
 /*
  * A set of CPU hotplug states that are to be filtered while bringing
  * up an LWKCPU to ensure low OS noise on those CPUs.
@@ -40,7 +37,12 @@ enum cpuhp_state filter[] = LWKCPU_FILTER_STATES;
  */
 int lwkcpu_up(unsigned int cpu)
 {
-	return do_cpu_up(cpu, LWKCPU_MAX_STATE);
+	int rc = do_cpu_up(cpu, LWKCPU_MAX_STATE);
+
+	if (rc)
+		mos_ras(MOS_LWKCTL_FAILURE,
+			"%s: Failed to online CPU %d.", __func__, cpu);
+	return rc;
 }
 
 /*
@@ -53,7 +55,12 @@ int lwkcpu_up(unsigned int cpu)
  */
 int lwkcpu_down(unsigned int cpu)
 {
-	return do_cpu_down(cpu, LWKCPU_MIN_STATE);
+	int rc = do_cpu_down(cpu, LWKCPU_MIN_STATE);
+
+	if (rc)
+		mos_ras(MOS_LWKCTL_FAILURE,
+			"%s: Failed to offline CPU %d.", __func__, cpu);
+	return rc;
 }
 
 /*
@@ -69,21 +76,19 @@ int lwkcpu_up_multiple(cpumask_var_t request, cpumask_var_t booted)
 	int cpu;
 	int ret;
 
-	if (!request) {
-		mos_ras(MOS_LWKCTL_FAILURE, "%s: Invalid argument.", __func__);
-		return -1;
-	}
-
+	/* We clear the o/p mask irrespective of the return status */
 	if (booted)
 		cpumask_clear(booted);
 
+	if (!request) {
+		mos_ras(MOS_LWKCTL_FAILURE, "%s: Invalid argument.", __func__);
+		return -EINVAL;
+	}
+
 	for_each_cpu(cpu, request) {
 		ret = lwkcpu_up(cpu);
-		if (ret) {
-			mos_ras(MOS_LWKCTL_FAILURE,
-				"%s: Failed to boot CPU %d.", __func__, cpu);
+		if (ret)
 			return ret;
-		}
 
 		if (booted)
 			cpumask_set_cpu(cpu, booted);
@@ -104,22 +109,19 @@ int lwkcpu_down_multiple(cpumask_var_t request, cpumask_var_t shutdown)
 	int cpu;
 	int ret;
 
-	if (!request) {
-		mos_ras(MOS_LWKCTL_FAILURE, "%s: Invalid argument.", __func__);
-		return -1;
-	}
-
+	/* We clear the o/p mask irrespective of the return status */
 	if (shutdown)
 		cpumask_clear(shutdown);
 
+	if (!request) {
+		mos_ras(MOS_LWKCTL_FAILURE, "%s: Invalid argument.", __func__);
+		return -EINVAL;
+	}
+
 	for_each_cpu(cpu, request) {
 		ret = lwkcpu_down(cpu);
-		if (ret) {
-			mos_ras(MOS_LWKCTL_FAILURE,
-				"%s: Failed to shutdown CPU %d.",
-				__func__, cpu);
+		if (ret)
 			return ret;
-		}
 		if (shutdown)
 			cpumask_set_cpu(cpu, shutdown);
 	}
@@ -137,80 +139,9 @@ int lwkcpu_down_multiple(cpumask_var_t request, cpumask_var_t shutdown)
 int lwkcpu_reset(unsigned int cpu)
 {
 	int ret;
+
 	ret = lwkcpu_down(cpu);
-
-	if (ret) {
-		mos_ras(MOS_LWKCTL_FAILURE,
-			"%s: Failed to shut down CPU %d.",
-			__func__, cpu);
-		goto error;
-	}
-
-	ret = lwkcpu_up(cpu);
-
-	if (ret) {
-		mos_ras(MOS_LWKCTL_FAILURE,
-			"%s: Failed to boot CPU %d.",
-			__func__, cpu);
-	}
-
-error:
-	return ret;
-}
-
-/*
- * Parses LWK CPU partition specification provided in @arg and
- * returns the bitmask of LWK CPUs and Utility CPUs
- *
- * @arg, input string which has LWKCPU partition specification
- * @lwkcpus, bitmask of LWK CPUs after parsing @arg
- * @utility_cpus, bitmask of utility CPUs after parsing @arg
- * @return, 0 on success
- * 	    -ve on failure
- */
-int lwkcpu_parse_args(char *arg, cpumask_t *lwkcpus,
-		      cpumask_t *utility_cpus)
-{
-	char *s_to, *s_from;
-	int rc = -1;
-
-	cpumask_clear(lwkcpus);
-	cpumask_clear(utility_cpus);
-	cpumask_clear(&to);
-	cpumask_clear(&from);
-
-	while ((s_to = strsep(&arg, ":"))) {
-		if (!(s_from = strchr(s_to, '.'))) {
-			/* No syscall target defined */
-			s_from = s_to;
-			s_to = strchr(s_to, '\0');
-		} else
-			*(s_from++) = '\0';
-		if (cpulist_parse(s_to, &to) < 0) {
-			mos_ras(MOS_LWKCTL_FAILURE,
-				"%s: Invalid character in CPU specification. Value=%s",
-				__func__, s_to);
-			goto out;
-		}
-		if (cpulist_parse(s_from, &from) < 0) {
-			mos_ras(MOS_LWKCTL_FAILURE,
-				"%s: Invalid character in CPU specification. Value=%s.",
-				__func__, s_from);
-			goto out;
-		}
-		/* Maximum of one utility CPU allowed per LWK CPU range */
-		if ((cpumask_weight(&to) > 1) && !cpumask_empty(&from)) {
-			mos_ras(MOS_LWKCTL_FAILURE,
-				"%s: More than one utility CPU was specified.",
-				__func__);
-				goto out;
-		}
-		cpumask_or(utility_cpus, utility_cpus, &to);
-		cpumask_or(lwkcpus, lwkcpus, &from);
-	}
-	rc = 0;
-out:
-	return rc;
+	return ret ? ret : lwkcpu_up(cpu);
 }
 
 /*
@@ -228,7 +159,7 @@ int lwkcpu_state_init(char *profile)
 
 	if (strcmp(profile, LWKCPU_PROF_NOR) &&
 	    strcmp(profile, LWKCPU_PROF_DBG)) {
-		mos_ras(MOS_LWKCTL_FAILURE,
+		mos_ras(MOS_LWKCTL_WARNING,
 			"%s: Invalid lwkcpu_profile specification: %s",
 			__func__, profile);
 		return -1;
@@ -247,7 +178,7 @@ int lwkcpu_state_init(char *profile)
 	strsize = snprintf(lwkctrl_cpu_profile_spec,
 			   LWKCTRL_CPU_PROFILE_SPECSZ, "%s", profile);
 	if (strlen(profile) > strsize) {
-		mos_ras(MOS_LWKCTL_WARNING,
+		mos_ras(MOS_LWKCTL_FAILURE,
 			"%s: lwkcpu_profile specification truncation occurred: \"%s\"",
 			__func__, lwkctrl_cpu_profile_spec);
 	} else
