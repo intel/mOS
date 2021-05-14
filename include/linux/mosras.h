@@ -21,7 +21,7 @@ extern int mos_ras(const char *event_id, const char *fmt, ...);
 
 #else
 
-static inline int mos_ras(...)
+static inline int mos_ras(const char *event_id, const char *fmt, ...)
 {
 	return 0;
 };
