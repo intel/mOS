@@ -151,6 +151,16 @@ static inline void init_fork_mos(struct task_struct *p)
 	init_util_list_mos(p);
 }
 
+static inline bool is_lwkcpu(void)
+{
+	return (this_cpu_ptr(&runqueues)->lwkcpu ? 1 : 0);
+}
+
+static inline struct list_head *mos_runlist(void)
+{
+	return &current->mos.run_list;
+}
+
 #else
 
 static inline void assimilate_mos(struct rq *rq, struct task_struct *p)
@@ -247,40 +257,15 @@ static inline bool is_migration_mask_valid_mos(const cpumask_t *mask,
 static inline void init_fork_mos(struct task_struct *p)
 {}
 
-#endif
-
-#ifdef CONFIG_MOS_MOVE_SYSCALLS
-
-static inline void set_syscall_savedmask_mos(struct task_struct *p,
-					     const cpumask_t *newmask)
+static inline bool is_lwkcpu(void)
 {
-	cpumask_copy(&p->mos_savedmask, newmask);
+	return false;
 }
 
-static inline cpumask_t *syscall_savedmask_mos(struct task_struct *p)
-{
-	return &p->mos_savedmask;
-}
-
-static inline cpumask_t *syscall_mask_mos(void)
-{
-	return this_cpu_ptr(&mos_syscall_mask);
-}
-
-#else
-
-static inline void set_syscall_savedmask_mos(struct task_struct *p,
-						const cpumask_t *newmask)
-{}
-
-static inline cpumask_t *syscall_savedmask_mos(struct task_struct *p)
-{
-	return NULL;
-}
-
-static inline cpumask_t *syscall_mask_mos(void)
+static inline struct list_head *mos_runlist(void)
 {
 	return NULL;
 }
 
 #endif
+

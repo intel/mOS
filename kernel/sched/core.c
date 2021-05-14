@@ -6219,7 +6219,7 @@ static void do_sched_yield(void)
 
 SYSCALL_DEFINE0(sched_yield)
 {
-	if (this_rq()->lwkcpu && list_is_singular(&current->mos.run_list))
+	if (is_lwkcpu() && list_is_singular(mos_runlist()))
 		return 0;
 
 	do_sched_yield();
