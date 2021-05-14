@@ -869,6 +869,14 @@ extern void init_xpmem_stats(struct lwk_vm_stats *vm_stats);
 #define lwkmem_populated(vma)	false
 #define lwkmem_meminfo(si, nid)
 #define lwkmem_clear_heap(vma, oldbrk, newbrk)
+#define is_lwkxpmem(vma) 	0
+#define get_xpmem_private_data(vma)	NULL
+#define set_xpmem_private_data(vma, data)
+#define release_lwkxpmem_vma(vma)
+#define unmap_lwkxpmem_range(vma, start, end)	0
+#define create_lwkxpmem_vma(mm, src, dst, len, prot, private, ops)	NULL
+#define copy_lwkmem_to_lwkxpmem(src_vma, src_start, dst_vma, dst_start, len) 0
+
 static inline
 vm_fault_t lwkmem_page_fault(struct vm_area_struct *vma, unsigned long addr,
 			unsigned long flags)

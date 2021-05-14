@@ -659,13 +659,11 @@ out:
 static int smaps_pmd_range(pud_t *pud, unsigned long addr, unsigned long end,
 			   struct mm_walk *walk)
 {
-	struct vm_area_struct *vma = walk->vma;
-
 #ifndef CONFIG_TRANSPARENT_HUGEPAGE
 	spinlock_t *ptl;
 #endif
 
-	if (is_lwkvma(vma)) {
+	if (is_lwkvma(walk->vma)) {
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 		/* When the page walker is processing the PUD range and making
 		 * callbacks for PUD entries, it has called pud_trans_huge_lock
