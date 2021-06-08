@@ -628,8 +628,10 @@ static int smaps_pte_range(pmd_t *pmd, unsigned long addr, unsigned long end,
 
 	if (is_lwkvma(vma)) {
 		ptl = pmd_lock(walk->mm, pmd);
-		if (pmd_present(*pmd))
+		if (pmd_present(*pmd) && (pmd_flags(*pmd) & _PAGE_PSE)) {
 			smaps_lwk_pmd_entry(pmd, addr, walk);
+			walk->action = ACTION_CONTINUE;
+		}
 		spin_unlock(ptl);
 		goto out;
 	}
@@ -659,25 +661,15 @@ out:
 static int smaps_pmd_range(pud_t *pud, unsigned long addr, unsigned long end,
 			   struct mm_walk *walk)
 {
-#ifndef CONFIG_TRANSPARENT_HUGEPAGE
 	spinlock_t *ptl;
-#endif
 
 	if (is_lwkvma(walk->vma)) {
-#ifdef CONFIG_TRANSPARENT_HUGEPAGE
-		/* When the page walker is processing the PUD range and making
-		 * callbacks for PUD entries, it has called pud_trans_huge_lock
-		 * which locks the pud (which actually locks the entire page
-		 * table because pud table locks are not split).
-		 */
-#else
-		ptl = pud_lock();
-#endif
-		if (pud_present(*pud))
+		ptl = pud_lock(walk->mm, pud);
+		if (pud_present(*pud) && (pud_flags(*pud) & _PAGE_PSE)) {
 			smaps_lwk_pud_entry(pud, addr, walk);
-#ifndef CONFIG_TRANSPARENT_HUGEPAGE
+			walk->action = ACTION_CONTINUE;
+		}
 		spin_unlock(ptl);
-#endif
 	}
 	return 0;
 }
