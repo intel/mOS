@@ -503,7 +503,7 @@ static int lwk_mm_map_try_page_sizes(struct vm_area_struct *vma,
 	/* If there are not enough higher size pages try smaller page size. */
 	for_each_lwkpage_type_reverse_from(t, tmax) {
 		if (policy_type == LWK_MEMPOL_NORMAL ||
-		    policy_type == LWK_MEMPOL_INTERLEAVE)
+		    policy_type == LWK_MEMPOL_RANDOM)
 			rc = lwk_mm_map_nodelist_normal(vma, startp, end,
 							t, nodelist,
 							pma_alloc_flag);
