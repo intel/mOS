@@ -375,8 +375,20 @@ static void mos_init_cpu_map(void)
 				default:
 					break;
 				}
+			} else if (family == 6 && model == 143) {
+				/*   10 - own node's DDR
+				 *   21 - other node's DDR
+				 *   13 - own node's HBM
+				 *   23 - other node's HBM
+				 */
+				switch (distance_map[nr][nc]) {
+				case 13:
+				case 23:
+					type = YOD_HBM;
+				default:
+					break;
+				}
 			}
-
 			cpu_map[nc].elems[YOD_MEM_GROUP] = type;
 		}
 	}
