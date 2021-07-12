@@ -7470,7 +7470,7 @@ bool __weak arch_has_descending_max_zone_pfns(void)
 void __init free_area_init(unsigned long *max_zone_pfn)
 {
 	unsigned long start_pfn, end_pfn;
-	int i, nid, zone;
+	int i, nid, zone, num_nodes;
 	bool descending;
 
 	/* Record where the zone boundaries are */
@@ -7540,11 +7540,27 @@ void __init free_area_init(unsigned long *max_zone_pfn)
 		subsection_map_init(start_pfn, end_pfn - start_pfn);
 	}
 
-	/* Initialise every node */
+	/* Initialise every node in memory range order*/
 	mminit_verify_pageflags_layout();
 	setup_nr_node_ids();
-	for_each_online_node(nid) {
-		pg_data_t *pgdat = NODE_DATA(nid);
+	for_each_online_node(i)
+		NODE_DATA(i)->node_id = NUMA_NO_NODE;
+	num_nodes = num_online_nodes();
+	while (num_nodes--) {
+		pg_data_t *pgdat;
+		unsigned long min_pfn = ULONG_MAX;
+
+		for_each_online_node(i) {
+			pgdat = NODE_DATA(i);
+			if (pgdat->node_id == i)
+				continue;
+			get_pfn_range_for_nid(i, &start_pfn, &end_pfn);
+			if (start_pfn < min_pfn) {
+				min_pfn = start_pfn;
+				nid = i;
+			}
+		}
+		pgdat = NODE_DATA(nid);
 		free_area_init_node(nid);
 
 		/* Any memory on that node */
