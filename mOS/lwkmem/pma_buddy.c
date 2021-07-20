@@ -241,7 +241,7 @@ static inline int assert_page(struct page *page, unsigned long id)
 	}
 
 	if (id != page_lwk_mm_id(page)) {
-		LWKMEM_ERROR("Unmanaged LWK page(mmid %d) curr mmid %d",
+		LWKMEM_ERROR("Unmanaged LWK page(mmid %ld) curr mmid %ld",
 			     page_lwk_mm_id(page), id);
 		return -EINVAL;
 	}
@@ -634,7 +634,7 @@ static struct page *remove_contig_pages_from_buddylist(struct freemem *mem,
 	struct page *page, *page_first;
 	struct buddy_contig_range *range, *r;
 	unsigned long pfn, n_horder, n_max, n_unit, n_used, n_free;
-	int rc, h, l, pass, use_first_part;
+	int h, l, pass, use_first_part;
 
 	trace_mos_buddy_remove_contig(horder, lorder, n_needed);
 
@@ -648,6 +648,8 @@ static struct page *remove_contig_pages_from_buddylist(struct freemem *mem,
 
 	if (list_empty(&mem[horder].list))
 		return NULL;
+
+	page_first = NULL;
 
 	range = kzalloc(sizeof(struct buddy_contig_range) * 2, GFP_KERNEL);
 	if (!range)
@@ -721,7 +723,6 @@ static struct page *remove_contig_pages_from_buddylist(struct freemem *mem,
 	h = horder;
 	l = lorder;
 	r = &range[0];
-	rc = -1;
 	for (pass = 1; pass < 5; pass++) {
 		switch (pass) {
 		case 1:
@@ -764,7 +765,6 @@ remove_pages:
 	 * We found contiguous memory of required size or less. Now
 	 * go ahead and remove pages in the range from buddy lists.
 	 */
-	page_first = NULL;
 	*n_allocated = 0;
 	if (r && r->nr_pages) {
 		/* Print range only if debug is enabled */
@@ -984,7 +984,7 @@ static void free_lwkpage_partial(struct freemem *mem, unsigned long id,
 	VM_BUG_ON_PAGE(horder < lorder, page);
 	VM_BUG_ON_PAGE(horder == 0, page);
 	if (assert_page(page, id)) {
-		LWKMEM_ERROR("%s: Err, pfn %d, high %d low %d n %lu alloc %s",
+		LWKMEM_ERROR("%s: Err, pfn %ld, high %d low %d n %lu alloc %s",
 				__func__, pfn, horder, lorder, n_alloc,
 				alloc_first_part ? "first" : "last");
 	}
@@ -1463,8 +1463,7 @@ static int alloc_lwkpages_node(struct node_memory *node_mem, unsigned long id,
 
 	/* Reset output */
 	INIT_LIST_HEAD(list);
-	if (n_allocated)
-		*n_allocated = 0;
+	*n_allocated = 0;
 
 	if (alloc_flags == PMA_ALLOC_CONTIG && n_needed > 1)
 		rc = alloc_lwkpages_node_contig(node_mem, id, n_needed, pgtype,
@@ -1713,6 +1712,8 @@ static void buddy_report_lists_summary(struct lwk_pm_buddy_allocator *pma_buddy)
 
 		for_each_node_mask(nid, pma_buddy->nodes_mask) {
 			node_mem = get_node_memory(pma_buddy, nid);
+			if (!node_mem)
+				continue;
 			spin_lock_irqsave(&node_mem->lock, flags);
 			nr_free = in_base_pages(node_mem->mem[order].nr_free,
 						order);

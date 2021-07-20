@@ -329,7 +329,7 @@ static void clear_lwk_memory(void *data)
 
 	if (!info) {
 		LWKMEM_WARN("CPU%3d: Invalid argument", cpu);
-		goto error;
+		return;
 	}
 
 	/* No pages to clear */
@@ -623,7 +623,7 @@ static unsigned long allocate_memory_from_linux(int nid, unsigned long size)
 	    end_pfn <= start_pfn) {
 		mos_ras(MOS_LWKCTL_FAILURE,
 			"Node %d: low ZONE_MOVABLE, min aligned %ld MB needed",
-			section_size >> 20);
+			nid, section_size >> 20);
 		spin_unlock_irqrestore(&zone_movable->lock, flags);
 		goto out;
 	}
@@ -1152,7 +1152,7 @@ void lwkmem_meminfo(struct sysinfo *si, int nid)
 		if (lwkview_local) {
 			if (!is_mostask()) {
 				LWKMEM_ERROR("mOS view %s for non LWK pid %d",
-					     MOS_VIEW_LWK_LOCAL, current->tgid);
+					     MOS_VIEW_STR_LWK_LOCAL, current->tgid);
 				return;
 			}
 			lwk_mm = curr_lwk_mm();
@@ -1197,7 +1197,7 @@ int lwkmem_request(struct mos_process_t *mosp, unsigned long *req, size_t n)
 		return 0;
 
 	if (n > lwkmem_n_online_nodes) {
-		LWKMEM_ERROR("%s: Invalid n=%d online=%d\n", __func__,
+		LWKMEM_ERROR("%s: Invalid n=%ld online=%ld\n", __func__,
 				n, lwkmem_n_online_nodes);
 		return -EINVAL;
 	}

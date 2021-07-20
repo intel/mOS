@@ -50,7 +50,8 @@ bool is_lwkmem_nofault(unsigned long vm_flags)
 	lwk_mm = curr_lwk_mm();
 	vmr = lwk_mm_vmflags_to_vmr(vm_flags);
 	if (vmr == LWK_MAX_NUMVMRTYPES) {
-		LWKMEM_ERROR("No valid VMR indicated by vm_flags=%lx");
+		LWKMEM_ERROR("No valid VMR indicated by vm_flags=%lx",
+			     vm_flags);
 		dump_stack();
 		return false;
 	}
@@ -223,7 +224,7 @@ static inline int lwk_mm_map_pagetable(struct vm_area_struct *vma,
 		list_for_each(pos, listp)
 			npages++;
 		allocated = bytes_to_pages(end - start) >> lwkpage_order(t);
-		LWKMEM_ERROR("%d/%d %s pages, not mapped in [%lx, %lx) rc=%d",
+		LWKMEM_ERROR("%ld/%ld %s pages, not mapped in [%lx, %lx) rc=%d",
 			     npages, allocated, lwkpage_desc(t),
 			     start, end, rc);
 		lwk_mm_unmap_pages(vma, start, end);
@@ -251,7 +252,7 @@ static int lwk_mm_map_nodelist_normal(struct vm_area_struct *vma,
 	void *pma = lwk_mm->pma;
 
 	if (*startp >= end || !IS_ALIGNED(*startp, lwkpage_size(t))) {
-		LWKMEM_WARN("Invalid: range=[%lx, %lx) maxpg=%s nodes=%*pbl",
+		LWKMEM_WARN("Invalid: range=[%lx, %lx) maxpg=%s",
 			    *startp, end, lwkpage_desc(t));
 		return -EINVAL;
 	}
@@ -382,7 +383,7 @@ static int lwk_mm_map_nodelist_interleaved(struct vm_area_struct *vma,
 	void *pma = lwk_mm->pma;
 
 	if (*startp >= end || !IS_ALIGNED(*startp, lwkpage_size(t))) {
-		LWKMEM_WARN("Invalid: range=[%lx, %lx) maxpg=%s nodes=%*pbl",
+		LWKMEM_WARN("Invalid: range=[%lx, %lx) maxpg=%s",
 			    *startp, end, lwkpage_desc(t));
 		return -EINVAL;
 	}
@@ -419,7 +420,7 @@ static int lwk_mm_map_nodelist_interleaved(struct vm_area_struct *vma,
 		/* Success! add this to the list of pages to be mapped */
 		if (rc == 0) {
 			if (unlikely(npages != 1))
-				LWKMEM_WARN("Allocated %d expected 1", npages);
+				LWKMEM_WARN("Allocated %ld expected 1", npages);
 			list_splice_tail(&sublist, &list);
 			needed--;
 			/* Reset tried NUMA domain counter if relax is set */
@@ -621,7 +622,8 @@ retry:
 			/* Unexpected error, avoid looping forever */
 			if (start != next) {
 				rc = -EINVAL;
-				LWKMEM_ERROR("start %llx != next %llx rc=0");
+				LWKMEM_ERROR("start %llx != next %llx rc=0",
+					start, next);
 				goto out;
 			}
 		}

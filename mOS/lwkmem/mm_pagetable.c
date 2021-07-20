@@ -691,7 +691,7 @@ void lwk_mm_unmap_pages(struct vm_area_struct *vma,
 {
 	struct lwk_vma_private *vm_private;
 	struct list_head list[LWK_MAX_NUMPGTYPES];
-	struct lwk_mm *lwk_mm = vma_lwk_mm(vma);
+	struct lwk_mm *lwk_mm = vma ? vma_lwk_mm(vma) : 0;
 	void *pma;
 	unsigned long addr, next;
 	enum lwk_page_type t;
@@ -958,12 +958,16 @@ unsigned long lwk_mm_move_pte(pmd_t *old_pmd, struct vm_area_struct *old_vma,
 			entry = ptep_get_and_clear(mm, old_addr, old_pte);
 			entry = move_pte(entry, new_vma->vm_page_prot,
 				       old_addr, *new_addrp);
-			set_pte_at(mm, *new_addrp, new_pte, entry);
-			flush_tlb = true;
+			/* Coverity: Passing null pointer new_pte to set_pte_at, which dereferences it. */
+			if (new_pte) {
+				set_pte_at(mm, *new_addrp, new_pte, entry);
+				flush_tlb = true;
+			}
 		}
 		old_addr += PAGE_SIZE;
 		*new_addrp += PAGE_SIZE;
 		old_pte++;
+		/* Coverity: Comparing new_pte to null implies that new_pte might be null. */
 		if (new_pte)
 			new_pte++;
 	}

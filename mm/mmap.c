@@ -307,7 +307,7 @@ SYSCALL_DEFINE1(brk, unsigned long, brk)
 		 * if @newbrk was within pre-existing VMA for heap then
 		 * it's vm_end would not define the current end of heap.
 		 */
-		if (!is_lwkvma(next)) {
+		if (!next || !is_lwkvma(next)) {
 			LWKMEM_ERROR("Not a LWK VMA for heap");
 			goto out;
 		}

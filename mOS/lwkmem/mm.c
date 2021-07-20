@@ -425,7 +425,7 @@ static void lwk_mm_clear_heap(struct vm_area_struct *vma, unsigned long oldbrk,
 			clear_len = min(clear_len, lwk_mm->brk_clear_len);
 
 		if (clear_len && clear_user((void *) oldbrk, clear_len)) {
-			LWKMEM_WARN(" Failed to clear heap at 0x%p [%ld]",
+			LWKMEM_WARN(" Failed to clear heap at %#lx [%ld]",
 				    oldbrk, clear_len);
 		}
 	}
@@ -915,26 +915,26 @@ int lwk_mm_set_mempolicy_info(const char *buff, size_t size)
 	}
 
 	if (nvmrs > LWK_MAX_NUMVMRTYPES) {
-		LWKMEM_ERROR("Invalid number of VMRs %d supported %d max",
+		LWKMEM_ERROR("Invalid number of VMRs %lld supported %d max",
 			     nvmrs, LWK_MAX_NUMVMRTYPES);
 		return rc;
 	}
 
 	if (max_lists > MAX_NUMNODES) {
-		LWKMEM_ERROR("Invalid number of lists %d, allowed %d max",
+		LWKMEM_ERROR("Invalid number of lists %lld, allowed %d max",
 			     max_lists, MAX_NUMNODES);
 		return rc;
 	}
 
 	if (valid_lists > max_lists) {
-		LWKMEM_ERROR("Invalid number of valid lists %d > maxlist %d",
+		LWKMEM_ERROR("Invalid number of valid lists %lld > maxlist %lld",
 			     valid_lists, max_lists);
 		return rc;
 	}
 
 	nmax = max_longs_per_list * 8;
 	if (nmax > MAX_NUMNODES) {
-		LWKMEM_ERROR("Invalid NUMA nodes per list %d, allowed %d max",
+		LWKMEM_ERROR("Invalid NUMA nodes per list %ld, allowed %d max",
 			     nmax, MAX_NUMNODES);
 		return rc;
 	}
@@ -1005,7 +1005,7 @@ int lwk_mm_set_mempolicy_info(const char *buff, size_t size)
 		}
 
 		if ((int) pf_level == LWK_PF_LEVELS) {
-			LWKMEM_WARN("%s: Invalid pagefault lvl %d, set nofault",
+			LWKMEM_WARN("%s: Invalid pagefault lvl %ld, set nofault",
 				    lwk_vmrs_name[vmr], *ptr);
 		}
 		ptr++;
@@ -1020,7 +1020,7 @@ int lwk_mm_set_mempolicy_info(const char *buff, size_t size)
 			}
 		}
 		if ((int) type == LWK_MAX_MEMPOL_TYPES) {
-			LWKMEM_WARN("%s: Invalid policy type %d, set normal",
+			LWKMEM_WARN("%s: Invalid policy type %lld, set normal",
 				    lwk_vmrs_name[vmr], *ptr);
 		}
 		ptr++;

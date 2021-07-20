@@ -596,8 +596,6 @@ static void smaps_lwk_pud_entry(pud_t *pud, unsigned long addr,
 	struct page *page;
 
 	page = pud_page(*pud);
-	if (!page)
-		return;
 	if (PageAnon(page))
 		mss->anonymous_thp += HPAGE_PUD_SIZE;
 	smaps_account(mss, page, true, pud_young(*pud), pud_dirty(*pud), locked);
@@ -612,8 +610,6 @@ static void smaps_lwk_pmd_entry(pmd_t *pmd, unsigned long addr,
 	struct page *page;
 
 	page = pmd_page(*pmd);
-	if (!page)
-		return;
 	if (PageAnon(page))
 		mss->anonymous_thp += HPAGE_PMD_SIZE;
 	smaps_account(mss, page, true, pmd_young(*pmd), pmd_dirty(*pmd), locked);
