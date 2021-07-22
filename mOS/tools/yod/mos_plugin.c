@@ -228,6 +228,7 @@ static void mos_init_cpu_map(void)
 	char buffer[4096], path[4096];
 	FILE *f;
 	int family = -1, model = -1;
+	int found_family = 0, found_model = 0;
 	size_t cpu, core, tile, node;
 	size_t nc, nr, n_nodes;
 	mos_cpuset_t *set;
@@ -237,13 +238,21 @@ static void mos_init_cpu_map(void)
 
 	if (!(f = fopen(CPUINFO, "r")))
 		yod_abort(-1, "Could not read %s", CPUINFO);
-	while ((family < 0 || model < 0) && fgets(buffer, sizeof(buffer), f)) {
+	while (!(found_family && found_model)) {
+		if (fgets(buffer, sizeof(buffer), f) != buffer)
+			break;
+
 		sscanf(buffer, "cpu family : %d\n", &family);
 		sscanf(buffer, "model : %d\n", &model);
+
+		if (family >= 0)
+			found_family = 1;
+		if (model >= 0)
+			found_model = 1;
 	}
 	fclose(f);
 
-	if (family < 0 || model < 0)
+	if (!found_family || !found_model)
 		yod_abort(-1, "Could not parse CPU model (%d/%d)", family, model);
 
 	/* Read the /sys/devices/system/cpu/online file to determine

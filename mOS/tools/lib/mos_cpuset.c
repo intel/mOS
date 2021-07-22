@@ -21,6 +21,7 @@
 #include <errno.h>
 #include <ctype.h>
 #include <sched.h>
+#include <limits.h>
 #include "../../../include/generated/autoconf.h"
 #include "mos_cpuset.h"
 #include "mos_debug.h"
@@ -32,10 +33,13 @@ static int _mos_max_cpus = -1;
 int mos_max_cpus(void)
 {
 	if (_mos_max_cpus == -1) {
-		if (getenv("YOD_MAX_CPUS"))
-			_mos_max_cpus = atoi(getenv("YOD_MAX_CPUS"));
-		else
-			_mos_max_cpus = CONFIG_NR_CPUS;
+		_mos_max_cpus = CONFIG_NR_CPUS;
+		if (getenv("YOD_MAX_CPUS")) {
+			int user_max = atoi(getenv("YOD_MAX_CPUS"));
+
+			if (user_max > 0 && user_max < INT_MAX)
+				_mos_max_cpus = user_max;
+		}
 	}
 
 	return _mos_max_cpus;
@@ -241,7 +245,7 @@ int mos_parse_cpulist(const char *list, mos_cpuset_t *set)
 		stride = stride_s ? mos_parse_cpu_num(stride_s) : 1;
 
 		if ((left < 0) || (right < 0) || (stride < 0)) {
-			MOS_ERR(MOD_NAME, "Invalid CPU format");
+			MOS_ERR(MOD_NAME, "Invalid CPU format: %s", list);
 			free(dup);
 			return -1;
 		}

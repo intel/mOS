@@ -323,7 +323,7 @@ static unsigned long int nodelist_to_mask(char *path, char *buffer,
 			lwkctl_abort(-1, "Node mask overflow: [%s] %s", path,
 				buffer);
 		for (val = left; val <= right; val++)
-			mask |= (1 << val);
+			mask |= (1UL << val);
 	}
 
 	LC_LOG(LC_DEBUG, "Node list to mask. Path=%s mask=%016lx", path, mask);
@@ -736,6 +736,10 @@ static void generate_cpumap(struct cpu_info *cpuinfo, char *buffer,
 		left_s = strsep(&right_s, "-");
 		left = atoi(left_s);
 		right = right_s ? atoi(right_s) : left;
+		if (left < 0)
+			lwkctl_abort(-1, "Error parsing %s, left %d, right %d",
+				buffer, left, right);
+
 		for (node = left; node <= right; node++) {
 			/* This is a valid node. Look at the CPU mask and
 			 * set this node id into the cpu_map structure
@@ -2016,10 +2020,9 @@ static bool get_mos_view(char *view)
 	if (!fp)
 		goto out;
 
-	view[PROC_MOS_VIEW_LEN-1] = '\0';
 	ret = fread(view, 1, PROC_MOS_VIEW_LEN-1, fp);
+	view[ret] = '\0';
 	if (ret && ret <= PROC_MOS_VIEW_LEN-1) {
-		view[ret] = '\0';
 		c = strchr(view, '\n');
 		if (c)
 			*c = '\0';

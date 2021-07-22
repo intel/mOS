@@ -124,7 +124,7 @@ static void show_target(int level, int start, int argc, char **argv)
 {
 	if (lwkreset_verbosity >= level) {
 		char target[0x4000];
-		unsigned remaining = sizeof(target);
+		unsigned int remaining = sizeof(target) - 1;
 		int i;
 
 		target[0] = 0;

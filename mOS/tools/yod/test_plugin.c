@@ -424,14 +424,14 @@ struct yod_plugin *init_tst_plugin(const char *file)
 	/* all -1's ... */
 	memset(_CPU_INFO, -1, sizeof(_CPU_INFO));
 
-	if (fgets(line, sizeof(line), f) != 0)
-		assert(strncmp(line, HEADER, sizeof(HEADER)-1) == 0);
-	while (fgets(line, sizeof(line), f) != 0) {
+	if (fgets(line, sizeof(line), f) == line)
+		assert(strncmp(line, HEADER, sizeof(HEADER)) == 0);
+	while (fgets(line, sizeof(line), f) == line) {
 		int n, cpu, core, tile, node;
 
 		n = sscanf(line, "%d,%d,%d,%d\n", &cpu, &core, &tile, &node);
 		assert(n == 4);
-		assert(cpu <= MAX_CPUS);
+		assert(cpu >= 0 && cpu <= MAX_CPUS);
 
 		_CPU_INFO[cpu].elems[YOD_CORE] = core;
 		_CPU_INFO[cpu].elems[YOD_NODE] = node;

@@ -48,7 +48,7 @@ static char *_rstrip(char *attr)
 	int n = strlen(attr);
 
 	while (n > 0 && isspace(attr[n-1]))
-		attr[n-1] = 0;
+		attr[--n] = 0;
 
 	return attr;
 }
@@ -68,8 +68,9 @@ static char *_rstrip(char *attr)
 				    struct kobj_attribute *attr,	\
 				    const char *buf, size_t count)	\
 	{								\
-		if (count < sizeof(mosras_##name)-1) {			\
-			strcpy(mosras_##name, buf);			\
+		if (count < sizeof(mosras_##name)) {			\
+			strncpy(mosras_##name, buf, count);		\
+			mosras_##name[count] = '\0';			\
 			_rstrip(mosras_##name);				\
 			return count;					\
 		}							\
@@ -128,13 +129,14 @@ static ssize_t inject_store(struct kobject *kobj,
 	ssize_t ret;
 	char *event_id;
 
-	dup = msg = kstrdup(buff, GFP_KERNEL);
-
+	dup = msg = kmalloc(count + 1, GFP_KERNEL);
 	if (!msg) {
 		ret = -ENOMEM;
 		goto out;
 	}
 
+	memcpy(msg, buff, count);
+	msg[count] = '\0';
 	event_id = strsep(&msg, " ");
 
 	if (!event_id || !msg) {

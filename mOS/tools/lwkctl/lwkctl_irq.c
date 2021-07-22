@@ -71,11 +71,16 @@ static int setenv_banned_cpus(void)
 {
 	int rc = EINVAL;
 	char *ptr;
-	char *env_buffer = calloc(CHAR_BUFFER_SIZE, 1);
-	char *set_env_cmd = calloc(CHAR_BUFFER_SIZE, 1);
+	char *env_buffer = NULL;
+	char *set_env_cmd = NULL;
 
-	if (!env_buffer || !set_env_cmd)
-		return ENOMEM;
+	env_buffer = calloc(CHAR_BUFFER_SIZE, 1);
+	if (!env_buffer)
+		goto out;
+
+	set_env_cmd = calloc(CHAR_BUFFER_SIZE, 1);
+	if (!set_env_cmd)
+		goto out;
 
 	if (mos_sysfs_read(MOS_SYSFS_LWKCPUS_MASK, env_buffer,
 			   CHAR_BUFFER_SIZE) < 0) {

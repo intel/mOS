@@ -559,6 +559,9 @@ void yod_append_memory_nid(int grp, size_t nid, lwk_request_t *req)
 {
 	size_t i;
 
+	if (grp < 0)
+		return;
+
 	for (i = 0; i < req->lwkmem_domain_info_len[grp]; i++)
 		if (req->lwkmem_domain_info[grp][i] == nid)
 			return;
@@ -2030,7 +2033,7 @@ void show_state(int level)
 		YOD_LOG(level, "Requested utility threads : %d", num_util_threads);
 
 		for (i = 0; i < ARRAY_SIZE(lwkmem); i++) {
-			mem_vec_to_str(lwkmem[i].mvec, lwk_req.n_nids, buff, sizeof(buff), &total);
+			mem_vec_to_str(lwkmem[i].mvec, lwk_req.n_nids, buff, sizeof(buff) - 1, &total);
 			YOD_LOG(level, "%s LWK memory : %s  total %zd MiB", lwkmem[i].label, buff, total >> 20);
 		}
 
@@ -2594,7 +2597,7 @@ int main(int argc, char **argv)
 		yod_abort(rc, "Could not acquire %zd bytes of LWK memory. (%s)",
 			  lwk_req.lwkmem_size, strerror(-rc));
 
-	mem_vec_to_str(lwk_req.lwkmem_request, lwk_req.n_nids, mem_str, PATH_MAX, &total_mem);
+	mem_vec_to_str(lwk_req.lwkmem_request, lwk_req.n_nids, mem_str, PATH_MAX - 1, &total_mem);
 	YOD_LOG(YOD_INFO, "LWK memory requested: %s total %zd MiB",
 		mem_str, total_mem >> 20);
 

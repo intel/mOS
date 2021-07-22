@@ -37,12 +37,13 @@ int mos_sysfs_read(const char *file, char *buff, int len)
 		return -1;
 	}
 
-	buff[len-1] = '\0';
 	rc = fread(buff, 1, len-1, fptr);
-	if (rc < 0)
+	buff[rc] = '\0';	/* force end-of-string */
+
+	if (ferror(fptr) != 0) {
 		LC_ERR("Could not read \"%s\" (rc = %d)", file, rc);
-	else
-		buff[rc] = '\0'; /* force end-of-string */
+		rc = -1;
+	}
 
 	fclose(fptr);
 
