@@ -1506,7 +1506,7 @@ start_timer:
 	    !need_resched() && /* Are we staying in idle loop */
 	    (pid == -1))   /* Did we not pull a thread onto this CPU */
 		rc = start_balance_tick(this_mos_rq,
-					this_mos_rq->balancer_parm3 * 1000);
+			this_mos_rq->balancer_parm3 * (uint64_t)1000);
 	return rc;
 }
 
@@ -1529,6 +1529,8 @@ static bool balance_push(struct rq *this_rq)
 	this_cpu = cpu_of(this_rq);
 	this_mos_rq = &(this_rq->mos);
 	mosp = this_mos_rq->owner;
+	if (!mosp)
+		return rc;
 	throttle = ms_to_ktime(mosp->balancer_parm3);
 
 	/* Are we overcommitted */
@@ -1552,8 +1554,6 @@ static bool balance_push(struct rq *this_rq)
 	 * one mOS process thread running on any given LWK CPU. If this design
 	 * ever changes, this lock design will need to be changed
 	 */
-	if (!mosp)
-		return rc;
 	raw_spin_unlock(&this_rq->lock);
 	raw_spin_lock(&mosp->balancer_lock);
 
@@ -3534,8 +3534,22 @@ int mos_select_next_cpu(struct task_struct *p, const struct cpumask *new_mask)
 	 * Are we moving to an LWK CPU and no committed CPU home
 	 * has been established yet
 	 */
-	if (cpumask_subset(new_mask, p->mos_process->lwkcpus))
-		return select_cpu_candidate(p, COMMIT_MAX);
+	if (cpumask_subset(new_mask, p->mos_process->lwkcpus)) {
+		cpu = select_cpu_candidate(p, COMMIT_MAX);
+		if (unlikely(cpu < 0)) {
+			mos_ras(MOS_SCHEDULER_WARNING,
+			    "%s: Maximum commit level reached.",
+			    __func__);
+			cpu = cpumask_first(new_mask);
+			if (unlikely((cpu == nr_cpu_ids))) {
+				cpu = 0;
+				mos_ras(MOS_SCHEDULER_WARNING,
+				    "%s: No CPUs in the new LWK CPU mask.",
+				    __func__);
+			}
+		}
+		return cpu;
+	}
 	/*
 	 * This must be a syscall migration or a utility thread being
 	 * moved to a CPU controlled by Linux
@@ -3565,8 +3579,21 @@ int mos_select_cpu_candidate(struct task_struct *p, int cpu)
 		 * under the expected conditions
 		 */
 		if (likely(cpumask_subset(p->cpus_ptr,
-					  p->mos_process->lwkcpus)))
+					  p->mos_process->lwkcpus))) {
 			ncpu = select_cpu_candidate(p, COMMIT_MAX);
+			if (unlikely(ncpu < 0)) {
+				mos_ras(MOS_SCHEDULER_WARNING,
+				    "%s: Maximum commit level reached.",
+				    __func__);
+				ncpu = cpumask_first(p->cpus_ptr);
+				if (unlikely(cpu == nr_cpu_ids)) {
+					ncpu = 0;
+					mos_ras(MOS_SCHEDULER_WARNING,
+					    "%s: No CPUs in the new LWK CPU mask.",
+					    __func__);
+				}
+			}
+		}
 	}
 	return ncpu;
 }
