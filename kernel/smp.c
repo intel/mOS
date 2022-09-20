@@ -26,7 +26,6 @@
 #include <linux/sched/debug.h>
 #include <linux/jump_label.h>
 #include <linux/moduleparam.h>
-
 #include "smpboot.h"
 #include "sched/smp.h"
 

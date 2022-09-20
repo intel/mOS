@@ -1,0 +1,113 @@
+                                mOS - views
+                                -----------
+
+Description:
+------------
+mOS view is the view of some of the procfs and sysfs files for a process in mOS.
+On mOS the hardware resources (CPU, Memory, NUMA domains) are partitioned betwe-
+-en Linux and LWK. A process running on mOS installed machine can see the system
+resources in procfs and sysfs in following three valid views,
+
+View
+----
+linux - Only resources designated for Linux kernel are visible. This view is not
+	a valid view for an LWK process and can be set only for Linux processes.
+
+lwk   - Only resources designated for LWK are visible.
+
+all   - Union of linux and lwk, i.e. resources designated to both Linux and LWK
+        are visible.
+
+Summary of valid Configurations:
+
+        Task    View
+        ----    ----
+        Linux   linux
+        Linux   lwk
+        Linux   all
+
+        LWK     lwk
+        LWK     all
+
+How to set the mOS view for a process?
+
+  a) A process can choose any one of the views by writing the valid view name
+       linux or lwk or all to its, /proc/self/mos_view
+
+  b) A process A can change view of process B (belonging to same user/group) by
+     writing to, /proc/<pid B>/mos_view
+
+  c) At the time of fork the mOS view of the parent process is inherited by the
+     child process. Subsequently child can override its view via a) or b)
+
+  d) The mOS view 'all' will be the default view for a process. The mOS view of
+     init process with pid 1 will be set to 'all'
+
+  e) The mOS view of the child process of an LWK process will be set to the def-
+     -ault view irrespective of the current mOS view of the LWK process.
+
+mOS view for CPUs:
+------------------
+
+Based on the set mOS view the process interprets procfs and sysfs files related
+to CPU resources.
+
+Read/Write to following files interpret mOS views,
+
+Procfs:
+-------
+    /proc/stat
+        Filters displaying stats of CPUs but not other stats like accumulated
+        CPU stat, process stats, irq stats etc. Since htop refers to this file
+        for displaying the CPU load meters this file has been considered.
+
+    /proc/cpuinfo
+
+Sysfs:
+------
+    /sys/devices/system/cpu/present
+    /sys/devices/system/cpu/online
+    /sys/devices/system/cpu/offline
+    /sys/devices/system/cpu/cpu<N>/online
+    /sys/devices/system/node/node<N>/cpumap
+    /sys/devices/system/node/node<N>/cpulist
+    /sys/fs/cgroup/cpuset/cpuset.cpus
+    /sys/fs/cgroup/cpuset/cpuset.effective_cpus
+    /sys/devices/pci*/*/local_cpulist
+    /sys/devices/pci*/*/local_cpus
+
+Tools used for testing:
+    lscpu, htop, numactl, yod
+
+Notes:
+------
+  - Reading cpuset.cpus and cpuset.effective_cpus by Linux processes does not
+    interpret mOS views. Only LWK processes interpret mOS views for these.
+
+    For an LWK process in,
+      all view: all LWK CPUs are added to the existing list of Linux CPUs.
+      lwk view: only LWK CPUs are shown.
+
+  - Ideally it is not absolute necessity for /sys/devices/system/cpu/present to
+    interpret mOS views, but the standard tool like lscpu considers present
+    mask instead of online mask for computing the available no.of CPUs/cores. In
+    order to enable such tools it was considered to interpret the above file.
+
+  - mOS view interpretation is only applicable to userspace and does not hold
+    within the kernel.
+
+Tool - mosview:
+---------------
+mosview is the userspace tool that can be used to,
+
+  - Run a user command in the specified mOS view
+      ex: To run lscpu in mOS view 'all'
+          mosview -s all lscpu
+
+  - Set mOS view of a running process
+      ex: To set mOS view of a running process to 'lwk' view,
+          mosview -s lwk -p <pid>
+
+  - Print the mOS view of a running process
+      ex: mosview -p <pid>
+

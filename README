@@ -1,18 +1,47 @@
-Linux kernel
+What is mOS for HPC
+===================
+
+mOS for HPC is an operating systems research project at Intel, targeting
+extreme scale HPC systems deploying converged workflows for modeling /
+simulation, data analytics, and AI. It aims to deliver a high performance
+computing environment with the scalability, low noise, and repeatability
+expected of lightweight kernels (LWK), while maintaining overall Linux
+compatibility that HPC plus AI / ML applications need.
+
+mOS for HPC remains under development at this time. These materials are being
+made available to interested parties to explore, to test drive, and to provide
+feedback through the mailing list. It is not intended to be used for business
+critical uses. The ability to compile, install, and boot a Linux kernel is
+required to get mOS up and running. A good understanding of what an OS does and
+how it interacts with the underlying hardware is needed to configure the LWK
+partition and get the most out of it. Support is limited by the development
+team's ability to respond through the mailing list.
+
+New for v1.0
 ============
 
-There are several guides for kernel developers and users. These guides can
-be rendered in a number of formats, like HTML and PDF. Please read
-Documentation/admin-guide/README.rst first.
+- Based on SLES15 SP4 version of Linux 5.14.21 from github.com/openSUSE
+- GPU ressource management support
+        - Dependency on Intel OneAPI Level Zero APIs
+	- New yod options to control GPU reservations
+- Bug fixes
 
-In order to build the documentation, use ``make htmldocs`` or
-``make pdfdocs``.  The formatted documentation can also be read online at:
+Where to get code
+=================
 
-    https://www.kernel.org/doc/html/latest/
+The mOS for HPC source can be checked out from GitHub at
+https://github.com/intel/mOS. Please see the Administrator's Guide
+for further instructions.
 
-There are various text files in the Documentation/ subdirectory,
-several of them using the Restructured Text markup notation.
+Where to ask questions
+======================
 
-Please read the Documentation/process/changes.rst file, as it contains the
-requirements for building and running the kernel, and information about
-the problems which may result by upgrading your kernel.
+Register for the mOS for HPC mailing list at
+https://groups.google.com/g/mos-devel/. Please, submit questions
+and follow discussions through this list.
+
+Where to report issues
+======================
+
+https://github.com/intel/mOS/issues
+

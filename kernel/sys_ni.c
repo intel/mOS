@@ -482,3 +482,8 @@ COND_SYSCALL(setuid16);
 
 /* restartable sequence */
 COND_SYSCALL(rseq);
+
+/* mOS system calls */
+COND_SYSCALL(mos_get_addr_info);
+COND_SYSCALL(mos_set_clone_attr);
+COND_SYSCALL(mos_mwait);

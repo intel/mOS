@@ -371,6 +371,12 @@
 447	common	memfd_secret		sys_memfd_secret
 450	common	set_mempolicy_home_node	sys_set_mempolicy_home_node
 
+# mOS system calls
+509	64	mos_mwait               sys_mos_mwait
+510	64	mos_get_addr_info	sys_mos_get_addr_info
+511	64	mos_set_clone_attr	sys_mos_set_clone_attr
+# end of mOS system calls
+
 #
 # Due to a historical design error, certain syscalls are numbered differently
 # in x32 as compared to native x86_64.  These syscalls have numbers 512-547.

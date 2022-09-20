@@ -98,6 +98,7 @@
 #include <linux/io_uring.h>
 #include <linux/bpf.h>
 #include <linux/sched/mm.h>
+#include <linux/mos.h>
 
 #include <asm/pgalloc.h>
 #include <linux/uaccess.h>
@@ -2198,6 +2199,34 @@ static __latent_entropy struct task_struct *copy_process(
 		p->group_leader = p;
 		p->tgid = p->pid;
 	}
+
+#ifdef CONFIG_MOS_FOR_HPC
+	if (clone_flags & CLONE_THREAD) {
+		/* A copy of an LWK thread is also an LWK thread. */
+		p->mos_flags = current->mos_flags;
+		p->mos_process = current->mos_process;
+		if (current->mos_process)
+			atomic_inc(&current->mos_process->alive);
+	} else {
+		/* A copy of an LWK process is not an LWK process. */
+		p->mos_flags = current->mos_flags & ~MOS_IS_LWK_PROCESS;
+		p->mos_process = NULL;
+
+		/* All Linux processes inherit the mOS view from its parent.
+		 * The child process can override its view later by writing to
+		 * its /proc/self/mos_view or by some other process writing to
+		 * /proc/<pid>/mos_view
+		 *
+		 * This rule is not applicable to LWK processes. The child
+		 * process starts off with the default view and does not in-
+		 * -herit view from its parent LWK process.
+		 *
+		 * No need to lock child process since it is not yet active.
+		 */
+		if (is_mostask())
+			SET_MOS_VIEW(p, MOS_VIEW_DEFAULT);
+	}
+#endif
 
 	p->nr_dirtied = 0;
 	p->nr_dirtied_pause = 128 >> (PAGE_SHIFT - 10);

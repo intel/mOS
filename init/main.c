@@ -100,6 +100,7 @@
 #include <linux/kcsan.h>
 #include <linux/init_syscalls.h>
 #include <linux/stackdepot.h>
+#include <linux/mos.h>
 
 #include <asm/io.h>
 #include <asm/bugs.h>
@@ -1528,6 +1529,8 @@ static int __ref kernel_init(void *unused)
 	rcu_end_inkernel_boot();
 
 	do_sysctl_args();
+	/* Create LWK default partition if required. */
+	lwkctl_def_partition();
 
 	if (ramdisk_execute_command) {
 		ret = run_init_process(ramdisk_execute_command);

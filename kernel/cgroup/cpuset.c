@@ -65,6 +65,7 @@
 #include <linux/mutex.h>
 #include <linux/cgroup.h>
 #include <linux/wait.h>
+#include <linux/mos.h>
 
 DEFINE_STATIC_KEY_FALSE(cpusets_pre_enable_key);
 DEFINE_STATIC_KEY_FALSE(cpusets_enabled_key);
@@ -2492,6 +2493,24 @@ static int cpuset_common_seq_show(struct seq_file *sf, void *v)
 	int ret = 0;
 
 	spin_lock_irq(&callback_lock);
+
+	if (IS_ENABLED(CONFIG_MOS_FOR_HPC) && is_mostask() &&
+		((type == FILE_CPULIST) ||
+		 (type == FILE_EFFECTIVE_CPULIST))) {
+		cpumask_var_t mask;
+
+		if (alloc_cpumask_var(&mask, GFP_KERNEL)) {
+			cpumask_or(mask, cpu_lwkcpus_mask,
+				type == FILE_CPULIST ? cs->cpus_allowed :
+					cs->effective_cpus);
+			get_mos_view_cpumask(mask, mask);
+			seq_printf(sf, "%*pbl\n", cpumask_pr_args(mask));
+			free_cpumask_var(mask);
+		} else
+			ret =  -ENOMEM;
+		spin_unlock_irq(&callback_lock);
+		return ret;
+	}
 
 	switch (type) {
 	case FILE_CPULIST:

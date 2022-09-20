@@ -13,6 +13,7 @@
 #include <linux/ratelimit.h>
 #include <linux/irq.h>
 #include <linux/sched/isolation.h>
+#include <linux/mos.h>
 
 #include "internals.h"
 
@@ -223,6 +224,8 @@ int irq_affinity_online_cpu(unsigned int cpu)
 	irq_lock_sparse();
 	for_each_active_irq(irq) {
 		desc = irq_to_desc(irq);
+		if (cpu_islwkcpu(cpu) && !mos_is_allowed_interrupt(desc))
+			continue;
 		raw_spin_lock_irq(&desc->lock);
 		irq_restore_affinity_of_irq(desc, cpu);
 		raw_spin_unlock_irq(&desc->lock);

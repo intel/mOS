@@ -14,6 +14,7 @@
 #include <linux/irqnr.h>
 #include <linux/sched/cputime.h>
 #include <linux/tick.h>
+#include <linux/mos.h>
 
 #ifndef arch_irq_stat_cpu
 #define arch_irq_stat_cpu(cpu) 0
@@ -114,6 +115,10 @@ static int show_stat(struct seq_file *p, void *v)
 	u64 sum_softirq = 0;
 	unsigned int per_softirq_sums[NR_SOFTIRQS] = {0};
 	struct timespec64 boottime;
+#ifdef CONFIG_MOS_FOR_HPC
+	bool is_mos_view_lwk = IS_MOS_VIEW(current, MOS_VIEW_LWK);
+	bool is_mos_view_linux = IS_MOS_VIEW(current, MOS_VIEW_LINUX);
+#endif
 
 	user = nice = system = idle = iowait =
 		irq = softirq = steal = 0;
@@ -168,6 +173,16 @@ static int show_stat(struct seq_file *p, void *v)
 
 		kcpustat_cpu_fetch(&kcpustat, i);
 
+#ifdef CONFIG_MOS_FOR_HPC
+		if (IS_MOS_VIEW(current, MOS_VIEW_LWK_LOCAL) &&
+		    !cpumask_test_cpu(i, current->mos_process->lwkcpus))
+			continue;
+		else {
+			if ((is_mos_view_linux && cpu_islwkcpu(i)) ||
+			    (is_mos_view_lwk && !cpu_islwkcpu(i)))
+				continue;
+		}
+#endif
 		/* Copy values here to work around gcc-2.95.3, gcc-2.96 */
 		user		= cpustat[CPUTIME_USER];
 		nice		= cpustat[CPUTIME_NICE];

@@ -20,6 +20,7 @@
 #include <linux/tick.h>
 #include <linux/pm_qos.h>
 #include <linux/sched/isolation.h>
+#include <linux/mos.h>
 
 #include "base.h"
 
@@ -215,11 +216,32 @@ static ssize_t show_cpus_attr(struct device *dev,
 #define _CPU_ATTR(name, map) \
 	{ __ATTR(name, 0444, show_cpus_attr, NULL), map }
 
+#ifdef CONFIG_MOS_FOR_HPC
+static ssize_t show_mos_view_cpus_attr(struct device *dev,
+			      struct device_attribute *attr,
+			      char *buf)
+{
+	struct cpu_attr *ca = container_of(attr, struct cpu_attr, attr);
+
+	return cpumap_print_mos_view_cpumask(true, buf, ca->map);
+}
+#define _CPU_ATTR_MOS_VIEW(name, map) \
+	{ __ATTR(name, 0444, show_mos_view_cpus_attr, NULL), map }
+#endif
+
 /* Keep in sync with cpu_subsys_attrs */
 static struct cpu_attr cpu_attrs[] = {
+#ifdef CONFIG_MOS_FOR_HPC
+	_CPU_ATTR_MOS_VIEW(online, &__cpu_online_mask),
+#else
 	_CPU_ATTR(online, &__cpu_online_mask),
+#endif
 	_CPU_ATTR(possible, &__cpu_possible_mask),
+#ifdef CONFIG_MOS_FOR_HPC
+	_CPU_ATTR_MOS_VIEW(present, &__cpu_present_mask),
+#else
 	_CPU_ATTR(present, &__cpu_present_mask),
+#endif
 };
 
 /*
@@ -245,6 +267,14 @@ static ssize_t print_cpus_offline(struct device *dev,
 	if (!alloc_cpumask_var(&offline, GFP_KERNEL))
 		return -ENOMEM;
 	cpumask_andnot(offline, cpu_possible_mask, cpu_online_mask);
+
+	if (IS_ENABLED(CONFIG_MOS_FOR_HPC)) {
+		/* Get mask for all online cpus based on mOS view */
+		get_mos_view_cpumask(offline, cpu_online_mask);
+		/* offline CPUs = all cpus which are not online in mOS view */
+		cpumask_andnot(offline, cpu_possible_mask, offline);
+	}
+
 	len += sysfs_emit_at(buf, len, "%*pbl", cpumask_pr_args(offline));
 	free_cpumask_var(offline);
 
