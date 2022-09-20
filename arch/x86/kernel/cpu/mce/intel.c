@@ -426,6 +426,50 @@ void cmci_disable_bank(int bank)
 	raw_spin_unlock_irqrestore(&cmci_discover_lock, flags);
 }
 
+#ifdef CONFIG_MOS_FOR_HPC
+void cmci_set_threshold(void *threshold)
+{
+	int banks, i;
+	unsigned long *owned = (void *)this_cpu_ptr(&mce_banks_owned);
+	u64 new_threshold = (u64)threshold & MCI_CTL2_CMCI_THRESHOLD_MASK;
+
+	/* Is the boot option set that indicates bios controls the threshold */
+	if (mca_cfg.bios_cmci_threshold)
+		return;
+	if (!cmci_supported(&banks))
+		return;
+	for (i = 0; i < banks; i++) {
+		u64 val, previous_threshold;
+
+		if (!test_bit(i, owned))
+			continue;
+		rdmsrl(MSR_IA32_MCx_CTL2(i), val);
+		previous_threshold = val & MCI_CTL2_CMCI_THRESHOLD_MASK;
+		if (new_threshold == previous_threshold)
+			continue;
+		val &= ~MCI_CTL2_CMCI_THRESHOLD_MASK;
+		val |= new_threshold;
+		wrmsrl(MSR_IA32_MCx_CTL2(i), val);
+		rdmsrl(MSR_IA32_MCx_CTL2(i), val);
+		if ((val & MCI_CTL2_CMCI_THRESHOLD_MASK) == new_threshold)
+			continue;
+		/* Requested value not supported in this bank */
+		val |= 0x7fff;
+		wrmsrl(MSR_IA32_MCx_CTL2(i), val);
+		rdmsrl(MSR_IA32_MCx_CTL2(i), val);
+		pr_info_once(
+		    "mOS: At least one CMCI bank (%d) does not support requested threshold=%lld. Max allowed=%lld\n",
+		    i, new_threshold, (val & MCI_CTL2_CMCI_THRESHOLD_MASK));
+	}
+}
+void cmci_reset_threshold(void *data)
+{
+	cmci_set_threshold((void *)CMCI_THRESHOLD);
+	/* Log any events that may have accumulated with previous threshold */
+	machine_check_poll(0, this_cpu_ptr(&mce_banks_owned));
+}
+#endif
+
 void intel_init_cmci(void)
 {
 	int banks;

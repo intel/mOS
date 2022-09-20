@@ -100,7 +100,7 @@ extern cpumask_t mos_syscall_mask;
 extern cpumask_t __mos_lwkcpus_arg;
 extern cpumask_t __mos_sccpus_arg;
 
-extern void mos_linux_enter(void);
+extern void mos_linux_enter(void *sys_wrap);
 extern void mos_linux_leave(void);
 extern void mos_sysfs_update(void);
 extern void mos_exit_thread(void);
@@ -137,9 +137,52 @@ struct mos_process_t {
 	/* Memory attributes go here */
 #endif
 
-#ifdef CONFIG_MOS_SCHEDULER
 	/* Scheduler attributes go here */
-#endif
+
+	/* Count of threads created */
+	atomic_t threads_created;
+	/* Original cpus_allowed mask at launch */
+	cpumask_var_t original_cpus_allowed;
+	/* Correctable machine check interrupt polling */
+	bool mce_modifications_active;
+	/* Enabled round-robin threads. Value=timeslice in ms */
+	int enable_rr;
+	/* Enable the scheduler balancer */
+	unsigned int balancer;
+	unsigned int balancer_parm1;
+	unsigned int balancer_parm2;
+	unsigned int balancer_parm3;
+	raw_spinlock_t	balancer_lock;
+	/* Idle control fields */
+	int idle_mechanism;
+	int idle_boundary;
+	/* Disable sched_setaffinity. Value = errno+1 */
+	int disable_setaffinity;
+	/* Logging verbosity for scheduler statistics */
+	int sched_stats;
+	/* Maximum number of lwkcpus for utility thread use */
+	int max_cpus_for_util;
+	/* Maximum number of util threads per lwkcpu */
+	int max_util_threads_per_cpu;
+	/* Overcommit behavior */
+	int overcommit_behavior;
+	/* One CPU or multiple CPUs allowed for a utility thread */
+	int allowed_cpus_per_util;
+	/* Correcable machine check interrupt enablement and threshold */
+	unsigned int cmci_threshold;
+	/* Correcable machine check polling enablement */
+	bool correctable_mcheck_polling;
+	/* List of utility threads on LWK CPUs */
+	struct list_head util_list;
+	/* Mutex for controlling the util_list */
+	struct mutex util_list_lock;
+
+	bool track_syscall_migrations;
+	struct mutex track_syscalls_lock;
+	struct {
+		void *func;
+		unsigned int count;
+	} migrations[64];
 };
 
 #if MAX_NUMNODES > 64
@@ -204,9 +247,32 @@ extern int lwk_config_lwkmem(char *param_value);
  */
 extern void lwkctl_def_partition(void);
 
-#ifdef CONFIG_MOS_SCHEDULER
 /* Scheduler additions go here */
-#endif
+extern void mce_lwkprocess_begin(cpumask_t *lwkcpus, unsigned int threshold,
+				 bool poll_enable);
+extern void mce_lwkprocess_end(cpumask_t *lwkcpus, bool reset_threshold,
+				bool reenable_poll);
+
+enum mos_match_cpu {
+	mos_match_cpu_FirstAvail = 0,
+	mos_match_cpu_SameCore,
+	mos_match_cpu_SameL1,
+	mos_match_cpu_SameL2,
+	mos_match_cpu_SameL3,
+	mos_match_cpu_SameDomain,
+	mos_match_cpu_OtherCore,
+	mos_match_cpu_OtherL1,
+	mos_match_cpu_OtherL2,
+	mos_match_cpu_OtherL3,
+	mos_match_cpu_OtherDomain,
+	mos_match_cpu_InNMask,
+};
+enum mos_commit_cpu_scope {
+	mos_commit_cpu_scope_AllCommits = 0,
+	mos_commit_cpu_scope_OnlyComputeCommits,
+	mos_commit_cpu_scope_OnlyUtilityCommits,
+};
+
 
 /* The definitions below are Linux definitions. They are collected here for
  * several reasons:
