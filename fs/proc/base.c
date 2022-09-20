@@ -99,6 +99,7 @@
 #include <trace/events/oom.h>
 #include "internal.h"
 #include "fd.h"
+#include <linux/mos.h>
 
 #include "../../lib/kstrtox.h"
 
@@ -2626,6 +2627,95 @@ static const struct file_operations proc_pid_set_timerslack_ns_operations = {
 	.release	= single_release,
 };
 
+#ifdef CONFIG_MOS_FOR_HPC
+static ssize_t mos_view_write(struct file *file, const char __user *buf,
+				size_t count, loff_t *offset)
+{
+	struct inode *inode = file_inode(file);
+	struct task_struct *p;
+	char buffer[MOS_VIEW_STR_LEN];
+	unsigned int mos_view = 0;
+	unsigned long len = count;
+
+	memset(buffer, 0, sizeof(buffer));
+	if (len > sizeof(buffer) - 1)
+		len = sizeof(buffer) - 1;
+	if (copy_from_user(buffer, buf, len))
+		return -EFAULT;
+
+	strreplace(buffer, '\n', '\0');
+	strim(buffer);
+	if (!strncmp(buffer, MOS_VIEW_STR_LINUX, len)) {
+		if (is_mostask())
+			return -EINVAL;
+		mos_view = MOS_VIEW_LINUX;
+	} else if (!strncmp(buffer, MOS_VIEW_STR_LWK, len))
+		mos_view = MOS_VIEW_LWK;
+	else if (!strncmp(buffer, MOS_VIEW_STR_LWK_LOCAL, len)) {
+		if (!is_mostask())
+			return -EINVAL;
+		mos_view = MOS_VIEW_LWK_LOCAL;
+	} else if (!strncmp(buffer, MOS_VIEW_STR_ALL, len))
+		mos_view = MOS_VIEW_ALL;
+	else {
+		pr_err("%s(): invalid buffer: [%s] count: [%ld]\n",
+			__func__, buffer, len);
+		return -EINVAL;
+	}
+
+	p = get_proc_task(inode);
+	if (!p)
+		return -ESRCH;
+
+	task_lock(p);
+	SET_MOS_VIEW(p, mos_view);
+	task_unlock(p);
+	put_task_struct(p);
+	return count;
+}
+
+static int mos_view_show(struct seq_file *m, void *v)
+{
+	struct inode *inode = m->private;
+	struct task_struct *p;
+	int ret = 0;
+
+	p = get_proc_task(inode);
+	if (!p)
+		return -ESRCH;
+
+	task_lock(p);
+
+	if (IS_MOS_VIEW(p, MOS_VIEW_LINUX))
+		seq_printf(m, "%s\n", MOS_VIEW_STR_LINUX);
+	else if (IS_MOS_VIEW(p, MOS_VIEW_LWK))
+		seq_printf(m, "%s\n", MOS_VIEW_STR_LWK);
+	else if (IS_MOS_VIEW(p, MOS_VIEW_LWK_LOCAL))
+		seq_printf(m, "%s\n", MOS_VIEW_STR_LWK_LOCAL);
+	else if (IS_MOS_VIEW(p, MOS_VIEW_ALL))
+		seq_printf(m, "%s\n", MOS_VIEW_STR_ALL);
+	else
+		ret = -EINVAL;
+
+	task_unlock(p);
+	put_task_struct(p);
+	return ret;
+}
+
+static int mos_view_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, &mos_view_show, inode);
+}
+
+static const struct file_operations proc_pid_set_mos_view_operations = {
+	.open		= mos_view_open,
+	.read		= seq_read,
+	.write		= mos_view_write,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+#endif
+
 static struct dentry *proc_pident_instantiate(struct dentry *dentry,
 	struct task_struct *task, const void *ptr)
 {
@@ -3308,6 +3398,9 @@ static const struct pid_entry tgid_base_stuff[] = {
 #endif
 #ifdef CONFIG_SECCOMP_CACHE_DEBUG
 	ONE("seccomp_cache", S_IRUSR, proc_pid_seccomp_cache),
+#endif
+#ifdef CONFIG_MOS_FOR_HPC
+	REG("mos_view", 0664, proc_pid_set_mos_view_operations),
 #endif
 };
 

@@ -20,6 +20,7 @@
 #include <linux/pm_runtime.h>
 #include <linux/swap.h>
 #include <linux/slab.h>
+#include <linux/mos.h>
 
 static struct bus_type node_subsys = {
 	.name = "node",
@@ -39,9 +40,15 @@ static inline ssize_t cpumap_read(struct file *file, struct kobject *kobj,
 		return 0;
 
 	cpumask_and(mask, cpumask_of_node(node_dev->dev.id), cpu_online_mask);
-	n = cpumap_print_bitmask_to_buf(buf, mask, off, count);
-	free_cpumask_var(mask);
 
+	if (IS_ENABLED(CONFIG_MOS_FOR_HPC)) {
+		n = cpumap_print_mos_bitmap_to_buf(buf, mask, off, count);
+		free_cpumask_var(mask);
+		return n;
+	}
+	n = cpumap_print_bitmask_to_buf(buf, mask, off, count);
+
+	free_cpumask_var(mask);
 	return n;
 }
 
@@ -60,6 +67,13 @@ static inline ssize_t cpulist_read(struct file *file, struct kobject *kobj,
 		return 0;
 
 	cpumask_and(mask, cpumask_of_node(node_dev->dev.id), cpu_online_mask);
+
+	if (IS_ENABLED(CONFIG_MOS_FOR_HPC)) {
+		n = cpumap_print_mos_list_to_buf(buf, mask, off, count);
+		free_cpumask_var(mask);
+		return n;
+	}
+
 	n = cpumap_print_list_to_buf(buf, mask, off, count);
 	free_cpumask_var(mask);
 

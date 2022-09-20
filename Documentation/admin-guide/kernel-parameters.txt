@@ -2705,11 +2705,34 @@
 	ltpc=		[NET]
 			Format: <io>,<irq>,<dma>
 
-	lsm.debug	[SECURITY] Enable LSM initialization debugging output.
+	lwkcpus=	[KNL,X86-64] In kernels built with CONFIG_MOS_FOR_HPC,
+                        specifies which CPUs will be under the control of the
+                        light-weight kernel and which Linux CPUs will be used
+                        by the light-weight kernel as utility CPUs.
 
-	lsm=lsm1,...,lsmN
-			[SECURITY] Choose order of LSM initialization. This
-			overrides CONFIG_LSM, and the "security=" parameter.
+			Format: <utility>.<light-weight kernel list>[:...]
+
+                        In kernels built with CONFIG_MOS_MOVE_SYSCALLS=y, the
+                        CPUs in the light-weight kernel list may affinitize
+                        threads onto their paired utility CPU; the affinity
+                        mask is changed back when the system call returns.
+
+	lwkcpu_profile= [KNL,X86-64] LWK CPU filtering profile
+		normal
+			Very minimal set of CPU hotplug states + hotplug
+			states registered by performance monitoring
+			infrastructure of Linux.
+		debug
+			No filtering of states for a LWKCPU and all states
+			between LWKCPU_MIN_STATE and LWKCPU_MAX_STATE are
+			enabled.
+
+			A particular profile can be selected by using the above
+			format either in the LWK partition specification written
+			to /sys/kernel/mOS/lwk_config or can be specified as
+			part of	Linux kernel command line. If nothing is specif-
+			-ied as part of Linux command line then the 'normal' pr-
+			-ofile will be set by the kernel during the kernel boot.
 
 	machvec=	[IA-64] Force the use of a particular machine-vector
 			(machvec) in a generic kernel.

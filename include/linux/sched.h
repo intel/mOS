@@ -827,6 +827,10 @@ struct task_struct {
 #endif
 	unsigned short			migration_flags;
 
+#ifdef CONFIG_MOS_FOR_HPC
+	int mos_nesting;
+#endif
+
 #ifdef CONFIG_PREEMPT_RCU
 	int				rcu_read_lock_nesting;
 	union rcu_special		rcu_read_unlock_special;
@@ -951,6 +955,11 @@ struct task_struct {
 
 	pid_t				pid;
 	pid_t				tgid;
+
+#ifdef CONFIG_MOS_FOR_HPC
+	unsigned int mos_flags; /* see MOS_* below */
+	struct mos_process_t *mos_process;
+#endif
 
 #ifdef CONFIG_STACKPROTECTOR
 	/* Canary value for the -fstack-protector GCC feature: */

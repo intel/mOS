@@ -21,6 +21,8 @@
 #include <linux/sched/isolation.h>
 #include <uapi/linux/sched/types.h>
 #include <linux/task_work.h>
+#include <linux/msi.h>
+#include <linux/mos.h>
 
 #include "internals.h"
 
@@ -451,7 +453,48 @@ static int __irq_set_affinity(unsigned int irq, const struct cpumask *mask,
 		return -EINVAL;
 
 	raw_spin_lock_irqsave(&desc->lock, flags);
+
+	if (IS_ENABLED(CONFIG_MOS_FOR_HPC)) {
+		if (!mos_is_allowed_interrupt(desc) &&
+		    (cpumask_intersects(mask, cpu_lwkcpus_mask))) {
+			cpumask_var_t linux_cpus;
+			struct irq_data *data = irq_desc_get_irq_data(desc);
+
+			if (!zalloc_cpumask_var(&linux_cpus, GFP_KERNEL)) {
+				ret = -ENOMEM;
+				goto out;
+			}
+			cpumask_andnot(linux_cpus, cpu_online_mask,
+				cpu_lwkcpus_mask);
+
+			if (unlikely(cpumask_empty(linux_cpus))) {
+				ret = -EINVAL;
+				mos_ras(MOS_KERNEL_ERROR,
+					"%s(irq %d, mask %*pbl) no Linux CPUs ret %d",
+					__func__, irq, cpumask_pr_args(mask),
+					ret);
+			} else if (cpumask_intersects(linux_cpus, mask)) {
+				cpumask_and(linux_cpus, linux_cpus, mask);
+				ret = irq_set_affinity_locked(data,
+						linux_cpus, force);
+			} else {
+				ret = -EINVAL;
+				pr_info("[%s] (irq %d (%s), mask %*pbl) can not affinitize only to LWKCPUs ret %d",
+				    __func__, irq,
+				    (desc->irq_common_data.msi_desc &&
+				     desc->irq_common_data.msi_desc->dev &&
+				     desc->irq_common_data.msi_desc->dev->driver) ?
+				    desc->irq_common_data.msi_desc->dev->driver->name : "unknown",
+				    cpumask_pr_args(mask), ret);
+			}
+			free_cpumask_var(linux_cpus);
+			goto out;
+		}
+	}
+
 	ret = irq_set_affinity_locked(irq_desc_get_irq_data(desc), mask, force);
+
+out:
 	raw_spin_unlock_irqrestore(&desc->lock, flags);
 	return ret;
 }
