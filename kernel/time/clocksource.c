@@ -16,6 +16,9 @@
 #include <linux/kthread.h>
 #include <linux/prandom.h>
 #include <linux/cpu.h>
+#ifdef CONFIG_MOS_FOR_HPC
+#include <linux/mos.h>
+#endif
 
 #include "tick-internal.h"
 #include "timekeeping_internal.h"
@@ -138,6 +141,38 @@ static void __clocksource_change_rating(struct clocksource *cs, int rating);
  * Interval: 0.5sec.
  */
 #define WATCHDOG_INTERVAL (HZ >> 1)
+
+#ifdef CONFIG_MOS_FOR_HPC
+static cpumask_var_t watchdog_cpu_map;
+
+static inline void init_watchdog_cpumap(void)
+{
+	zalloc_cpumask_var(&watchdog_cpu_map, GFP_KERNEL);
+}
+static inline int next_watchdog_cpu(void)
+{
+	int next_cpu;
+
+	cpumask_andnot(watchdog_cpu_map, cpu_online_mask, cpu_lwkcpus_mask);
+	next_cpu = cpumask_next(raw_smp_processor_id(), watchdog_cpu_map);
+	if (next_cpu >= nr_cpu_ids)
+		next_cpu = cpumask_first(watchdog_cpu_map);
+	return next_cpu;
+}
+#else /* CONFIG_MOS_FOR_HPC */
+static inline void init_watchdog_cpumap(void)
+{
+}
+static inline int next_watchdog_cpu(void)
+{
+	int next_cpu;
+
+	next_cpu = cpumask_next(raw_smp_processor_id(), cpu_online_mask);
+	if (next_cpu >= nr_cpu_ids)
+		next_cpu = cpumask_first(cpu_online_mask);
+	return next_cpu;
+}
+#endif /* CONFIG_MOS_FOR_HPC */
 
 static void clocksource_watchdog_work(struct work_struct *work)
 {
@@ -497,9 +532,7 @@ static void clocksource_watchdog(struct timer_list *unused)
 	 * Cycle through CPUs to check if the CPUs stay synchronized
 	 * to each other.
 	 */
-	next_cpu = cpumask_next(raw_smp_processor_id(), cpu_online_mask);
-	if (next_cpu >= nr_cpu_ids)
-		next_cpu = cpumask_first(cpu_online_mask);
+	next_cpu = next_watchdog_cpu();
 
 	/*
 	 * Arm timer if not already pending: could race with concurrent
@@ -667,6 +700,7 @@ static inline void clocksource_resume_watchdog(void) { }
 static inline int __clocksource_watchdog_kthread(void) { return 0; }
 static bool clocksource_is_watchdog(struct clocksource *cs) { return false; }
 void clocksource_mark_unstable(struct clocksource *cs) { }
+static inline void init_watchdog_cpumap(void) { }
 
 static inline void clocksource_watchdog_lock(unsigned long *flags) { }
 static inline void clocksource_watchdog_unlock(unsigned long *flags) { }
@@ -1018,6 +1052,7 @@ static void clocksource_select_fallback(void)
  */
 static int __init clocksource_done_booting(void)
 {
+	init_watchdog_cpumap();
 	mutex_lock(&clocksource_mutex);
 	curr_clocksource = clocksource_default_clock();
 	finished_booting = 1;

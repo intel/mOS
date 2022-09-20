@@ -583,6 +583,47 @@ struct sched_rt_entity {
 	void *suse_kabi_padding;
 } __randomize_layout;
 
+#ifdef CONFIG_MOS_FOR_HPC
+enum mos_thread_type {
+	mos_thread_type_normal = 0,
+	mos_thread_type_utility,
+	mos_thread_type_idle,
+	mos_thread_type_guest
+};
+
+struct mos_clone_hints {
+	unsigned int flags;
+	unsigned int behavior;
+	unsigned int location;
+	unsigned long key;
+	nodemask_t nodes;
+	struct mos_clone_result __user *result;
+};
+
+struct mos_active_hints {
+	unsigned int behavior;
+	unsigned int location;
+	unsigned long key;
+	nodemask_t nodes;
+};
+
+struct sched_mos_entity {
+	struct list_head run_list;
+	struct list_head util_list;
+	struct mos_clone_hints clone_hints;
+	struct mos_active_hints active_hints;
+	const struct sched_class *orig_class;
+	unsigned long clone_flags;
+	unsigned int orig_time_slice;
+	unsigned int time_slice;
+	unsigned int orig_policy;
+	int assimilated;
+	int cpu_home;
+	enum mos_thread_type thread_type;
+	bool on_moveable_list;
+};
+#endif
+
 struct sched_dl_entity {
 	struct rb_node			rb_node;
 
@@ -781,6 +822,9 @@ struct task_struct {
 	struct sched_entity		se;
 	struct sched_rt_entity		rt;
 	struct sched_dl_entity		dl;
+#ifdef CONFIG_MOS_FOR_HPC
+	struct sched_mos_entity 	mos;
+#endif
 	const struct sched_class	*sched_class;
 
 #ifdef CONFIG_SCHED_CORE
@@ -1850,6 +1894,10 @@ extern struct task_struct *idle_task(int cpu);
  */
 static __always_inline bool is_idle_task(const struct task_struct *p)
 {
+#ifdef CONFIG_MOS_FOR_HPC
+	if (p->mos.thread_type == mos_thread_type_idle)
+		return 1;
+#endif
 	return !!(p->flags & PF_IDLE);
 }
 

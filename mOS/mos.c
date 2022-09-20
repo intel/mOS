@@ -167,7 +167,22 @@ void get_mos_view_cpumask(struct cpumask *dst, const struct cpumask *src)
 	}
 }
 
-ssize_t cpumap_print_mos_view_cpumask(char *buf, const struct cpumask *mask, loff_t off, size_t count)
+ssize_t cpumap_print_mos_view_cpumask(bool list, char *buf, const struct cpumask *mask)
+{
+	ssize_t ret;
+	cpumask_var_t mos_view_cpumask;
+
+	if (!alloc_cpumask_var(&mos_view_cpumask, GFP_KERNEL))
+		return -ENOMEM;
+
+	get_mos_view_cpumask(mos_view_cpumask, mask);
+
+	ret = cpumap_print_to_pagebuf(list, buf, mos_view_cpumask);
+	free_cpumask_var(mos_view_cpumask);
+	return ret;
+}
+
+ssize_t cpumap_print_mos_bitmap_to_buf(char *buf, const struct cpumask *mask, loff_t off, size_t count)
 {
 	ssize_t ret;
 	cpumask_var_t mos_view_cpumask;

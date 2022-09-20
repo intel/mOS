@@ -2325,6 +2325,60 @@ static void mce_enable_ce(void *all)
 		__mcheck_cpu_init_timer();
 }
 
+#ifdef CONFIG_MOS_FOR_HPC
+void cmci_set_threshold(void *thresh);
+void cmci_reset_threshold(void *data);
+
+/*
+ * When an LWK process is launched, this function will be called with a cpumask
+ * representing the CPUs reserved for the process. Polling will be disabled
+ * for correctable machine check events and correctable machine check interrupts
+ * will be disabled.
+ */
+void mce_lwkprocess_begin(cpumask_t *lwkcpus, unsigned int threshold,
+			  bool poll_enable)
+{
+	int cpu;
+
+	if (!mce_available(raw_cpu_ptr(&cpu_info)))
+		return;
+	if (mca_cfg.ignore_ce == true)
+		return;
+	if (!poll_enable)
+		/* Disable the polling timer on each CPU in the mask */
+		for_each_cpu(cpu, lwkcpus)
+			del_timer_sync(&per_cpu(mce_timer, cpu));
+	if (!threshold)
+		/* Disable CMCI on each of the CPUs in the mask */
+		on_each_cpu_mask(lwkcpus, mce_disable_cmci, NULL, 1);
+	else
+		/* Set the threshold into the MSRs of the lwkcpus */
+		on_each_cpu_mask(lwkcpus, cmci_set_threshold,
+					(void *)((u64)threshold), 1);
+}
+/*
+ * When an LWK process exits, this function will be called with a cpumask
+ * representing the CPUs reserved for the process. The state of machine check
+ * polling, correctable machine check interrupt enablement and thresholding will
+ * be restored. An immediate poll of the machine check banks to flush out any
+ * events that may have accumulated during the process execution will be
+ * performed.
+ */
+void mce_lwkprocess_end(cpumask_t *lwkcpus, bool reset_threshold,
+		bool reenable_poll)
+{
+	if (!mce_available(raw_cpu_ptr(&cpu_info)))
+		return;
+	if (mca_cfg.ignore_ce == true)
+		return;
+	if (reset_threshold)
+		on_each_cpu_mask(lwkcpus, cmci_reset_threshold, NULL, 1);
+	else
+		on_each_cpu_mask(lwkcpus, mce_enable_ce, (void *)reenable_poll,
+					1);
+}
+#endif
+
 static struct bus_type mce_subsys = {
 	.name		= "machinecheck",
 	.dev_name	= "machinecheck",

@@ -434,7 +434,13 @@ struct workqueue_attrs *alloc_workqueue_attrs(void);
 void free_workqueue_attrs(struct workqueue_attrs *attrs);
 int apply_workqueue_attrs(struct workqueue_struct *wq,
 			  const struct workqueue_attrs *attrs);
+#ifdef CONFIG_MOS_FOR_HPC
+extern cpumask_t *workqueue_get_unbound_cpumask(void);
+extern void workqueue_put_unbound_cpumask(void);
+extern int workqueue_set_unbound_cpumask(cpumask_var_t cpumask);
+#else
 int workqueue_set_unbound_cpumask(cpumask_var_t cpumask);
+#endif
 
 extern bool queue_work_on(int cpu, struct workqueue_struct *wq,
 			struct work_struct *work);

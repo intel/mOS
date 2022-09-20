@@ -101,4 +101,22 @@ static inline int mos_ras(const char *event_id, const char *fmt, ...)
 
 /* Events for the LWK scheduler component have the range 1001200000-101299999 */
 
+/**
+ * EventType: 1001200001
+ * Severity:  Warning
+ * Component: Scheduler
+ * Msg:       A warning occurred in the Scheduler.
+ */
+#define MOS_SCHEDULER_WARNING "mOSSchedulerWarning"
+
+/**
+ * EventType: 1001200002
+ * Severity:  Error
+ * Component: Scheduler
+ * Msg:    An unexpected error occurred in the Scheduler.
+ * ControlOperation: KillJobOnNode
+ */
+#define MOS_SCHEDULER_ERROR "mOSSchedulerError"
+
+
 #endif
