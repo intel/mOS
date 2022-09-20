@@ -29,6 +29,7 @@
 #include <linux/swapops.h>
 #include <linux/shmem_fs.h>
 #include <linux/mmu_notifier.h>
+#include <linux/mos.h>
 
 #include <asm/tlb.h>
 
@@ -982,6 +983,11 @@ static long
 madvise_vma(struct vm_area_struct *vma, struct vm_area_struct **prev,
 		unsigned long start, unsigned long end, int behavior)
 {
+	if (is_lwkvma(vma)) {
+		*prev = vma;
+		return 0;
+	}
+
 	switch (behavior) {
 	case MADV_REMOVE:
 		return madvise_remove(vma, prev, start, end);

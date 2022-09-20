@@ -2246,6 +2246,11 @@
 			for Movable pages.  "nn[KMGTPE]", "nn%", and "mirror"
 			are exclusive, so you cannot specify multiple forms.
 
+			When nn[KMGTPE] is specified along with movable_node
+			kernel parameter then only non-movable nodes are
+			considered for spreading the requested size while the
+			movable nodes have all movable memory.
+
 	kgdbdbgp=	[KGDB,HW] kgdb over EHCI usb debug port.
 			Format: <Controller#>[,poll interval]
 			The controller # is the number of the ehci usb debug
@@ -2729,6 +2734,12 @@
 			-ied as part of Linux command line then the 'normal' pr-
 			-ofile will be set by the kernel during the kernel boot.
 
+	lwkmem=		Designate memory for use by the mOS LWK. The amount
+			of memory requested is specified in parse_mem
+			format (K,M,G).  Or designate memory via NUMA domain.
+			Example: lwkmem=126G
+			Example: lwkmem=0:58G,1:58G
+
 	machvec=	[IA-64] Force the use of a particular machine-vector
 			(machvec) in a generic kernel.
 			Example: machvec=hpzx1
@@ -3107,7 +3118,13 @@
 			specified value but may be more.  If movablecore on its
 			own is specified, the administrator must be careful
 			that the amount of memory usable for all allocations
-			is not too small.
+			is not too small. If movablecore is specified along
+			with movable_node then movablecore indicates the total
+			movable memory requested in the system that includes
+			movable memory in both movable and non-movable nodes.
+			When movable_node is specified, the minimum movable
+			memory allocated will be at least the total size of
+			movable nodes memory.
 
 	movable_node	[KNL] Boot-time switch to make hotplugable memory
 			NUMA nodes to be movable. This means that the memory

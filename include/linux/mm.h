@@ -429,6 +429,48 @@ extern unsigned int kobjsize(const void *objp);
 #endif
 #define VM_FLAGS_CLEAR	(ARCH_VM_PKEY_FLAGS | VM_ARCH_CLEAR)
 
+#ifdef CONFIG_MOS_LWKMEM
+#define VM_LWK_XPMEM		BIT(57)
+#define VM_LWK_STACK		BIT(58)
+#define VM_LWK_TSTACK		BIT(59)
+#define VM_LWK_ANON_PRIVATE	BIT(60)
+#define VM_LWK_HEAP		BIT(61)
+#define VM_LWK_DBSS		BIT(62)
+#define VM_LWK			BIT(63)
+
+/*
+ * Additional flags to set for LWK VMAs
+ *
+ * VM_WIPEONFORK,
+ *   Request Linux not to copy page tables corresponding to
+ *   LWK VMA during fork, instead let the corresponding new VMA
+ *   in the child process have a fresh start without any LWK VMA
+ *   dependencies but also at the same time LWK forces Linux to
+ *   populates new pages in child process and copy memory contents
+ *   from parent LWK process during a fork.
+ *
+ * VM_NOHUGEPAGE,
+ *   We do not want Linux THP khugepaged to scan LWK VMA.
+ *
+ * VM_DATA_DEFAULT_FLAGS,
+ *   By default LWK VMAs are read/write/executable.
+ */
+#define VM_LWK_EXTRA		(VM_WIPEONFORK | VM_NOHUGEPAGE | \
+				 VM_DATA_DEFAULT_FLAGS)
+#define VM_LWK_FLAGS		(VM_LWK | VM_LWK_DBSS | VM_LWK_HEAP | \
+				 VM_LWK_ANON_PRIVATE | VM_LWK_TSTACK | \
+				 VM_LWK_STACK | VM_LWK_EXTRA)
+#else
+#define VM_LWK_STACK            0
+#define VM_LWK_TSTACK           0
+#define VM_LWK_ANON_PRIVATE     0
+#define VM_LWK_HEAP		0
+#define VM_LWK_DBSS		0
+#define VM_LWK                  0
+#define VM_LWK_EXTRA		0
+#define VM_LWK_FLAGS            0
+#endif
+
 /*
  * mapping from the currently active vm_flags protection bits (the
  * low four bits) to a page protection mask..

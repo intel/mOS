@@ -1,5 +1,5 @@
 # Multi Operating System (mOS)
-# Copyright (c) 2016, Intel Corporation.
+# Copyright (c) 2018, Intel Corporation.
 #
 # This program is free software; you can redistribute it and/or modify it
 # under the terms and conditions of the GNU General Public License,
@@ -10,10 +10,6 @@
 # FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
 # more details.
 
-#
-# mOS: hybrid FWK/LWK for HPC
-#
-
-obj-$(CONFIG_MOS_FOR_HPC) += mos.o
-obj-$(CONFIG_MOS_FOR_HPC) += lwkcpu.o lwkctrl.o mosras.o
-obj-$(CONFIG_MOS_LWKMEM) += lwkmem/
+ccflags-y += -I include/uapi/xpmem/
+obj-$(CONFIG_XPMEM) += xpmem.o
+xpmem-objs := xpmem_attach.o xpmem_get.o xpmem_main.o xpmem_make.o xpmem_misc.o xpmem_mmu_notifier.o xpmem_pfn.o

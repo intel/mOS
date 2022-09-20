@@ -1,5 +1,5 @@
 # Multi Operating System (mOS)
-# Copyright (c) 2016, Intel Corporation.
+# Copyright (c) 2016-2020, Intel Corporation.
 #
 # This program is free software; you can redistribute it and/or modify it
 # under the terms and conditions of the GNU General Public License,
@@ -11,9 +11,12 @@
 # more details.
 
 #
-# mOS: hybrid FWK/LWK for HPC
+# mOS: Lightweight Kernel Memory Management
 #
 
-obj-$(CONFIG_MOS_FOR_HPC) += mos.o
-obj-$(CONFIG_MOS_FOR_HPC) += lwkcpu.o lwkctrl.o mosras.o
-obj-$(CONFIG_MOS_LWKMEM) += lwkmem/
+obj-$(CONFIG_MOS_LWKMEM) += mm.o init.o yod_options.o pma_buddy.o
+obj-$(CONFIG_MOS_LWKMEM) += mm_mempolicy.o
+obj-$(CONFIG_MOS_LWKMEM) += mm_pagetable.o
+obj-$(CONFIG_MOS_LWKMEM) += mm_protection.o
+obj-$(CONFIG_MOS_LWKMEM) += mm_gup.o
+obj-$(CONFIG_MOS_LWKMEM) += xpmem_utils.o

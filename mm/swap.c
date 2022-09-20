@@ -37,6 +37,7 @@
 #include <linux/page_idle.h>
 #include <linux/local_lock.h>
 #include <linux/buffer_head.h>
+#include <linux/mos.h>
 
 #include "internal.h"
 
@@ -113,6 +114,8 @@ static void __put_compound_page(struct page *page)
 
 void __put_page(struct page *page)
 {
+	if (is_lwkpg(page))
+		return;
 	if (is_zone_device_page(page)) {
 		put_dev_pagemap(page->pgmap);
 
@@ -929,6 +932,9 @@ void release_pages(struct page **pages, int nr)
 		}
 
 		if (!put_page_testzero(page))
+			continue;
+
+		if (is_lwkpg(page))
 			continue;
 
 		if (PageCompound(page)) {

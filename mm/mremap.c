@@ -23,6 +23,7 @@
 #include <linux/mmu_notifier.h>
 #include <linux/uaccess.h>
 #include <linux/userfaultfd_k.h>
+#include <linux/mos.h>
 
 #include <asm/cacheflush.h>
 #include <asm/tlb.h>
@@ -493,6 +494,13 @@ unsigned long move_page_tables(struct vm_area_struct *vma,
 				old_addr, old_end);
 	mmu_notifier_invalidate_range_start(&range);
 
+	if (is_lwkvma(vma)) {
+		len = lwkmem_move_page_tables(vma, old_addr,
+					      new_vma, new_addr, len);
+		mmu_notifier_invalidate_range_end(&range);
+		return len;
+	}
+
 	for (; old_addr < old_end; old_addr += extent, new_addr += extent) {
 		cond_resched();
 		/*
@@ -640,6 +648,9 @@ static unsigned long move_vma(struct vm_area_struct *vma,
 		new_addr = err;
 	} else {
 		mremap_userfaultfd_prep(new_vma, uf);
+		if (new_len > old_len &&
+		    is_lwkvma(vma) && lwkmem_populated(vma))
+			*locked = true;
 	}
 
 	/* Conceal VM_ACCOUNT so old reservation is not undone */
@@ -1005,6 +1016,9 @@ SYSCALL_DEFINE5(mremap, unsigned long, addr, unsigned long, old_len,
 				mm->locked_vm += pages;
 				locked = true;
 				new_addr = addr;
+			} else if (is_lwkvma(vma) && lwkmem_populated(vma)) {
+				locked = true;
+				new_addr = addr;
 			}
 			ret = addr;
 			goto out;
@@ -1020,6 +1034,12 @@ SYSCALL_DEFINE5(mremap, unsigned long, addr, unsigned long, old_len,
 		unsigned long map_flags = 0;
 		if (vma->vm_flags & VM_MAYSHARE)
 			map_flags |= MAP_SHARED;
+
+		if (is_lwkvma(vma)) {
+			map_flags = MAP_PRIVATE | MAP_ANONYMOUS;
+			if (vma->vm_flags & VM_LWK_TSTACK)
+				map_flags |= MAP_STACK;
+		}
 
 		new_addr = get_unmapped_area(vma->vm_file, 0, new_len,
 					vma->vm_pgoff +

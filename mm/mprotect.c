@@ -29,6 +29,7 @@
 #include <linux/uaccess.h>
 #include <linux/mm_inline.h>
 #include <linux/pgtable.h>
+#include <linux/mos.h>
 #include <asm/cacheflush.h>
 #include <asm/mmu_context.h>
 #include <asm/tlbflush.h>
@@ -368,6 +369,8 @@ unsigned long change_protection(struct vm_area_struct *vma, unsigned long start,
 	unsigned long pages;
 
 	BUG_ON((cp_flags & MM_CP_UFFD_WP_ALL) == MM_CP_UFFD_WP_ALL);
+	if (is_lwkvma(vma))
+		return lwkmem_change_protection_range(vma, start, end, newprot);
 
 	if (is_vm_hugetlb_page(vma))
 		pages = hugetlb_change_protection(vma, start, end, newprot);
@@ -418,6 +421,23 @@ mprotect_fixup(struct vm_area_struct *vma, struct vm_area_struct **pprev,
 	int dirty_accountable = 0;
 
 	if (newflags == oldflags) {
+		*pprev = vma;
+		return 0;
+	}
+
+	/*
+	 * data/bss VMR backed by LWK memory should always be RW as originally
+	 * populated during ELF loading, this enables us to copy the region to
+	 * the child process upon fork. This arrangement is necessary as the
+	 * VMR is populated as anonymous region in the parent and child will
+	 * not have any means to populate it as a file backed mapping.
+	 *
+	 * For all LWK VMAs that are already populated i.e. by default with
+	 * RWE protection we do not support changing protection dynamically
+	 * for performance reasons.
+	 */
+	if (is_lwkvma(vma) &&
+	    ((vma->vm_flags & VM_LWK_DBSS) != 0 || lwkmem_populated(vma))) {
 		*pprev = vma;
 		return 0;
 	}
@@ -545,6 +565,26 @@ static int do_mprotect_pkey(unsigned long start, size_t len,
 		return -ENOMEM;
 	if (!arch_validate_prot(prot, start))
 		return -EINVAL;
+
+	/*
+	 * For LWK processes, if the requested range for memory protection
+	 * modification [@start, @end) is entirely covered by an LWK VMA,
+	 * then we can take the fast path returning success as LWK VMA area
+	 * will have RWE memory protections by default and is never changed.
+	 * Since this fast path does not involve write side locking it results
+	 * in a significant performance gain for certain cases where multiple
+	 * threads within a process issue frequent mprotects simultaneously
+	 * for either same or different LWK VMAs within the process.
+	 */
+	if (is_mostask() && !down_read_killable(&current->mm->mmap_lock)) {
+		vma = find_vma(current->mm, start);
+		if (vma && start >= vma->vm_start && end <= vma->vm_start &&
+		    is_lwkvma(vma)) {
+			up_read(&current->mm->mmap_lock);
+			return 0;
+		}
+		up_read(&current->mm->mmap_lock);
+	}
 
 	reqprot = prot;
 
