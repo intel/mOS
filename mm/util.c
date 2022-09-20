@@ -23,6 +23,7 @@
 #include <linux/processor.h>
 #include <linux/sizes.h>
 #include <linux/compat.h>
+#include <linux/mos.h>
 
 #include <linux/uaccess.h>
 
@@ -948,6 +949,14 @@ int __vm_enough_memory(struct mm_struct *mm, long pages, int cap_sys_admin)
 	 * Sometimes we want to use more memory than we have
 	 */
 	if (sysctl_overcommit_memory == OVERCOMMIT_ALWAYS)
+		return 0;
+
+	/*
+	 * LWK processes allocate from offlined physical memory for most
+	 * allocations and from Linux physical memory for selected VMA
+	 * types. Bypass the test to avoid false indication of overcommitment.
+	 */
+	if (is_mostask())
 		return 0;
 
 	if (sysctl_overcommit_memory == OVERCOMMIT_GUESS) {

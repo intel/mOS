@@ -366,6 +366,9 @@ struct vm_area_struct *vm_area_dup(struct vm_area_struct *orig)
 		 * will be reinitialized.
 		 */
 		*new = data_race(*orig);
+		if (is_lwkvma(orig))
+			vma_set_lwkvma(new);
+
 		INIT_LIST_HEAD(&new->anon_vma_chain);
 		new->vm_next = new->vm_prev = NULL;
 	}
@@ -374,6 +377,8 @@ struct vm_area_struct *vm_area_dup(struct vm_area_struct *orig)
 
 void vm_area_free(struct vm_area_struct *vma)
 {
+	if (is_lwkvma(vma))
+		vma_clear_lwkvma(vma);
 	kmem_cache_free(vm_area_cachep, vma);
 }
 
@@ -596,6 +601,7 @@ static __latent_entropy int dup_mmap(struct mm_struct *mm,
 		rb_parent = &tmp->vm_rb;
 
 		mm->map_count++;
+
 		if (!(tmp->vm_flags & VM_WIPEONFORK))
 			retval = copy_page_range(tmp, mpnt);
 
@@ -604,6 +610,12 @@ static __latent_entropy int dup_mmap(struct mm_struct *mm,
 
 		if (retval)
 			goto out;
+
+		if (is_lwkvma(mpnt)) {
+			retval = lwkmem_fork(mpnt, tmp);
+			if (retval)
+				goto out;
+		}
 	}
 	/* a new mm has just been created */
 	retval = arch_dup_mmap(oldmm, mm);

@@ -18,6 +18,7 @@
 #include <linux/migrate.h>
 #include <linux/mm_inline.h>
 #include <linux/sched/mm.h>
+#include <linux/mos.h>
 
 #include <asm/mmu_context.h>
 #include <asm/tlbflush.h>
@@ -831,6 +832,9 @@ static struct page *follow_page_mask(struct vm_area_struct *vma,
 
 	ctx->page_mask = 0;
 
+	if (is_lwkvma(vma))
+		return lwkmem_follow_page(vma, address, flags, &ctx->page_mask);
+
 	/* make this handle hugepd */
 	page = follow_huge_addr(mm, address, flags & FOLL_WRITE);
 	if (!IS_ERR(page)) {
@@ -1211,6 +1215,9 @@ retry:
 			flush_dcache_page(page);
 			ctx.page_mask = 0;
 		}
+		if (is_lwkvma(vma))
+			/* Force clearing memory when lwk pages are freed */
+			set_lwkpg_dirty(page);
 next_page:
 		if (vmas) {
 			vmas[i] = vma;
@@ -2715,6 +2722,9 @@ static void gup_pgd_range(unsigned long addr, unsigned long end,
 {
 	unsigned long next;
 	pgd_t *pgdp;
+
+	if (is_lwk_process(current))
+		return;
 
 	pgdp = pgd_offset(current->mm, addr);
 	do {

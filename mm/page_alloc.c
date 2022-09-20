@@ -72,6 +72,8 @@
 #include <linux/padata.h>
 #include <linux/khugepaged.h>
 #include <linux/buffer_head.h>
+#include <linux/mos.h>
+
 #include <asm/sections.h>
 #include <asm/tlbflush.h>
 #include <asm/div64.h>
@@ -1065,6 +1067,11 @@ static inline void __free_one_page(struct page *page,
 	struct page *buddy;
 	bool to_tail;
 
+	if (is_lwkpg(page)) {
+		pr_warn("WARN: Attempt to free LWK page to Linux buddy sys\n");
+		dump_stack();
+		return;
+	}
 	max_order = min_t(unsigned int, MAX_ORDER - 1, pageblock_order);
 
 	VM_BUG_ON(!zone_is_initialized(zone));
@@ -3268,6 +3275,12 @@ static bool free_unref_page_prepare(struct page *page, unsigned long pfn,
 							unsigned int order)
 {
 	int migratetype;
+
+	if (is_lwkpg(page)) {
+		pr_warn("WARN: Attempt to free LWK page to Linux buddy sys\n");
+		dump_stack();
+		return false;
+	}
 
 	if (!free_pcp_prepare(page, order))
 		return false;
@@ -7743,20 +7756,28 @@ static void __init find_zone_movable_pfns_for_nodes(void)
 	unsigned long totalpages = early_calculate_totalpages();
 	int usable_nodes = nodes_weight(node_states[N_MEMORY]);
 	struct memblock_region *r;
+	nodemask_t movable_nodes;
+	unsigned long movable_node_pages = 0;
 
 	/* Need to find movable_zone earlier when movable_node is specified. */
 	find_usable_zone_for_movable();
 
 	/*
 	 * If movable_node is specified, ignore kernelcore and movablecore
-	 * options.
+	 * options on hotpluggable nodes.
 	 */
+	nodes_clear(movable_nodes);
 	if (movable_node_is_enabled()) {
 		for_each_mem_region(r) {
 			if (!memblock_is_hotpluggable(r))
 				continue;
+			if (PFN_UP(r->base) >= PFN_DOWN(r->base + r->size))
+				continue;
 
 			nid = memblock_get_region_node(r);
+			node_set(nid, movable_nodes);
+			movable_node_pages += PFN_DOWN(r->base + r->size) -
+						PFN_UP(r->base);
 
 			usable_startpfn = PFN_DOWN(r->base);
 			zone_movable_pfn[nid] = zone_movable_pfn[nid] ?
@@ -7764,6 +7785,15 @@ static void __init find_zone_movable_pfns_for_nodes(void)
 				usable_startpfn;
 		}
 
+		if (required_kernelcore ||
+		    required_movablecore ||
+		    required_kernelcore_percent ||
+		    required_movablecore_percent) {
+			usable_nodes -= nodes_weight(movable_nodes);
+			if (usable_nodes > 0 &&
+			    totalpages > movable_node_pages)
+				goto core_options;
+		}
 		goto out2;
 	}
 
@@ -7797,6 +7827,7 @@ static void __init find_zone_movable_pfns_for_nodes(void)
 		goto out2;
 	}
 
+core_options:
 	/*
 	 * If kernelcore=nn% or movablecore=nn% was specified, calculate the
 	 * amount of necessary memory.
@@ -7808,6 +7839,7 @@ static void __init find_zone_movable_pfns_for_nodes(void)
 		required_movablecore = (totalpages * 100 * required_movablecore_percent) /
 					10000UL;
 
+	totalpages -= movable_node_pages;
 	/*
 	 * If movablecore= was specified, calculate what size of
 	 * kernelcore that corresponds so that memory usable for
@@ -7819,6 +7851,12 @@ static void __init find_zone_movable_pfns_for_nodes(void)
 	if (required_movablecore) {
 		unsigned long corepages;
 
+		if (movable_node_is_enabled()) {
+			if (required_movablecore > movable_node_pages)
+				required_movablecore -= movable_node_pages;
+			else
+				goto out2;
+		}
 		/*
 		 * Round-up so that ZONE_MOVABLE is at least as large as what
 		 * was requested by the user
@@ -7835,8 +7873,12 @@ static void __init find_zone_movable_pfns_for_nodes(void)
 	 * If kernelcore was not specified or kernelcore size is larger
 	 * than totalpages, there is no ZONE_MOVABLE.
 	 */
-	if (!required_kernelcore || required_kernelcore >= totalpages)
-		goto out;
+	if (!required_kernelcore || required_kernelcore >= totalpages) {
+		if (movable_node_is_enabled())
+			goto out2;
+		else
+			goto out;
+	}
 
 	/* usable_startpfn is the lowest possible pfn ZONE_MOVABLE can be at */
 	usable_startpfn = arch_zone_lowest_possible_pfn[movable_zone];
@@ -7847,6 +7889,9 @@ restart:
 	for_each_node_state(nid, N_MEMORY) {
 		unsigned long start_pfn, end_pfn;
 
+		/* Skip movable nodes if any */
+		if (node_isset(nid, movable_nodes))
+			continue;
 		/*
 		 * Recalculate kernelcore_node if the division per node
 		 * now exceeds what is necessary to satisfy the requested

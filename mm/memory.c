@@ -73,6 +73,7 @@
 #include <linux/perf_event.h>
 #include <linux/ptrace.h>
 #include <linux/vmalloc.h>
+#include <linux/mos.h>
 
 #include <trace/events/kmem.h>
 
@@ -1562,6 +1563,21 @@ static void unmap_single_vma(struct mmu_gather *tlb,
 		untrack_pfn(vma, 0, 0);
 
 	if (start != end) {
+		if (is_lwkvma(vma)) {
+			lwkmem_unmap_range(vma, start, end);
+			return;
+		}
+		if (is_lwkxpmem(vma)) {
+			if (unmap_lwkxpmem_range(vma, start, end)) {
+				LWKMEM_ERROR(
+				    "Error unmapping LWKXPMEM[%lx-%lx][%lx-%lx]",
+				    vma->vm_start, vma->vm_end, start, end);
+			}
+			/*
+			 * Fall through to unmap Linux part of LWKXPMEM VMA
+			 * if any. The VMA LWK XPMEM-isms are now removed
+			 */
+		}
 		if (unlikely(is_vm_hugetlb_page(vma))) {
 			/*
 			 * It is undesirable to test vma->vm_file as it
@@ -4618,6 +4634,9 @@ static vm_fault_t __handle_mm_fault(struct vm_area_struct *vma,
 	vmf.pud = pud_alloc(mm, p4d, address);
 	if (!vmf.pud)
 		return VM_FAULT_OOM;
+
+	if (unlikely(is_lwkxpmem(vma) && vma->vm_ops->fault))
+		return vma->vm_ops->fault(&vmf);
 retry_pud:
 	if (pud_none(*vmf.pud) && __transparent_hugepage_enabled(vma)) {
 		ret = create_huge_pud(&vmf);
@@ -4768,6 +4787,8 @@ vm_fault_t handle_mm_fault(struct vm_area_struct *vma, unsigned long address,
 					    flags & FAULT_FLAG_REMOTE))
 		return VM_FAULT_SIGSEGV;
 
+	if (is_mostask() && is_lwkvma(vma))
+		return lwkmem_page_fault(vma, address, flags);
 	/*
 	 * Enable the memcg OOM handling for faults triggered in user
 	 * space.  Kernel faults are handled more gracefully.

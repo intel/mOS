@@ -46,6 +46,7 @@
 #include <linux/cred.h>
 #include <linux/dax.h>
 #include <linux/uaccess.h>
+#include <linux/mos.h>
 #include <asm/param.h>
 #include <asm/page.h>
 
@@ -842,6 +843,7 @@ static int load_elf_binary(struct linux_binprm *bprm)
 	struct arch_elf_state arch_state = INIT_ARCH_ELF_STATE;
 	struct mm_struct *mm;
 	struct pt_regs *regs;
+	int data_bss_on_lwkmem = 0;
 
 	retval = -ENOEXEC;
 	/* First of all, some simple consistency checks */
@@ -1040,7 +1042,7 @@ out_free_interp:
 		if (elf_ppnt->p_type != PT_LOAD)
 			continue;
 
-		if (unlikely (elf_brk > elf_bss)) {
+		if (unlikely(elf_brk > elf_bss) && !data_bss_on_lwkmem) {
 			unsigned long nbyte;
 	            
 			/* There was a PT_LOAD segment with p_memsz > p_filesz
@@ -1138,12 +1140,37 @@ out_free_interp:
 			}
 		}
 
-		error = elf_map(bprm->file, load_bias + vaddr, elf_ppnt,
-				elf_prot, elf_flags, total_size);
-		if (BAD_ADDR(error)) {
-			retval = IS_ERR((void *)error) ?
-				PTR_ERR((void*)error) : -EINVAL;
-			goto out_free_dentry;
+		/*
+		 * For mOS tasks try loading initialized and uninitialized RW
+		 * segments to LWK memory if corresponding VMR is enabled.
+		 */
+		if (is_lwkmem_enabled(current) &&
+		    !is_lwkvmr_disabled(LWK_VMR_DBSS) &&
+		    !(elf_ppnt->p_flags & PF_X) && (elf_ppnt->p_flags & PF_W)) {
+			unsigned long vstart, vsize;
+
+			vstart  = ELF_PAGESTART(load_bias + vaddr);
+			vsize = elf_ppnt->p_memsz +
+					ELF_PAGEOFFSET(load_bias + vaddr);
+			vsize = ELF_PAGEALIGN(vsize);
+
+			error = lwkmem_elf_map(vstart, vsize,
+					       bprm->file, elf_ppnt->p_offset,
+					       load_bias + vaddr,
+					       elf_ppnt->p_filesz,
+					       ELF_PAGEALIGN(total_size));
+			data_bss_on_lwkmem = BAD_ADDR(error) ? 0 : 1;
+		}
+
+		/* Fall back to Linux memory if LWKMEM is not available */
+		if (data_bss_on_lwkmem == 0) {
+			error = elf_map(bprm->file, load_bias + vaddr, elf_ppnt,
+					elf_prot, elf_flags, total_size);
+			if (BAD_ADDR(error)) {
+				retval = IS_ERR((void *)error) ?
+					PTR_ERR((void *)error) : -EINVAL;
+				goto out_free_dentry;
+			}
 		}
 
 		if (!load_addr_set) {
@@ -1203,9 +1230,18 @@ out_free_interp:
 	 * mapping in the interpreter, to make sure it doesn't wind
 	 * up getting placed where the bss needs to go.
 	 */
-	retval = set_brk(elf_bss, elf_brk, bss_prot);
-	if (retval)
-		goto out_free_dentry;
+	if (!data_bss_on_lwkmem) {
+		retval = set_brk(elf_bss, elf_brk, bss_prot);
+		if (retval)
+			goto out_free_dentry;
+	} else {
+		retval = 0;
+		current->mm->start_brk =  ELF_PAGEALIGN(elf_brk);
+		current->mm->start_brk = ALIGN(current->mm->start_brk,
+					       (unsigned long)SZ_2M);
+		current->mm->brk = current->mm->start_brk;
+	}
+
 	if (likely(elf_bss != elf_brk) && unlikely(padzero(elf_bss))) {
 		retval = -EFAULT; /* Nobody gets to see this, but.. */
 		goto out_free_dentry;

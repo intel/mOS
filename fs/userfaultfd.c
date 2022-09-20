@@ -1264,8 +1264,8 @@ static inline bool vma_can_userfault(struct vm_area_struct *vma,
 			return false;
 	}
 
-	return vma_is_anonymous(vma) || is_vm_hugetlb_page(vma) ||
-	       vma_is_shmem(vma);
+	return (vma_is_anonymous(vma) || is_vm_hugetlb_page(vma) ||
+	       vma_is_shmem(vma)) && !(vma->vm_flags & VM_LWK);
 }
 
 static int userfaultfd_register(struct userfaultfd_ctx *ctx,

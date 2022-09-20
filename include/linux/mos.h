@@ -135,6 +135,7 @@ struct mos_process_t {
 
 #ifdef CONFIG_MOS_LWKMEM
 	/* Memory attributes go here */
+	struct lwk_mm *lwk_mm;
 #endif
 
 	/* Scheduler attributes go here */

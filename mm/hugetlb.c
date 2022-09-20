@@ -31,6 +31,7 @@
 #include <linux/llist.h>
 #include <linux/cma.h>
 #include <linux/migrate.h>
+#include <linux/mos.h>
 
 #include <asm/page.h>
 #include <asm/pgalloc.h>
@@ -3987,6 +3988,12 @@ void hugetlb_report_meminfo(struct seq_file *m)
 {
 	struct hstate *h;
 	unsigned long total = 0;
+#ifdef CONFIG_MOS_LWKMEM
+	bool lwk_only = IS_MOS_VIEW(current, MOS_VIEW_LWK) ||
+			IS_MOS_VIEW(current, MOS_VIEW_LWK_LOCAL);
+#else
+	bool lwk_only = false;
+#endif
 
 	if (!hugepages_supported())
 		return;
@@ -4003,20 +4010,25 @@ void hugetlb_report_meminfo(struct seq_file *m)
 				   "HugePages_Rsvd:    %5lu\n"
 				   "HugePages_Surp:    %5lu\n"
 				   "Hugepagesize:   %8lu kB\n",
-				   count,
-				   h->free_huge_pages,
-				   h->resv_huge_pages,
-				   h->surplus_huge_pages,
-				   huge_page_size(h) / SZ_1K);
+				   lwk_only ? 0 : count,
+				   lwk_only ? 0 : h->free_huge_pages,
+				   lwk_only ? 0 : h->resv_huge_pages,
+				   lwk_only ? 0 : h->surplus_huge_pages,
+				   lwk_only ? 0 : huge_page_size(h) / SZ_1K);
 	}
 
-	seq_printf(m, "Hugetlb:        %8lu kB\n", total / SZ_1K);
+	seq_printf(m, "Hugetlb:        %8lu kB\n", lwk_only ? 0 : total / SZ_1K);
 }
 
 int hugetlb_report_node_meminfo(char *buf, int len, int nid)
 {
 	struct hstate *h = &default_hstate;
-
+#ifdef CONFIG_MOS_LWKMEM
+	bool lwk_only = IS_MOS_VIEW(current, MOS_VIEW_LWK) ||
+			IS_MOS_VIEW(current, MOS_VIEW_LWK_LOCAL);
+#else
+	bool lwk_only = false;
+#endif
 	if (!hugepages_supported())
 		return 0;
 
@@ -4024,9 +4036,9 @@ int hugetlb_report_node_meminfo(char *buf, int len, int nid)
 			     "Node %d HugePages_Total: %5u\n"
 			     "Node %d HugePages_Free:  %5u\n"
 			     "Node %d HugePages_Surp:  %5u\n",
-			     nid, h->nr_huge_pages_node[nid],
-			     nid, h->free_huge_pages_node[nid],
-			     nid, h->surplus_huge_pages_node[nid]);
+			     nid, lwk_only ? 0 : h->nr_huge_pages_node[nid],
+			     nid, lwk_only ? 0 : h->free_huge_pages_node[nid],
+			     nid, lwk_only ? 0 : h->surplus_huge_pages_node[nid]);
 }
 
 void hugetlb_show_meminfo(void)
