@@ -54,4 +54,12 @@ comment "!RCU_FAST_NO_HZ recommended for mOS"
 
 source "mOS/lwkmem/Kconfig"
 
+config MOS_ONEAPI_LEVELZERO
+	bool "Enable GPU resource management"
+	depends on MOS_FOR_HPC
+	help
+	  Enables mOS to manage the GPU resources. This requires the
+	  OneAPI Level Zero libraries to be available. If this is not
+	  enabled, mOS will not attempt to manage the GPU resource.
+
 endif	# if MOS_FOR_HPC

@@ -1,5 +1,7 @@
+#!/bin/sh
+
 # Multi Operating System (mOS)
-# Copyright (c) 2016, Intel Corporation.
+# Copyright (c) 2017, Intel Corporation.
 #
 # This program is free software; you can redistribute it and/or modify it
 # under the terms and conditions of the GNU General Public License,
@@ -10,12 +12,12 @@
 # FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
 # more details.
 
-#
-# mOS: hybrid FWK/LWK for HPC
-#
+lwkctl="/lib/modules/`uname -r`/lwkctl"
+if ! [ -x "$lwkctl" ]; then
+	cat 1>&2 <<EOF
+$0: `uname -r` is not a mOS kernel
 
-subdir-$(CONFIG_MOS_FOR_HPC) += tools
-
-obj-$(CONFIG_MOS_FOR_HPC) += mos.o
-obj-$(CONFIG_MOS_FOR_HPC) += lwkcpu.o lwkctrl.o mosras.o
-obj-$(CONFIG_MOS_LWKMEM) += lwkmem/
+EOF
+	exit 1
+fi
+exec "$lwkctl" "$@"

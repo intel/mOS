@@ -10,12 +10,14 @@
 # FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
 # more details.
 
-#
-# mOS: hybrid FWK/LWK for HPC
-#
+.NOTPARALLEL:
 
-subdir-$(CONFIG_MOS_FOR_HPC) += tools
+subdir-y += lwkreset yod lwkctl libmos mosview xpmem
 
-obj-$(CONFIG_MOS_FOR_HPC) += mos.o
-obj-$(CONFIG_MOS_FOR_HPC) += lwkcpu.o lwkctrl.o mosras.o
-obj-$(CONFIG_MOS_LWKMEM) += lwkmem/
+_toolinst_: $(subdir-y:%=%_toolinst_)
+
+$(subdir-y:%=%_toolinst_): %_toolinst_:
+	$(Q)$(MAKE) $(build)=$(src)/$* _toolinst_
+
+
+PHONY += _toolinst_ $(subdir-y:%=%_toolinst_)

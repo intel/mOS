@@ -10,12 +10,13 @@
 # FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
 # more details.
 
-#
-# mOS: hybrid FWK/LWK for HPC
-#
+hostprogs := lwkreset
+scriptprogs-y := lwkreset.sh lwkreset.1.man
+lwkreset-objs := lwkreset.o
 
-subdir-$(CONFIG_MOS_FOR_HPC) += tools
+lwkreset.sh_installname := lwkreset
+lwkreset.sh_installpath := /usr/bin
+lwkreset.1.man_installname := lwkreset.1
+lwkreset.1.man_installpath := /usr/share/man/man1
 
-obj-$(CONFIG_MOS_FOR_HPC) += mos.o
-obj-$(CONFIG_MOS_FOR_HPC) += lwkcpu.o lwkctrl.o mosras.o
-obj-$(CONFIG_MOS_LWKMEM) += lwkmem/
+include $(src)/../Makefile.tool
