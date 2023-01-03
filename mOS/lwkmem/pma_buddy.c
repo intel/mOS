@@ -14,7 +14,6 @@
 #include <linux/string.h>
 #include <linux/string_helpers.h>
 #include <linux/mos.h>
-#include <linux/random.h>
 #include <trace/events/lwkmem.h>
 
 /* Private headers */
@@ -57,6 +56,20 @@ static void buddy_report(void *pma, int verbose);
  *
  *   -> Buddy PMA tests for debugging.
  */
+
+/*
+ * Generate a psuedo-random number. To avoid rank-to-rank and run-to-run
+ * variations we want the sequence to be deterministic across the processes,
+ * therefore we do not want a truly random number.
+ */
+static inline unsigned int psuedo_random(struct node_memory *nm, unsigned range)
+{
+	unsigned seed = nm->seed;
+	seed ^= seed >> 13;
+	seed ^= seed << 18;
+	nm->seed = seed;
+	return seed % range;
+}
 
 /*
  * Helper function that asserts PMA pointer and its expected state.
@@ -1350,8 +1363,9 @@ static int alloc_lwkpages_cache(struct node_memory *node_mem, unsigned long id,
 	if (cache->nr_free) {
 		if (alloc_flags & PMA_ALLOC_RANDOM) {
 			while (extracted < n) {
-				/* Fetch a random page, one at a time */
-				r_index = get_random_u32() % cache->nr_free;
+				/* Fetch a psuedo random page, one at a time */
+				r_index = psuedo_random(node_mem, cache->nr_free);
+
 				head = &cache->list;
 				rev = r_index > cache->nr_free >> 1;
 				n_elements = rev ?
@@ -2095,6 +2109,7 @@ out:
 	if (!rc) {
 		node_mem->nr_total = nr_total;
 		node_mem->nr_free = nr_total;
+		node_mem->seed = 0x23456789;
 		node_mem->stats = stats;
 		pma_buddy->node_mem[pma_buddy->nr_nodes] = node_mem;
 
@@ -2173,8 +2188,6 @@ static int buddy_setup(void *pma, struct list_head (*list_phymem)[MAX_NUMNODES],
 		}
 		pma_buddy->nr_nodes++;
 	}
-	/* initialize random number generator support */
-	wait_for_random_bytes();
 
 	pma_buddy->active = true;
 	rc = 0;

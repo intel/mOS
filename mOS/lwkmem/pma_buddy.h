@@ -166,6 +166,9 @@ struct node_memory {
 	int nid;
 	unsigned long nr_total;
 	unsigned long nr_free;
+	/* Seed for psuedo-random allocations */
+	unsigned int seed;
+
 	struct freemem mem[LWK_MAX_NUMORDERS];
 	/*
 	 * Cache free pages of different types for faster allocations.
