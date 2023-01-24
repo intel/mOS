@@ -12,7 +12,7 @@
 
 .NOTPARALLEL:
 
-subdir-y += lwkreset yod lwkctl libmos mosview xpmem
+subdir-y += libmos xpmem lwkreset yod lwkctl mosview
 
 _toolinst_: $(subdir-y:%=%_toolinst_)
 

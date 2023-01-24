@@ -16,7 +16,7 @@
 
 #include <linux/err.h>
 #include <linux/mm.h>
-#include "xpmem_internal.h"
+#include "../../include/uapi/xpmem/xpmem_internal.h"
 #include "xpmem_private.h"
 
 /*

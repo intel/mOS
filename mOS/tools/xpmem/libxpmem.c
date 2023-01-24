@@ -13,7 +13,7 @@
 #include <sys/stat.h>
 #include <sys/ioctl.h>
 
-#include "xpmem_internal.h"
+#include "../../../include/uapi/xpmem/xpmem_internal.h"
 
 static int xpmem_fd = -1;
 

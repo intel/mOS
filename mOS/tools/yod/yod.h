@@ -17,8 +17,8 @@
 
 #include <stdbool.h>
 #include <linux/types.h>
-#include "mos_cpuset.h"
-#include "mos_gpuset.h"
+#include "../include/mos_cpuset.h"
+#include "../include/mos_gpuset.h"
 
 #define _unused_ __attribute__((unused))
 

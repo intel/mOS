@@ -14,7 +14,7 @@
 #include <linux/err.h>
 #include <linux/mm.h>
 #include <linux/stat.h>
-#include "xpmem_internal.h"
+#include "../../include/uapi/xpmem/xpmem_internal.h"
 #include "xpmem_private.h"
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3,5,0)

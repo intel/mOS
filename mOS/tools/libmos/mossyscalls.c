@@ -13,8 +13,8 @@
  */
 
 #include <unistd.h>
-#include <uapi/asm-generic/unistd.h>
-#include <uapi/linux/mos.h>
+#include "../../../include/uapi/asm-generic/unistd.h"
+#include "../../../include/uapi/linux/mos.h"
 
 /* mOS memory system calls */
 

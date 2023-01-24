@@ -1635,10 +1635,23 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 
 			if (is_lwkmem_enabled(current)) {
 				if (flags & (MAP_STACK | MAP_NORESERVE)) {
-					if (!is_lwkvmr_disabled(LWK_VMR_TSTACK))
+					if (!is_lwkvmr_disabled(LWK_VMR_TSTACK)) {
+						struct lwk_pma_meminfo meminfo;
+						struct lwk_mm *lwkmm = curr_lwk_mm();
+
+						if ((flags & MAP_NORESERVE) && lwkmm) {
+							lwkmm->pm_ops->meminfo(lwkmm->pma, NUMA_NO_NODE, &meminfo);
+							/* Need to improve handling of massive
+							 * MAP_NORESERVED map requests
+							 * For now, defer to Linux
+							 */
+							if (len >= (meminfo.free_pages * PAGE_SIZE))
+								break;
+						}
 						vm_flags |= VM_LWK_TSTACK |
-							    VM_LWK |
-							    VM_LWK_EXTRA;
+						VM_LWK |
+						VM_LWK_EXTRA;
+					}
 					break;
 				}
 

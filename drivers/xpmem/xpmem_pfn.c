@@ -18,7 +18,7 @@
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 #include <linux/mos.h>
-#include "xpmem_internal.h"
+#include "../../include/uapi/xpmem/xpmem_internal.h"
 #include "xpmem_private.h"
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)

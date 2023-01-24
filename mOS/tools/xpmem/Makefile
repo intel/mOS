@@ -19,7 +19,7 @@ libxpmem := libxpmem.so.$(major).$(minor)
 libxpmem_installpath := /usr/lib
 libobjs := $(obj)/libxpmem.o
 xpmem_h_installpath := /usr/include
-xpmem_h_srcpath := $(obj)/../../../include/uapi/xpmem
+xpmem_h_srcpath := include/uapi/xpmem
 xpmem_rules_installname := 56-xpmem.rules
 xpmem_rules_installpath := /etc/udev/rules.d
 
@@ -27,7 +27,7 @@ $(obj)/$(libxpmem): $(libobjs)
 	$(CC) -shared -Wl,-soname,$(soname) -o $@ $^
 
 $(libobjs): $(obj)/%.o: $(src)/%.c
-	$(CC) $(CFLAGS) -I./include/uapi/xpmem -fPIC -Wall -c $< -o $@
+	(mkdir -p $(obj); $(CC) $(CFLAGS) -I./include/uapi/xpmem -fPIC -Wall -c $< -o $@)
 
 quiet_cmd_lib_install = INSTALL $(5)
       cmd_lib_install = mkdir -p $(3); cp $(2) $(3)/$(4)

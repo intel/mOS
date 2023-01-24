@@ -10,6 +10,6 @@
 # FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
 # more details.
 
-ccflags-y += -I include/uapi/xpmem/
+ccflags-y += -I../../include/uapi/xpmem/
 obj-$(CONFIG_XPMEM) += xpmem.o
 xpmem-objs := xpmem_attach.o xpmem_get.o xpmem_main.o xpmem_make.o xpmem_misc.o xpmem_mmu_notifier.o xpmem_pfn.o

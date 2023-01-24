@@ -21,7 +21,7 @@
 #include <asm/tlbflush.h>
 #include <asm/uaccess.h>
 
-#include "xpmem_internal.h"
+#include "../../include/uapi/xpmem/xpmem_internal.h"
 #include "xpmem_private.h"
 
 static inline void

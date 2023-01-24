@@ -23,8 +23,8 @@
 #include <sched.h>
 #include <limits.h>
 #include "../../../include/generated/autoconf.h"
-#include "mos_cpuset.h"
-#include "mos_debug.h"
+#include "../include/mos_cpuset.h"
+#include "../include/mos_debug.h"
 
 #define MOD_NAME	"mos_cpuset"
 
