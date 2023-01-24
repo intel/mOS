@@ -13,12 +13,12 @@
  */
 
 #include <unistd.h>
-#include <uapi/asm-generic/unistd.h>
+#include "../../../include/uapi/asm-generic/unistd.h"
 #include <stdlib.h>
 #include <errno.h>
 #include <string.h>
-#include <uapi/linux/mos.h>
-#include <uapi/linux/uti.h>
+#include "../../../include/uapi/linux/mos.h"
+#include "../../../include/uapi/linux/uti.h"
 #include <pthread.h>
 #include <stdio.h>
 

@@ -20,8 +20,10 @@ libmos_installpath := /usr/lib
 libobjs := $(obj)/mossyscalls.o $(obj)/uti.o
 mos_h_installpath := /usr/include
 uti_h_installpath := /usr/include
-mos_h_srcpath := $(obj)/../../../include/uapi/linux/
-uti_h_srcpath := $(obj)/../../../include/uapi/linux/
+#mos_h_srcpath := $(src)/../../../include/uapi/linux/
+#uti_h_srcpath := $(src)/../../../include/uapi/linux/
+mos_h_srcpath := include/uapi/linux/
+uti_h_srcpath := include/uapi/linux/
 man_2_installpath := /usr/share/man/man2
 
 $(obj)/$(libmos): $(libobjs)

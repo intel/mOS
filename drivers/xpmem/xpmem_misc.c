@@ -16,7 +16,7 @@
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 #include <linux/uaccess.h>
-#include <xpmem.h>
+#include "../../include/uapi/xpmem/xpmem.h"
 #include "xpmem_private.h"
 #include <linux/module.h>
 

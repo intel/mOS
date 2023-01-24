@@ -15,8 +15,8 @@
 #ifndef __LWKCTL_H__
 
 #include <stdbool.h>
-#include "mos_cpuset.h"
-#include "mos_gpuset.h"
+#include "../include/mos_cpuset.h"
+#include "../include/mos_gpuset.h"
 #include "lwkctl_debug.h"
 
 #define MOS_SYSFS_ROOT "/sys/kernel/mOS/"

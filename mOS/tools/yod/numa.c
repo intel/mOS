@@ -17,7 +17,7 @@
 #include <string.h>
 #include <errno.h>
 
-#include "mos_cpuset.h"
+#include "../include/mos_cpuset.h"
 #include "yod.h"
 #include "yod_debug.h"
 

@@ -16,7 +16,7 @@
 #define __LC_DEBUG_H
 
 #include <unistd.h>
-#include "mos_debug.h"
+#include "../include/mos_debug.h"
 /*
  * Define logging (verbosity) levels and the associated logging
  * utility.

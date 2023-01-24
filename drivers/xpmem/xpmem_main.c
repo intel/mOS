@@ -29,7 +29,7 @@
 #include <linux/mm.h>
 #include <linux/file.h>
 #include <linux/proc_fs.h>
-#include "xpmem_internal.h"
+#include "../../include/uapi/xpmem/xpmem_internal.h"
 #include "xpmem_private.h"
 
 #include <asm/uaccess.h>
