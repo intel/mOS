@@ -497,7 +497,7 @@ static bool pfn_range_available(unsigned long start_pfn, unsigned long end_pfn)
 	for (pfn = start_pfn; pfn < end_pfn; pfn++) {
 		page = pfn_to_page(pfn);
 		if (!pfn_in_present_section(pfn) || !pfn_valid(pfn) ||
-		    PageReserved(page) || PageHWPoison(page))
+		    PageReserved(page) || PageHWPoison(page) || page_maybe_dma_pinned(page))
 			return false;
 	}
 	return true;
