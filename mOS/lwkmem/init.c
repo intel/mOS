@@ -490,14 +490,17 @@ static bool pfn_range_available(unsigned long start_pfn, unsigned long end_pfn)
 {
 	struct page *page;
 	unsigned long pfn;
+	struct zone *zone;
 
 	if (end_pfn <= start_pfn)
 		return false;
 
 	for (pfn = start_pfn; pfn < end_pfn; pfn++) {
 		page = pfn_to_page(pfn);
+		zone = page_zone(page);
 		if (!pfn_in_present_section(pfn) || !pfn_valid(pfn) ||
-		    PageReserved(page) || PageHWPoison(page) || page_maybe_dma_pinned(page))
+		    PageReserved(page) || PageHWPoison(page) || page_maybe_dma_pinned(page) ||
+		    zone_idx(zone) != ZONE_MOVABLE)
 			return false;
 	}
 	return true;
