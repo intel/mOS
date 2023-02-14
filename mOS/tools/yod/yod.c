@@ -40,6 +40,7 @@
 #define YOD_MEM_ALGORITHM_LARGE 1
 
 #define YOD_MOS_VIEW_LEN 	20
+#define CCL_WORKER_AFFINITY "CCL_WORKER_AFFINITY"
 
 static const char * const YOD_MEM_ALGORITHMS[] = {
 	"4kb",
@@ -2942,6 +2943,54 @@ static void write_mempolicy_normal(unsigned char *buffer)
 	}
 }
 
+/*
+ * If affinity set to the reserved CPUs for this process, do not change.
+ * Otherwise set to the last 4 reserved CPUs in the process. We need
+ * to avoid CCL defaulting to the last 4 CPUs on the NODE since it is
+ * likely those CPUs are not reserved by this process.
+ */
+static void  set_oneccl_worker_affinity(void)
+{
+	char *affinity;
+	mos_cpuset_t *worker_cpus;
+	bool modify = false;
+	char *listptr;
+	int i, num_cpus, num_worker_cpus,skips;
+
+	affinity = getenv("CCL_WORKER_AFFINITY");
+	worker_cpus = mos_cpuset_alloc_validate();
+	if (!affinity || *affinity == '\0')
+		modify = true;
+	else {
+		if (mos_parse_cpulist(affinity, worker_cpus))
+			yod_abort(-1, "Could not parse %s", affinity);
+
+		for (i = 0; i < mos_max_cpus(); i++) {
+			if (mos_cpuset_is_set(i, worker_cpus) &&
+			    !mos_cpuset_is_set(i, lwk_req.lwkcpus_request)) {
+				modify = true;
+				break;
+			}
+		}
+	}
+	if (modify) {
+		/* We need to set the environment variable */
+		mos_cpuset_xor(worker_cpus, worker_cpus, worker_cpus);
+		num_cpus = mos_cpuset_cardinality(lwk_req.lwkcpus_request);
+		num_worker_cpus = MIN(4, num_cpus);
+		/* Use the CPUs from the end of the sequence list */
+		skips = num_cpus - num_worker_cpus;
+		listptr = lwk_req.layout_request;
+		for (i = 0; i < skips; i++, listptr++)
+			listptr = strchr(listptr, ',');
+
+		if ((setenv(CCL_WORKER_AFFINITY, listptr, 1)))
+			yod_abort(-1, "Could not set environment variable" CCL_WORKER_AFFINITY"%s", listptr);
+	}
+	mos_cpuset_free(worker_cpus);
+}
+
+
 int main(int argc, char **argv)
 {
 
@@ -3028,6 +3077,9 @@ int main(int argc, char **argv)
 	if (rc)
 		yod_abort(rc, "Could not write sequence request.");
 	YOD_LOG(YOD_INFO, "LWK CPUs sequence: %s", lwk_req.layout_request);
+
+	/* Set the OneCCL Worker thread affiniity */
+	set_oneccl_worker_affinity();
 
 	rc = plugin->set_util_threads(num_util_threads);
 
