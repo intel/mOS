@@ -217,8 +217,8 @@ struct lwk_pma_meminfo {
  *   The total number of lists within a set is fixed for a process and is set
  *   when the user stores memory policy information to kernel through yod.
  *
- *   @next_node is used to keep track of next NUMA node to allocate from
- *              for interleave allocation policy.
+ *   @nodelist_ratio is used to interleave between memory types using the value
+ *              provided as a ratio of allocations between the node lists
  *
  *   @pagefault_level indicates the level of ondemand paging for this region
  *
@@ -235,7 +235,7 @@ struct lwk_mempolicy {
 	struct lwk_mempolicy_nodelists *below_threshold;
 	unsigned long threshold;
 	enum lwk_page_type max_page;
-	int next_node;
+	int nodelist_ratio;
 	enum lwk_pagefault_level pagefault_level;
 	enum lwk_mempolicy_type type;
 	bool disabled;

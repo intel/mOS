@@ -222,6 +222,23 @@ if there is at least more than 1 NUMA domains reserved for a memory type otherwi
 the default setting is \fB'normal'\fP
 
 .TP
+.B --memtype-ratio \fIscope:ratio\fP
+Sets the ratio of page allocations across types of memory.  In certain
+application environments, higher overall bandwith than what would be achievable
+by using high bandwidth memory (HBM) alone may be possible when both HBM and DDR
+data paths are utilized in parallel. Use with the \fBinterleave\fP mempolicy.
+The granularity of the memory type interleaving can be controlled using the
+\fB--maxpage\fP option to limit the maximum page size. By default, the order
+of memory type allocations are hbm, ddr, followed by nvram. This ratio will be
+applied to the first two available memory types. For example, a value
+of 2 would allocate 2 pages of high bandwidth memory for every 1 page of ddr
+memory. If the \fB--memory-preferences\fP option is used to change the order of memory
+types, the targeted memory types for applying the ratio will change. \fIscope\fP
+can be \fBdbss\fP for .data/.bss area, \fBheap\fP for brk area, \fBanon_private\fP
+for private anonymous area, \fBtstack\fP for thread stacks, \fBstack\fP for
+process stack or \fBall\fP for all LWK memory backed areas.
+
+.TP
 .B --dry-run
 Do not actually reserve resources and launch.
 

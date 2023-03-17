@@ -962,6 +962,7 @@ int lwk_mm_set_mempolicy_info(const char *buff, size_t size)
 			policy->pagefault_level = LWK_PF_NOFAULT;
 			policy->type = LWK_MEMPOL_NORMAL;
 			policy->disabled = false;
+			policy->nodelist_ratio = 0;
 			if (vmr != LWK_VMR_HEAP)
 				policy->max_page = LWK_MAX_NUMPGTYPES - 1;
 			else
@@ -1023,6 +1024,10 @@ int lwk_mm_set_mempolicy_info(const char *buff, size_t size)
 			LWKMEM_WARN("%s: Invalid policy type %lld, set normal",
 				    lwk_vmrs_name[vmr], *ptr);
 		}
+		ptr++;
+
+		/* Store the node list interleave ratio */
+		policy->nodelist_ratio = *ptr;
 		ptr++;
 	}
 	/* Everything looks ok, let us update this in lwk_mm structure */

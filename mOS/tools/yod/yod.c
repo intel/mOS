@@ -118,6 +118,7 @@ const char * const MEMPOLICY_TYPES[] = {
 #define YOD_OPT_MAXPAGE (YOD_OPT_BASE | 0x000B)
 #define YOD_OPT_PAGEFAULT (YOD_OPT_BASE | 0x000C)
 #define YOD_OPT_MEMPOLICY (YOD_OPT_BASE | 0x000D)
+#define YOD_OPT_MEMTYPE_RATIO (YOD_OPT_BASE | 0x000E)
 
 /*
  * yod state.
@@ -217,6 +218,11 @@ struct help_text {
 	{0, 0, "separator '/' between them."},
 	{0, 0, "scope    - dbss, heap, anon_private, tstack, stack, or all"},
 	{0, 0, "type - normal, random, interleave, interleave_random"},
+	{"--memtype-ratio", "<scope:ratio>", "Set page allocation ratio across memory types."},
+	{0, 0, "Settings for multiple regions can be specified using"},
+	{0, 0, "separator '/' between them."},
+	{0, 0, "scope    - dbss, heap, anon_private, tstack, stack, or all"},
+	{0, 0, "ratio - 1, 2, 3, ..."},
 	{"--verbose, -v", "<level>", "Sets verbosity of yod."},
 	{0, 0, "be used for this job."}
 };
@@ -2108,6 +2114,49 @@ static void yodopt_pagefault_level(const char *opt)
 	free(arg_start);
 }
 
+static void yodopt_memtype_ratio(const char *opt)
+{
+	int s;
+	long int ratio;
+	char *arg, *arg_start;
+	char *scope_s, *ratio_s;
+	enum mem_scopes_t scope;
+
+	assert_lwkmem_enabled();
+	arg = strdup(opt);
+	arg_start = arg;
+
+	if (!arg)
+		yod_abort(-ENOMEM, "Could not copy: %s", opt);
+
+	while ((ratio_s = strsep(&arg, "/"))) {
+		if (strlen(ratio_s) == 0)
+			continue;
+
+		scope_s = strsep(&ratio_s, ":");
+
+		if (!scope_s || !ratio_s)
+			yod_abort(-EINVAL,
+				  "Invalid arguments for --memtype-ratio");
+
+		scope = label_to_int(scope_s, SCOPES, ARRAY_SIZE(SCOPES));
+		if (scope == YOD_SCOPE_UNKNOWN)
+			yod_abort(-EINVAL,
+				  "Invalid scope for --memtype-ratio: \"%s\"",
+				  scope_s);
+
+		if (yodopt_parse_integer(ratio_s, &ratio, 0, INT_MAX))
+			yod_abort(-EINVAL, "Bad ratio for --memtype-ratio: %s", ratio_s);
+
+		if (scope == YOD_SCOPE_ALL) {
+			for (s = 0; s < YOD_NUM_MEM_SCOPES; s++)
+				lwk_req.memory_preferences[s].nodelist_ratio = ratio;
+		} else
+			lwk_req.memory_preferences[scope].nodelist_ratio = ratio;
+	}
+	free(arg_start);
+}
+
 static void yodopt_mempolicy_type(const char *opt)
 {
 	int s;
@@ -2173,6 +2222,7 @@ static void yod_set_default_memory_preferences(void)
 		pref->max_page_size = s != YOD_SCOPE_HEAP ? ((__u64)1) << 30 : ((__u64)1) << 21;
 		pref->pagefault_level = PF_LEVEL_NOFAULT;
 		pref->policy_type = MEMPOLICY_UNKNOWN;
+		pref->nodelist_ratio = 0;
 		memcpy(pref->lower_order, DEFAULT_MEMORY_ORDER, sizeof(DEFAULT_MEMORY_ORDER));
 		memcpy(pref->upper_order, DEFAULT_MEMORY_ORDER, sizeof(DEFAULT_MEMORY_ORDER));
 	}
@@ -2636,6 +2686,7 @@ static void parse_options(int argc, char **argv)
 		{"maxpage", required_argument, 0, YOD_OPT_MAXPAGE},
 		{"pagefault", required_argument, 0, YOD_OPT_PAGEFAULT},
 		{"mempolicy", required_argument, 0, YOD_OPT_MEMPOLICY},
+		{"memtype-ratio", required_argument, 0, YOD_OPT_MEMTYPE_RATIO},
 		{"resources", required_argument, 0, 'R'},
 		{"resource_algorithm", required_argument, 0,
 		 YOD_OPT_RESOURCE_ALGORITHM},
@@ -2751,6 +2802,10 @@ static void parse_options(int argc, char **argv)
 			yodopt_brk_clear_length(optarg);
 			break;
 
+		case YOD_OPT_MEMTYPE_RATIO:
+			yodopt_memtype_ratio(optarg);
+			break;
+
 		case YOD_OPT_MOSVIEW:
 			yodopt_mosview(optarg);
 			break;
@@ -2863,6 +2918,7 @@ static void write_mempolicy_normal(unsigned char *buffer)
 		gvalid_below = 0;
 		info->threshold = pref->threshold;
 		info->pagefault_level = pref->pagefault_level;
+		info->nodelist_ratio = pref->nodelist_ratio;
 		for (g = 0; g < (int) lwk_req.n_groups; g++) {
 			domain_len = lwk_req.lwkmem_domain_info_len[pref->upper_order[g]];
 			if (domain_len) {
