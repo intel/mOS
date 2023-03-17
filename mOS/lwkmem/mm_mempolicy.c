@@ -364,23 +364,33 @@ cleanup:
  *
  *   - If interleaving fails even after relaxing rules then -ENOMEM is returned.
  *
+ *   - If nodelist_ratio is non-zero, then the caller has passed >1 nodelists
+ *     and is requesting that an allocation from the second node list is done
+ *     after the indicated number of allocations from the first node
+ *     list is done. Typically the first node list is HBM memory and the second
+ *     is DDR memory.
+ *
  * NOTE: Caller needs to ensure @vma, @t, @end alignment and pointers
  *       @nodelist, @startp are validated to avoid repeated redundant
- *       checking.
+ *       checking. Also ensure that if a non-zero value for nodelist_ratio is
+ *       provided, there is at least two lwk_mempolicy_nodelists structures
+ *       pointed to by the nodelist parameter
  */
 static int lwk_mm_map_nodelist_interleaved(struct vm_area_struct *vma,
 			unsigned long *startp, unsigned long end,
 			enum lwk_page_type t,
 			struct lwk_mempolicy_nodelists *nodelist, int relax,
-			enum lwk_pma_alloc_flags pma_alloc_flag)
+			enum lwk_pma_alloc_flags pma_alloc_flag,
+			int nodelist_ratio)
 {
-	int i, rc, ret;
+	int i, j, k, rc, ret;
 	unsigned long pgoff;
 	unsigned long needed, allocated, npages;
 	unsigned long next, tried;
 	struct list_head list, sublist;
 	struct lwk_mm *lwk_mm = vma_lwk_mm(vma);
 	void *pma = lwk_mm->pma;
+	struct lwk_mempolicy_nodelists *active_nodelist = nodelist;
 
 	if (*startp >= end || !IS_ALIGNED(*startp, lwkpage_size(t))) {
 		LWKMEM_WARN("Invalid: range=[%lx, %lx) maxpg=%s",
@@ -401,6 +411,11 @@ static int lwk_mm_map_nodelist_interleaved(struct vm_area_struct *vma,
 	pgoff = vma->vm_pgoff + bytes_to_pages(*startp - vma->vm_start);
 	i = (pgoff >> lwkpage_order(t)) % nodelist->num_nodes;
 
+	if (nodelist_ratio) {
+		j = (pgoff >> lwkpage_order(t)) % nodelist[0].num_nodes;
+		k = (pgoff >> lwkpage_order(t)) % nodelist[1].num_nodes;
+	}
+
 	/*
 	 * In case of -ENOMEM on a node if we are allowed to relax interleaving
 	 * rules, then try until we could not find memory in any of the NUMA
@@ -411,7 +426,7 @@ static int lwk_mm_map_nodelist_interleaved(struct vm_area_struct *vma,
 		INIT_LIST_HEAD(&sublist);
 		npages = 0;
 		/* Allocate a single page */
-		rc = lwk_mm->pm_ops->alloc_pages(pma, nodelist->nodes[i],
+		rc = lwk_mm->pm_ops->alloc_pages(pma, active_nodelist->nodes[i],
 						 1, t, pma_alloc_flag,
 						 &sublist, &npages);
 		/* Any fatal error? terminate further processing */
@@ -431,9 +446,20 @@ static int lwk_mm_map_nodelist_interleaved(struct vm_area_struct *vma,
 			if (++tried == nodelist->num_nodes)
 				break;
 		}
-
 		/* Next NUMA domain to interleave */
-		i = (i + 1) % nodelist->num_nodes;
+		if (nodelist_ratio) {
+			if ((allocated - needed + 1) % (nodelist_ratio + 1)) {
+				active_nodelist = &nodelist[0];
+				j = (j + 1) % nodelist[0].num_nodes;
+				i = j;
+
+			} else {
+				active_nodelist = &nodelist[1];
+				k = (k + 1) % nodelist[1].num_nodes;
+				i = k;
+			}
+		} else
+			i = (i + 1) % nodelist->num_nodes;
 	}
 	allocated -= needed;
 
@@ -475,7 +501,8 @@ static int lwk_mm_map_try_page_sizes(struct vm_area_struct *vma,
 			unsigned long *startp, unsigned long end,
 			enum lwk_page_type tmax,
 			struct lwk_mempolicy_nodelists *nodelist,
-			enum lwk_mempolicy_type policy_type, int relax)
+			enum lwk_mempolicy_type policy_type, int relax,
+			int ratio)
 {
 	int rc = 0;
 	enum lwk_page_type t;
@@ -511,7 +538,7 @@ static int lwk_mm_map_try_page_sizes(struct vm_area_struct *vma,
 		else
 			rc = lwk_mm_map_nodelist_interleaved(vma, startp, end,
 							t, nodelist, relax,
-							pma_alloc_flag);
+							pma_alloc_flag, ratio);
 		/* Return on success or other fatal errors */
 		if (rc == 0 || (rc && rc != -ENOMEM))
 			return rc;
@@ -539,7 +566,8 @@ static int lwk_mm_map_aligned_range(struct vm_area_struct *vma,
 			unsigned long start, unsigned long end,
 			enum lwk_page_type tmax,
 			struct lwk_mempolicy_nodelists *nodelists,
-			enum lwk_mempolicy_type policy_type)
+			enum lwk_mempolicy_type policy_type,
+			int ratio)
 {
 	int i, rc = 0;
 	int relax = 0;
@@ -609,7 +637,8 @@ retry:
 
 			/* Try all page sizes @t and below within @nodelist */
 			rc = lwk_mm_map_try_page_sizes(vma, &start, next, t,
-					nodelist, policy_type, relax);
+					nodelist, policy_type, relax,
+					(i == 0) ? ratio : 0);
 			/*
 			 * Not enough memory of this type? then try
 			 * NUMA nodes of next perferred memory.
@@ -720,6 +749,8 @@ int lwk_mm_map_range(struct vm_area_struct *vma, unsigned long start,
 	unsigned long lstart_prev, uend_prev;
 	struct lwk_mempolicy *mempolicy;
 	struct lwk_mempolicy_nodelists *policy_nodelists;
+	struct lwk_mm *lwk_mm = vma_lwk_mm(vma);
+	int ratio;
 
 	mempolicy = lwk_mm_get_mempolicy(vma);
 	if (!mempolicy)
@@ -729,6 +760,15 @@ int lwk_mm_map_range(struct vm_area_struct *vma, unsigned long start,
 		policy_nodelists = mempolicy->above_threshold;
 	else
 		policy_nodelists = mempolicy->below_threshold;
+
+	/*
+	 * If there is more than one nodelist that contains node ids, use
+	 * the ratio set by the caller
+	 */
+	if ((lwk_mm->policy_nlists > 1) && policy_nodelists[1].num_nodes)
+		ratio = mempolicy->nodelist_ratio;
+	else
+		ratio = 0;
 
 	if (!policy_nodelists) {
 		LWKMEM_ERROR("Memory policy nodelists are not setup yet");
@@ -768,7 +808,7 @@ int lwk_mm_map_range(struct vm_area_struct *vma, unsigned long start,
 
 		if (lstart != lstart_prev) {
 			rc = lwk_mm_map_aligned_range(vma, lstart, lstart_prev,
-					t, policy_nodelists, mempolicy->type);
+					t, policy_nodelists, mempolicy->type, ratio);
 			if (rc)
 				goto alloc_error;
 			lstart_prev = lstart;
@@ -776,7 +816,7 @@ int lwk_mm_map_range(struct vm_area_struct *vma, unsigned long start,
 
 		if (uend != uend_prev) {
 			rc = lwk_mm_map_aligned_range(vma, uend_prev, uend,
-					t, policy_nodelists, mempolicy->type);
+					t, policy_nodelists, mempolicy->type, ratio);
 			if (rc)
 				goto alloc_error;
 			uend_prev = uend;

@@ -413,6 +413,7 @@ typedef struct lwkmem_mempolicy_info_t {
 	__u64 max_page_size;
 	__u64 pagefault_level;
 	__u64 policy_type;
+	__u64 nodelist_ratio;
 } lwkmem_mempolicy_info_t;
 
 typedef struct lwk_request_t {
@@ -442,6 +443,7 @@ typedef struct lwk_request_t {
 		unsigned long max_page_size;
 		unsigned long pagefault_level;
 		unsigned long policy_type;
+		unsigned long nodelist_ratio;
 	} memory_preferences[YOD_NUM_MEM_SCOPES];
 
 	void (*memsize_resolver)(struct lwk_request_t *this);
