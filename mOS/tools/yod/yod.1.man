@@ -48,7 +48,7 @@ the corresponding number of LWK cores and GPU devices are reserved, as well as
 an equal portion of the designated LWK memory.  A \fIfraction\fP may be
 specified in floating point format or as a rational number M/N, where M and N
 are integers.  Fractions must be in the interval (0, 1].  If \fBMPI\fP is
-specified then MPI environment variables are used to determine the fractional
+specified, then MPI environment variables are used to determine the fractional
 amount of resources.  If file:\fImap_file\fP is specified, then a mapping file
 is used to specify LWK CPU and/or memory and/or number of utility threads per
 MPI rank. See \fIRESOURCE MAP FILES\fP for details.  This option may not be
@@ -78,7 +78,7 @@ the argument specifies either a \fInumber\fP of cores to be reserved, or a
 \fIfraction\fP of the overall LWK cores designated for mOS use.  A
 \fIfraction\fP may be specified in floating point format or as a rational
 number M/N, where M and N are integers.  Fractions must be in the interval
-(0, 1].  If \fBMPI\fP is specified then MPI environment variables are used to
+(0, 1].  If \fBMPI\fP is specified, then MPI environment variables are used to
 determine the fractional amount of core resources.
 
 .PP
@@ -94,7 +94,7 @@ A \fIfraction\fP reserves memory as a portion of the overall amount of
 memory designated for LWK use.  Fractions must be in the interval (0.0, 1.0)
 and may be specified either in floating point format or as a rational number
 M/N, where M and N are integers (M <= N). If \fBall\fP is specified, then all
-available LWK memory is reserved.  If \fBMPI\fP is specified then MPI environment
+available LWK memory is reserved.  If \fBMPI\fP is specified, then MPI environment
 variables are used to determine the fractional amount of memory resources.
 
 .PP
@@ -112,20 +112,20 @@ Otherwise, the argument specifies either a \fInumber\fP of GPU devices to be
 reserved, or a \fIfraction\fP of the total GPU devices available for mOS use.
 A \fIfraction\fP may be specified in floating point format or as a rational
 number M/N, where M and N are integers.  Fractions must be in the interval
-(0, 1].  If \fBMPI\fP is specified then MPI environment variables are used to
+(0, 1].  If \fBMPI\fP is specified, then MPI environment variables are used to
 determine the fractional amount of GPU resources.  If this option is specified,
 then LWK CPUs must also be specified via either the --cpus or the --cores option
 along with memory. This option and the --gpu-tiles option are mutually exclusive.
 
 .TP
-.B --gpu-tiles, -G <\fInumber\fP, \fIfraction\fP, all>
+.B --gpu-tiles, -g <\fInumber\fP, \fIfraction\fP, all>
 Reserves the specified number of GPU tiles for the \fIcommand\fP being
 launched. If \fBall\fP is specified, all available GPU tiles are reserved.
 Otherwise, the argument specifies either a \fInumber\fP of GPU tiles to be
 reserved, or a \fIfraction\fP of the total GPU tiles available for mOS use.
 A \fIfraction\fP may be specified in floating point format or as a rational
 number M/N, where M and N are integers.  Fractions must be in the interval
-(0, 1].  If \fBMPI\fP is specified then MPI environment variables are used to
+(0, 1].  If \fBMPI\fP is specified, then MPI environment variables are used to
 determine the fractional amount of GPU resources.  If this option is specified,
 then LWK CPUs must also be specified via either the --cpus or the --cores option
 along with memory. This option and the --gpus option are mutually exclusive.
@@ -151,7 +151,7 @@ The default is \fBnuma\fP.
 
 .TP
 .B --mem_algorithm <\fIalgorithm\fP>
-\fIThis option is not yet implemented.\fP
+This option is not yet implemented.
 
 .TP
 .B --memory-preference, -p <\fIpreference\fP>
@@ -191,7 +191,7 @@ Sets the largest page size that can be used for a virtual memory region.
 \fImaxpage\fP can be either \fB4k, 2m,\fP or \fB1g\fP. Setting for multiple virtual
 memory regions can be specified by using separator \fI'/'\fP between settings of each
 virtual memory region. One can specify a different \fImaxpage\fP for each region.
-If setting for a virtual memory region is not specified then by default the largest
+If setting for a virtual memory region is not specified, then by default the largest
 page size supported by the hardware is used for that region, unless interleaving
 is active. If interleaving is active, then the default maximum page size is 2m.
 
@@ -204,7 +204,7 @@ Sets the page faulting level that can be used for a virtual memory region.
 \fIlevel\fP can be either \fBnofault\fP or \fBonefault\fP. Setting for multiple virtual
 memory regions can be specified by using separator \fI'/'\fP between settings of each
 virtual memory region. One can specify a different \fIlevel\fP for each region.
-If setting for a virtual memory region is not specified then a default setting of
+If setting for a virtual memory region is not specified, then a default setting of
 nofault is applied.
 
 .TP
@@ -217,8 +217,8 @@ Sets the memory policy type that can be used for a virtual memory region.
 \fBinterleave_random\fP. Setting for multiple virtual memory regions can be specified
 by using separator \fI'/'\fP between settings of each virtual memory region.
 One can specify a different \fItype\fP for each region. If setting for a virtual
-memory region is not specified then a default setting of \fB'interleave'\fP is applied
-if there is at least more than 1 NUMA domains reserved for a memory type otherwise
+memory region is not specified, then a default setting of \fB'interleave'\fP is applied
+if there is more than 1 NUMA domain reserved for a memory type otherwise
 the default setting is \fB'normal'\fP
 
 .TP
@@ -337,7 +337,7 @@ for all LWK memory backed areas.
 .PP
 The \fBorder\fP term lists types of memory in order of preference.  This is
 a comma delimited list of \fBhbm, dram,\fP and \fBnvram\fP.  The default
-ordering is hbm,dram,nvram.  If not all types of memory are explicitly
+ordering is hbm, dram, nvram.  If not all types of memory are explicitly
 stated, the list is implicitly completed with missing types from this
 default order.
 
