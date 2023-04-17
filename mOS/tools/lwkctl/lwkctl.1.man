@@ -29,19 +29,19 @@
 .\" .sp <n>    insert n+1 empty lines
 .\" for manpage-specific macros, see man(7)
 .SH NAME
-lwkctl \- creates, deletes or shows Light Weight Kernel (LWK) partition in
+lwkctl \- creates, deletes, or shows Light Weight Kernel (LWK) partition in
 Multi-OS (mOS)
 .SH SYNOPSIS
 .B lwkctl [options]
 .SH DESCRIPTION
 
-\fBlwkctl\fP is the command used to partition resources - CPUs and Memory between Linux and LWK in Multi-OS (mOS). It offlines the resources on Linux and hands it over to LWK. Once this partitioning is complete, further resource partitioning between LWK processes is done using the mOS job launch utility \- \fByod\fP. The \fBlwkctl\fP command requires root privileges in order to create or delete LWK partition.
+\fBlwkctl\fP is the command used to partition resources - CPUs and Memory between Linux and LWK in Multi-OS (mOS). It off-lines the resources on Linux and hands it over to LWK. Once this partitioning is complete, further resource partitioning between LWK processes is done using the mOS job launch utility \- \fByod\fP. The \fBlwkctl\fP command requires root privileges to create or delete LWK partition.
 
 .SH OPTIONS
 
 .TP
 .B --create, -c 'lwkcpus=<\fIlwkcpu_spec\fP> lwkcpu_profile=<\fIprofile\fP> lwkmem=<\fIlwkmem_spec\fP>'
-Creates a new LWK partition. If an LWK partition already exists then it will be deleted before creating the new partition. LWK CPU and memory specifications for the new partition are passed as arguments in the following format,
+Creates a new LWK partition. If an LWK partition already exists, then it will be deleted before creating the new partition. LWK CPU and memory specifications for the new partition are passed as arguments in the following format,
 .sp 2
 lwkcpus=<utility cpu1>.<lwkcpu set1>:<utility cpu2>.<lwkcpu set2>...
 .br
@@ -55,7 +55,7 @@ normal, Filter CPU hotlplug states for LWKCPUs
 .br
 debug, Do not filter CPU hotplug states for LWKCPUs
 .sp 2
-By default 'normal' profile is selected if either <\flwkcpu_profile\fP> is not specified or an invalid profile is specified. /sys/devices/system/cpu/hotplug/states provides the full list of CPU hotplug states for a normal Linux CPU boot. CPU hotplug states which are marked 'LWK' are the only hotplug states through which an LWKCPU will be booted.
+By default, 'normal' profile is selected if either <\flwkcpu_profile\fP> is not specified or an invalid profile is specified. /sys/devices/system/cpu/hotplug/states provides the full list of CPU hotplug states for a normal Linux CPU boot. CPU hotplug states which are marked 'LWK' are the only hotplug states through which an LWKCPU will be booted.
 .sp 2
 lwkmem=<n1>:<size1>,<n2>:<size2>,...
 .br
@@ -67,11 +67,11 @@ lwkmem=auto
 .br
 lwkmem=auto:max
 .sp 2
-n1,n2,.. are NUMA node numbers. size1,size2,.. are sizes of the LWKMEM requests on corresponding NUMA node. Based on available kernel movable memory and alignment the designated LWK memory will be less than or equal to the requested size. LWK memory requests are aligned on sparse memory section boundary which is in general set to 128MB. LWK memory is allocated from movable memory of Linux kernel(i.e. from ZONE_MOVABLE pages). In order to have movable memory on every node the kernel needs to be booted with either \fIkernelcore\fP or \fImovablecore\fP kernel arguments to specify the total non-movable or movable memory in the system respectively. Further these kernel arguments can be combined with the \fImovable_node\fP kernel argument if the system has hotpluggable memory. In such a case only non-hotpluggable memory nodes are considered for non-movable memory.
+n1,n2,.. are NUMA node numbers. size1,size2,.. are sizes of the LWKMEM requests on corresponding NUMA node. Based on available kernel movable memory and alignment the designated LWK memory will be less than or equal to the requested size. LWK memory requests are aligned on sparse memory section boundary which is in general set to 128MB. LWK memory is allocated from movable memory of Linux kernel(i.e. from ZONE_MOVABLE pages). To have movable memory on every node the kernel needs to be booted with either \fIkernelcore\fP or \fImovablecore\fP kernel arguments to specify the total non-movable or movable memory in the system respectively. Further these kernel arguments can be combined with the \fImovable_node\fP kernel argument if the system has hotpluggable memory. In such a case only non-hotpluggable memory nodes are considered for non-movable memory.
 .sp 2
 Ex: Specifying \fIkernelcore=16G movable_node\fP on the kernel command line during the boot up would reserve 16G of non-movable memory for Linux in non-hotpluggable NUMA nodes and rest of the memory is considered movable memory in the system which can be dynamically provisioned between Linux and LWK. All hotpluggable memory nodes will have only movable memory which can be completely provisioned to LWK.
 .sp 2
-Specifying lwkcpus=auto and lwkmem=auto will cause the system to automatically generate an LWK partition based on the available CPU and memory resources, using the system topology. The resulting LWK partition will work well for many HPC applications. The lwkmem=auto:max specification will aggressively allocate all available memory to the LWK partition without regards to balancing memory designations across the numa domains.
+Specifying lwkcpus=auto and lwkmem=auto will cause the system to automatically generate an LWK partition based on the available CPU and memory resources, using the system topology. The resulting LWK partition will work well for many HPC applications. The lwkmem=auto:max specification will aggressively allocate all available memory to the LWK partition without regards to balancing memory designations across the NUMA domains.
 .TP
 .B --delete, -d
 Deletes the existing LWK partition and releases corresponding resources to Linux. Currently
@@ -91,11 +91,11 @@ Modifies the behavior of --create/-c option. If '--precise yes' is specified and
 
 .TP
 .B --timeout, -t <\fIseconds\fP>
-Specifies the timeout (in seconds) that lwkctl will wait for a serialization lock.  This lock prohibits multiple invocations of lwkctl that alter the partiion from running concurrently.  The default is 300 (five minutes).  If specified as zero, then lwkctl will block indefinitely waiting for the lock.
+Specifies the timeout (in seconds) that lwkctl will wait for a serialization lock.  This lock prohibits multiple invocations of lwkctl that alter the partition from running concurrently.  The default is 300 (five minutes).  If specified as zero, then lwkctl will block indefinitely waiting for the lock.
 
 .TP
 .B --force, -f
-Force the deletion or creation of the partition even if there is a job running on the node.  Please note that using using this option could impact active jobs.  And if resources are currently being consumed by active jobs, this option will not necessarily guarantee that those resources are freed or that the partitioning will complete successfully.  Use with caution.
+Force the deletion or creation of the partition even if there is a job running on the node.  Please note that using this option could impact active jobs.  And if resources are currently being consumed by active jobs, this option will not necessarily guarantee that those resources are freed or that the partitioning will complete successfully.  Use with caution.
 
 .TP
 .B --verbose, -v <\fInumber\fP>
@@ -134,7 +134,7 @@ LWKMEM - Requesting 16G on every NUMA node 0 to 3 and 3968M on every NUMA node 4
 .RE
 .TP
 .B sudo lwkctl -c 'lwkcpus=52-67,256-271:120-135:1,69. lwkcpu_profile=normal lwkmem=0:16G,1:16G,2:16G,3:16G,4:3968M,5:3968M,6:3968M,7:3968M'
-Creates LWK partition similar to above but with no syscall migration. CPUs 1 and 69 are utility CPUs for utility threads.
+Creates LWK partition like above but with no syscall migration. CPUs 1 and 69 are utility CPUs for utility threads.
 .TP
 .B sudo lwkctl -c 'lwkcpus=52-67,256-271:120-135 lwkcpu_profile=normal lwkmem=0:16G,1:16G,2:16G,3:16G,4:3968M,5:3968M,6:3968M,7:3968M'
 Creates LWK partition similar to above but with no utility CPUs.
