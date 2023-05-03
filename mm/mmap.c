@@ -1092,6 +1092,11 @@ static inline int is_mergeable_vma(struct vm_area_struct *vma,
 				struct file *file, unsigned long vm_flags,
 				struct vm_userfaultfd_ctx vm_userfaultfd_ctx)
 {
+	unsigned long ignore = VM_SOFTDIRTY;
+
+	if (vma->vm_flags & VM_LWK_HEAP)
+	 ignore |= VM_MIXEDMAP;
+
 	/*
 	 * VM_SOFTDIRTY should not prevent from VMA merging, if we
 	 * match the flags but dirty bit -- the caller should mark
@@ -1100,7 +1105,7 @@ static inline int is_mergeable_vma(struct vm_area_struct *vma,
 	 * the kernel to generate new VMAs when old one could be
 	 * extended instead.
 	 */
-	if ((vma->vm_flags ^ vm_flags) & ~VM_SOFTDIRTY)
+	if ((vma->vm_flags ^ vm_flags) & ~ignore)
 		return 0;
 	if (vma->vm_file != file)
 		return 0;
