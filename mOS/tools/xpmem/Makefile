@@ -10,35 +10,29 @@
 # FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
 # more details.
 
-PHONY += _toolinst_ _toolinst_libxpmem _toolinst_xpmem_h
+header-y += xpmem/
+header-y += xpmem.h
 
 major := 0
 minor := 0
 soname := libxpmem.so.$(major)
-libxpmem := libxpmem.so.$(major).$(minor)
-libxpmem_installpath := /usr/lib
-libobjs := $(obj)/libxpmem.o
-xpmem_h_installpath := /usr/include
-xpmem_h_srcpath := include/uapi/xpmem
-xpmem_rules_installname := 56-xpmem.rules
-xpmem_rules_installpath := /etc/udev/rules.d
 
-$(obj)/$(libxpmem): $(libobjs)
-	$(CC) -shared -Wl,-soname,$(soname) -o $@ $^
+hostprogs := libxpmem
+scriptprogs-y := 56-xpmem.rules libxpmem.link xpmem.link
+libxpmem-objs := libxpmem.o
 
-$(libobjs): $(obj)/%.o: $(src)/%.c
-	(mkdir -p $(obj); $(CC) $(CFLAGS) -I./include/uapi/xpmem -fPIC -Wall -c $< -o $@)
+libxpmem_installname := libxpmem.so.$(major).$(minor)
+libxpmem_installpath := /usr/lib64
+libxpmem.link_target := libxpmem.so.$(major).$(minor)
+libxpmem.link_installpath := /usr/lib64
+libxpmem.link_installname := libxpmem.so
+56-xpmem.rules_installname := 56-xpmem.rules
+56-xpmem.rules_installpath := /etc/udev/rules.d
+xpmem.link_installname := xpmem.h
+xpmem.link_installpath := /usr/include
+xpmem.link_target := /usr/src/x$(KERNELRELEASE)/include/linux/mos.h
 
-quiet_cmd_lib_install = INSTALL $(5)
-      cmd_lib_install = mkdir -p $(3); cp $(2) $(3)/$(4)
+HOSTLDLIBS_libxpmem := -shared -Wl,-soname,$(soname)
+HOSTCFLAGS_libxpmem.o := -fPIC -I./include/uapi/xpmem
 
-_toolinst_libxpmem: $(obj)/$(libxpmem)
-	$(call cmd,lib_install,$<,$(INSTALL_MOD_PATH)/$(libxpmem_installpath),$(notdir $<),$(libxpmem_installpath)/$(notdir $<))
-
-_toolinst_xpmem_h: $(xpmem_h_srcpath)/xpmem.h
-	$(call cmd,lib_install,$<,$(INSTALL_MOD_PATH)/$(xpmem_h_installpath),$(notdir $<),$(xpmem_h_installpath)/$(notdir $<))
-
-_toolinst_xpmem_rules: $(obj)/$(xpmem_rules_installname)
-	$(call cmd,lib_install,$<,$(INSTALL_MOD_PATH)/$(xpmem_rules_installpath),$(notdir $<),$(xpmem_rules_installpath)/$(notdir $<))
-
-_toolinst_: _toolinst_libxpmem _toolinst_xpmem_h _toolinst_xpmem_rules
+include $(src)/../Makefile.tool

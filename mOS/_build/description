@@ -1,0 +1,6 @@
+
+=== kernel-mOS ===
+Kernel with multi-operating system support
+
+This kernel is identical to the default kernel, but is configured to
+support mOS.
