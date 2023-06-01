@@ -1,0 +1,9 @@
+
+%if "%build_flavor" == "mOS"
+# The mOS flavor requires level-zero development and RT libraries.
+# Install the repository at
+# https://mirrorcache-us.opensuse.org/repositories/devel:/libraries:/c_c++/15.4/devel:libraries:c_c++.repo
+BuildRequires: level-zero-devel
+Requires: level-zero
+%endif
+

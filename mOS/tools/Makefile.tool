@@ -20,12 +20,18 @@ tools := $(hostprogs) $(scriptprogs-y)
 quiet_cmd_tool_install = INSTALL $(5)
       cmd_tool_install = mkdir -p $(3); cp $(2) $(3)/$(4)
 
+quiet_cmd_tool_symlink = SYMLINK $(5)
+      cmd_tool_symlink = mkdir -p $(3); ln -sf $(6) $(3)/$(4)
+
 _toolinst_: $(tools:%=%_toolinst_)
 
 _tool_path = $(if $($*_installpath),$(INSTALL_MOD_PATH)/$($*_installpath),$(MODLIB))
 _tool_name = $(if $($*_installname),$($*_installname),$*)
 _tool_prnt = $(if $($*_installpath),$($*_installpath)/)$(_tool_name)
+_tool_cmd = $(if $($*_target),tool_symlink,tool_install)
+_tool_target = $(if $($*_target),$($*_installname),$*)
 $(tools:%=%_toolinst_): %_toolinst_: $(obj)/%
-	$(call cmd,tool_install,$<,$(_tool_path),$(_tool_name),$(_tool_prnt))
+	$(call cmd,$(_tool_cmd),$<,$(_tool_path),$(_tool_name),$(_tool_prnt),$(_tool_target))
 
 PHONY += _toolinst_ $(tools:%=%_toolinst_)
+

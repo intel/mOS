@@ -1,0 +1,53 @@
+
+%if "%build_flavor" == "mOS"
+%global mostools mOS-tools
+
+%package -n %{mostools}
+Summary: Tools package for Linux/mOS %version-%source_rel kernel
+License: GPL
+URL: https://github.com/intel/mos
+Group: System Environment/Kernel
+AutoReqProv: no
+Provides: %NAME = %version-%source_rel
+Requires: %name = %version-%source_rel
+%description -n %{mostools}
+This package provides tools necessary to use mOS features in
+the %version-%source_rel kernel package.
+
+%files -n %{mostools}
+%defattr (-, root, root)
+/etc/udev/rules.d/02-mos.rules
+/etc/udev/rules.d/56-xpmem.rules
+/usr/bin/lwkctl
+/usr/bin/lwkreset
+/usr/bin/mosview
+/usr/bin/yod
+/usr/lib64/libxpmem.so.0.0
+/usr/share/man/man1/lwkctl.1.gz
+/usr/share/man/man1/lwkreset.1.gz
+/usr/share/man/man1/yod.1.gz
+/usr/lib64/libmos.so.1.0
+/usr/share/man/man2/mos_get_addr_info.2.gz
+
+%package -n %{mostools}-devel
+Summary: Linux/mOS kernel development tools
+License: GPL
+URL: https://github.com/intel/mos
+Group: System Environment/Kernel
+AutoReqProv: no
+Provides: %NAME = %version-%source_rel
+Requires: %mostools = %version-%source_rel
+Requires: %name-devel = %version-%source_rel
+Requires: kernel-devel = %version-%source_rel
+%description -n %{mostools}-devel
+Development files to compile modules on an mOS-enabled kernel.
+
+%files -n %{mostools}-devel
+%defattr (-, root, root)
+/usr/lib64/libmos.so
+/usr/lib64/libxpmem.so
+/usr/include/xpmem.h
+/usr/include/mos.h
+/usr/include/uti.h
+%endif
+
