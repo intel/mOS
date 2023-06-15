@@ -29,7 +29,7 @@ _tool_path = $(if $($*_installpath),$(INSTALL_MOD_PATH)/$($*_installpath),$(MODL
 _tool_name = $(if $($*_installname),$($*_installname),$*)
 _tool_prnt = $(if $($*_installpath),$($*_installpath)/)$(_tool_name)
 _tool_cmd = $(if $($*_target),tool_symlink,tool_install)
-_tool_target = $(if $($*_target),$($*_installname),$*)
+_tool_target = $(if $($*_target),$($*_target),$*)
 $(tools:%=%_toolinst_): %_toolinst_: $(obj)/%
 	$(call cmd,$(_tool_cmd),$<,$(_tool_path),$(_tool_name),$(_tool_prnt),$(_tool_target))
 
