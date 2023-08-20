@@ -53,7 +53,7 @@
 /* USB3_INT_REG */
 #define CLK_125_REQ	BIT(29)
 #define LPM_CLK_REQ	BIT(28)
-#define DEVU3_WAEKUP_EN	BIT(14)
+#define DEVU3_WAKEUP_EN	BIT(14)
 #define OTG_WAKEUP_EN	BIT(12)
 #define DEV_INT_EN	(3 << 8) /* DEV INT b9:8 */
 #define HOST_INT1_EN	(1 << 0) /* HOST INT b7:0 */
@@ -240,9 +240,9 @@ static void cdns3_set_wakeup(struct cdns_imx *data, bool enable)
 
 	value = cdns_imx_readl(data, USB3_INT_REG);
 	if (enable)
-		value |= OTG_WAKEUP_EN | DEVU3_WAEKUP_EN;
+		value |= OTG_WAKEUP_EN | DEVU3_WAKEUP_EN;
 	else
-		value &= ~(OTG_WAKEUP_EN | DEVU3_WAEKUP_EN);
+		value &= ~(OTG_WAKEUP_EN | DEVU3_WAKEUP_EN);
 
 	cdns_imx_writel(data, USB3_INT_REG, value);
 }
