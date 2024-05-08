@@ -106,7 +106,7 @@ cd ${BUILD_DIR}
 mv SOURCES/*.spec SPECS/
 # Build the RPMs
 echo "### Building kernel-syms" && sleep 3
-if ! rpmbuild -bb --define 'opensuse_bs 1' SPECS/kernel-syms.spec; then
+if ! rpmbuild -bb --define 'opensuse_bs 1' --define 'is_ptf 1' SPECS/kernel-syms.spec; then
     echo "error: Could not build kernel-syms"
     exit 1
 fi
