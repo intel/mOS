@@ -91,7 +91,7 @@ sed -i "/^%define do_vanilla/c\%define do_vanilla 0" rpm/kernel-source.spec.in
 
 # Generate the new kernel source tarball and specfiles
 rm -f kernel-source/*
-./scripts/tar-up.sh -a x86_64 -f mOS -rs "${RELEASE}_mOS_$MOS_HEAD"
+./scripts/tar-up.sh -a x86_64 -f mOS -rs "${RELEASE}.${MOS_HEAD}"
 
 # Prepare the local RPM build tree
 # Get the current build directory
