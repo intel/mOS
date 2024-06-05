@@ -3252,6 +3252,7 @@ static int select_fallback_rq(int cpu, struct task_struct *p)
 				    (strncmp(p->comm, "cpuhp", 5)) &&
 				    (strncmp(p->comm, "ksoftirqd", 9)) &&
 				    (strncmp(p->comm, "migration", 9)) &&
+				    (strncmp(p->comm, "idle_inject", 11)) &&
 				    (strncmp(p->comm, "mos_idle", 8)))
 					continue;
 				goto out;

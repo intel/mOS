@@ -3063,6 +3063,7 @@ void assimilate_task_mos(struct rq *rq, struct task_struct *p)
 	 */
 	if ((strncmp(p->comm, "ksoftirqd", 9)) &&
 	    (strncmp(p->comm, "cpuhp", 5)) &&
+	    (strncmp(p->comm, "idle_inject", 11)) &&
 	    (strncmp(p->comm, "mos_idle", 8))) {
 		/* Un-expected task. Warn and continue with assimilation */
 		mos_ras(MOS_SCHEDULER_WARNING,
