@@ -1803,6 +1803,7 @@ static int mos_idle_main(void *data)
 	}
 	/* Exiting. Remove special idle thread treatment to allow normal exit */
 	current->mos.thread_type  = mos_thread_type_guest;
+	sched_preempt_enable_no_resched();
 	return 0;
 }
 
@@ -2656,7 +2657,6 @@ int mos_sched_deactivate(cpumask_var_t back_to_linux)
 	struct mos_rq *mos_rq;
 	struct task_struct *idle_task;
 
-	preempt_disable();
 	for_each_cpu(adios, back_to_linux) {
 		rq = cpu_rq(adios);
 		mos_rq = &rq->mos;
@@ -2675,12 +2675,12 @@ int mos_sched_deactivate(cpumask_var_t back_to_linux)
 			/* Kick idle thread to re-evaluate rq->lwkcpu */
 			resched_cpu(adios);
 			/* Do not continue until we are sure it exited */
+
 			kthread_stop(idle_task);
 			mos_rq->idle = NULL;
 			mos_rq->idle_pid = 0;
 		}
 	}
-	preempt_enable();
 
 	return 0;
 }
