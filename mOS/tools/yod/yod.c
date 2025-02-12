@@ -1241,6 +1241,8 @@ static void n_gpus_resolver(lwk_request_t *request)
 
 	if (request->ze_affinity_on_entry && !request->explicit_gpus_request) {
 		use_original_gpu_affinity(request);
+	} else if (strlen(request->ze_affinity_request) > 0 && request->explicit_gpus_request) {
+	        yod_ze_mask_to_mos_gpuset(request->ze_affinity_request, request->lwkgpus_request);
 	} else {
 		gpu_set = mos_cpuset_alloc_validate();
 		yod_get_designated_lwkgpus(gpu_set);
@@ -1605,9 +1607,12 @@ static int _yodopt_lwk_gpus(const char *opt, bool device)
 	double fraction;
 	int tiles_per_gpu_device = yod_get_num_tiles_per_gpu();
 	int designated_gpus = yod_get_num_designated_lwkgpus();
+	int zegpu, zetile;
 
 	if (!designated_gpus)
 		yod_abort(-EINVAL, "Requesting GPUs but non available.");
+
+	lwk_req.ze_affinity_request[0] = 0;
 
 	yodopt_check_for_gpus_already_specified();
 
@@ -1632,6 +1637,9 @@ static int _yodopt_lwk_gpus(const char *opt, bool device)
 			if (!requested_lwk_gpus)
 				requested_lwk_gpus = 1;
 		}
+	} else if (sscanf(opt, "%d.%d", &zegpu, &zetile) == 2) {
+		snprintf(lwk_req.ze_affinity_request, sizeof(lwk_req.ze_affinity_request), "%d.%d", zegpu, zetile);
+		requested_lwk_gpus = 1;
 	} else if (yodopt_parse_integer(opt, &ngpus, 1, INT_MAX) == 0) {
 		if (device)
 			requested_lwk_gpu_devices = ngpus;
