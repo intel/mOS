@@ -73,6 +73,7 @@ static const char * const MAP_TYPES[] = {
 	"tile",
 	"node",
 	"mem_group",
+	"gpu"
 };
 
 const char * const PAGE_TYPES[] = {
