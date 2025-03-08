@@ -1587,6 +1587,9 @@ static void gpu_search_and_setup(void)
 	if ((rc = setenv("ZE_ENABLE_PCI_ID_DEVICE_ORDER", "1", 1)))
 		lwkctl_abort(-1, "Call to setenv ZE_ENABLE_PCI_ID_DEVICE_ORDER failed. errno=%d", errno);
 
+	if ((setenv("ZE_FLAT_DEVICE_HIERARCHY", "COMPOSITE", 1)))
+		lwkctl_abort(-1, "Call to setenv ZE_FLAT_DEVICE_HIERARCHY failed. errno=%d", errno);
+
 	/* Initialize the OneAPI LevelZero environment */
 	if ((result = zeInit(0))) {
 		LC_LOG(LC_WARN, "No GPU drivers detected (%08x). No GPUs will be managed by the LWK.", result);
@@ -1636,6 +1639,8 @@ static void gpu_search_and_setup(void)
 					subDeviceCount, MOS_MAX_GPU_TILES);
 		if (astep)
 			subDeviceCount = 1;
+
+		LC_LOG(LC_DEBUG, "GPU: Dev=%u each Sub-dev=%u", deviceCount, subDeviceCount);
 
 		found_gpu_driver = true;
 		nlist_size = ulist_size = deviceCount * MOS_MAX_TILES_PER_GPU * sizeof("XX,") + 1;

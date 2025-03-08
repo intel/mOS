@@ -301,6 +301,9 @@ static int mos_request_lwk_gpus(mos_cpuset_t *gpus, char *new_ze_affinity)
 	if ((setenv("ZE_ENABLE_PCI_ID_DEVICE_ORDER", "1", 1)))
 		yod_abort(-1, "Error setting ZE_ENABLE_PCI_ID_DEVICE_ORDER=1. errno=%d", errno);
 
+	if ((setenv("ZE_FLAT_DEVICE_HIERARCHY", "COMPOSITE", 1)))
+		yod_abort(-1, "Error setting ZE_FLAT_DEVICE_HIERARCHY=COMPOSITE. errno=%d", errno);
+
 	if ((setenv("ZE_AFFINITY_MASK", new_ze_affinity, 1)))
 		yod_abort(-1, "Error setting ZE_AFFINITY_MASK=%s. errorno=%d", new_ze_affinity, errno);
 
