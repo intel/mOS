@@ -99,7 +99,8 @@ const char * const MEMPOLICY_TYPES[] = {
 	"normal",
 	"random",
 	"interleave",
-	"interleave_random"
+	"interleave_random",
+	"disabled"
 };
 
 /*

@@ -1024,6 +1024,12 @@ int lwk_mm_set_mempolicy_info(const char *buff, size_t size)
 			LWKMEM_WARN("%s: Invalid policy type %lld, set normal",
 				    lwk_vmrs_name[vmr], *ptr);
 		}
+
+		/* Special case for per-scope toggling */
+		if ((int) type == LWK_MEMPOL_DISABLED) {
+			policy->disabled = true;
+		}
+
 		ptr++;
 
 		/* Store the node list interleave ratio */
