@@ -224,7 +224,7 @@ the default setting is \fB'normal'\fP
 .TP
 .B --memtype-ratio \fIscope:ratio\fP
 Sets the ratio of page allocations across types of memory.  In certain
-application environments, higher overall bandwith than what would be achievable
+application environments, higher overall bandwidth than what would be achievable
 by using high bandwidth memory (HBM) alone may be possible when both HBM and DDR
 data paths are utilized in parallel. Use with the \fBinterleave\fP mempolicy.
 The granularity of the memory type interleaving can be controlled using the
