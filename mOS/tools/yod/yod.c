@@ -2028,7 +2028,7 @@ static void yodopt_maxpage(const char *opt)
 
 		if (pref_s)
 			yod_abort(-EINVAL,
-				  "Invalid maxpage: Extraneous characters afer %s:%s",
+				  "Invalid maxpage: Extraneous characters after %s:%s",
 				  scope_s,
 				  maxpg_s);
 
@@ -2085,7 +2085,7 @@ static void yodopt_pagefault_level(const char *opt)
 
 		if (pref_s)
 			yod_abort(-EINVAL,
-				  "Invalid pagefault level: Extraneous characters afer %s:%s",
+				  "Invalid pagefault level: Extraneous characters after %s:%s",
 				  scope_s,
 				  pf_level_s);
 
@@ -2181,7 +2181,7 @@ static void yodopt_mempolicy_type(const char *opt)
 
 		if (pref_s)
 			yod_abort(-EINVAL,
-				  "Invalid memory policy type: Extraneous characters afer %s:%s",
+				  "Invalid memory policy type: Extraneous characters after %s:%s",
 				  scope_s,
 				  policy_type_s);
 
@@ -2256,7 +2256,7 @@ static void yodopt_memory_preference(const char *opt)
 
 		if (pref_s)
 			yod_abort(-EINVAL,
-				  "Invalid preference: Extraneous characters afer %s:%s:%s\n",
+				  "Invalid preference: Extraneous characters after %s:%s:%s\n",
 				  scope_s,
 				  threshold_s,
 				  order_s);
