@@ -762,31 +762,6 @@ static int mos_get_numa_nodes_online(mos_cpuset_t *set)
 }
 
 static int lock_fd = -1;
-
-static int mos_get_local_rank(int *local_rank, int *local_n_ranks)
-{
-	char *local_rank_str, *local_n_ranks_str;
-
-	local_rank_str = getenv("MPI_LOCALRANKID");
-	local_n_ranks_str = getenv("MPI_LOCALNRANKS");
-
-	if (!local_rank_str || !local_n_ranks_str)
-		return -1;
-
-	*local_rank = strtol(local_rank_str, &local_rank_str, 10);
-	*local_n_ranks = strtol(local_n_ranks_str, &local_n_ranks_str, 10);
-
-	if (*local_rank_str || *local_n_ranks_str || *local_rank < 0 ||
-	    *local_n_ranks <= 0) {
-		YOD_LOG(YOD_WARN,
-			"Bad value for MPI_LOCALRANKID=%s or MPI_LOCALNRANKS=%s",
-			getenv("MPI_LOCALRANKID"), getenv("MPI_LOCALNRANKS"));
-		return -1;
-	}
-
-	return 0;
-}
-
 static int lock_active;
 
 static int mos_sysfs_lock(struct lock_options_t *opts)
@@ -920,7 +895,7 @@ static int mos_combo_lock(struct lock_options_t *opts)
 	/* If we cannot determine local rank and count, of if rank
 	 * sequencing is disabled, defer to the sysfs lock.
 	 */
-	if ((mos_get_local_rank(&local_rank, &local_n_ranks) < 0) ||
+	if ((yod_get_local_rank(&local_rank, &local_n_ranks) < 0) ||
 	    opts->layout == YOD_RANK_DISABLE)
 		return mos_sysfs_lock(opts);
 
@@ -1004,7 +979,7 @@ static int mos_combo_unlock(struct lock_options_t *opts)
 	/* Avoid recursive unlocks */
 	lock_active = 0;
 
-	if ((mos_get_local_rank(&local_rank, &local_n_ranks) < 0) ||
+	if ((yod_get_local_rank(&local_rank, &local_n_ranks) < 0) ||
 	    opts->layout == YOD_RANK_DISABLE)
 		return mos_sysfs_unlock(opts);
 

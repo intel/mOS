@@ -73,6 +73,7 @@ static const char * const MAP_TYPES[] = {
 	"tile",
 	"node",
 	"mem_group",
+	"gpu"
 };
 
 const char * const PAGE_TYPES[] = {
@@ -98,7 +99,8 @@ const char * const MEMPOLICY_TYPES[] = {
 	"normal",
 	"random",
 	"interleave",
-	"interleave_random"
+	"interleave_random",
+	"disabled"
 };
 
 /*
@@ -129,6 +131,7 @@ static struct map_type_t *yod_maps[YOD_NUM_MAP_ELEMS];
 static bool explicit_maxpage[YOD_NUM_MEM_SCOPES];
 
 int yod_verbosity = YOD_CRIT;
+int mpi_localrank = -1;
 int mpi_localnranks = 0;
 
 extern struct yod_plugin mos_plugin;
@@ -324,7 +327,7 @@ int yod_get_num_tiles_per_gpu()
 	}
 	mos_cpuset_free(temp);
 
-	YOD_LOG(YOD_WARN, "(<) %s", __func__);
+	YOD_LOG(YOD_GORY, "(<) %s tiles=%d", __func__, tile_count);
 	return tile_count;
 }
 
@@ -1239,6 +1242,8 @@ static void n_gpus_resolver(lwk_request_t *request)
 
 	if (request->ze_affinity_on_entry && !request->explicit_gpus_request) {
 		use_original_gpu_affinity(request);
+	} else if (strlen(request->ze_affinity_request) > 0 && request->explicit_gpus_request) {
+	        yod_ze_mask_to_mos_gpuset(request->ze_affinity_request, request->lwkgpus_request);
 	} else {
 		gpu_set = mos_cpuset_alloc_validate();
 		yod_get_designated_lwkgpus(gpu_set);
@@ -1576,7 +1581,7 @@ static int yodopt_lwk_cores(const char *opt)
 		lwk_req.lwkcpus_resolver = all_available_lwk_cores_resolver;
 	} else if (strcmp("MPI", opt) == 0) {
 		if (!mpi_localnranks)
-			yod_abort(-EINVAL, "Invalid MPI_LOCALNRANKS value %u.", mpi_localnranks);
+			yod_abort(-EINVAL, "Missing or invalid MPI rank information in MPI mode: %u.", mpi_localnranks);
 		fraction = 1.0 / (double)mpi_localnranks;
 
 		requested_lwk_cores = fraction *
@@ -1603,9 +1608,12 @@ static int _yodopt_lwk_gpus(const char *opt, bool device)
 	double fraction;
 	int tiles_per_gpu_device = yod_get_num_tiles_per_gpu();
 	int designated_gpus = yod_get_num_designated_lwkgpus();
+	int zegpu, zetile;
 
 	if (!designated_gpus)
 		yod_abort(-EINVAL, "Requesting GPUs but non available.");
+
+	lwk_req.ze_affinity_request[0] = 0;
 
 	yodopt_check_for_gpus_already_specified();
 
@@ -1619,7 +1627,7 @@ static int _yodopt_lwk_gpus(const char *opt, bool device)
 	} else if (strcmp("MPI", opt) == 0) {
 
 		if (!mpi_localnranks)
-			yod_abort(-EINVAL, "Invalid MPI_LOCALNRANKS value %u.", mpi_localnranks);
+			yod_abort(-EINVAL, "Missing or invalid MPI rank information in MPI mode: %u.", mpi_localnranks);
 		fraction = 1.0 / (double)mpi_localnranks;
 		if (device) {
 			requested_lwk_gpu_devices = fraction * (designated_gpus / tiles_per_gpu_device);
@@ -1630,6 +1638,9 @@ static int _yodopt_lwk_gpus(const char *opt, bool device)
 			if (!requested_lwk_gpus)
 				requested_lwk_gpus = 1;
 		}
+	} else if (sscanf(opt, "%d.%d", &zegpu, &zetile) == 2) {
+		snprintf(lwk_req.ze_affinity_request, sizeof(lwk_req.ze_affinity_request), "%d.%d", zegpu, zetile);
+		requested_lwk_gpus = 1;
 	} else if (yodopt_parse_integer(opt, &ngpus, 1, INT_MAX) == 0) {
 		if (device)
 			requested_lwk_gpu_devices = ngpus;
@@ -1690,7 +1701,7 @@ static int yodopt_mem(const char *opt)
 		unsigned long size;
 
 		if (!mpi_localnranks)
-			yod_abort(-EINVAL, "Invalid MPI_LOCALNRANKS value %u.", mpi_localnranks);
+			yod_abort(-EINVAL, "Missing or invalid MPI rank information in MPI mode: %u.", mpi_localnranks);
 		fraction = 1.0 / (double)mpi_localnranks;
 		size = yod_get_lwkmem(YOD_DESIGNATED);
 		requested_lwk_mem = (unsigned long)(fraction * size);
@@ -1782,7 +1793,7 @@ static int yodopt_lwk_resources(const char *opt)
 		    yodopt_parse_rational(opt, &fraction, 0.0, 1.0) == 0)) {
 		if (fraction == 0.0) {
 			if (!mpi_localnranks)
-				yod_abort(-EINVAL, "Invalid MPI_LOCALNRANKS value %u.", mpi_localnranks);
+				yod_abort(-EINVAL, "Missing or invalid MPI rank information in MPI mode: %u.", mpi_localnranks);
 			fraction = 1.0 / (double)mpi_localnranks;
 		}
 		requested_lwk_cores = fraction *
@@ -2352,7 +2363,7 @@ static void yodopt_mosview(const char *opt)
 static void yodopt_process_resource_file(const char *opt)
 {
 	FILE *fptr;
-	char *line = 0, *tline, *toks[64], *tok, *this_rank;
+	char *line = 0, *tline, *toks[64], *tok, this_rank[64];
 	ssize_t rc;
 	size_t line_size = 0;
 	size_t i, j, n_toks;
@@ -2372,10 +2383,10 @@ static void yodopt_process_resource_file(const char *opt)
 		{ "-g", "--gpu-tiles", yodopt_lwk_gpu_tiles},
 	};
 
-	this_rank = getenv("MPI_LOCALRANKID");
+	if (!mpi_localnranks || mpi_localrank < 0)
+	        yod_abort(-EINVAL, "The -R file: option requires that MPI local rank be available.");
 
-	if (!this_rank)
-		yod_abort(-EINVAL, "The -R file: option requires that MPI_LOCALRANKID be set.");
+	snprintf(this_rank, sizeof(this_rank), "%d", mpi_localrank);
 
 	fptr = fopen(opt, "r");
 
@@ -3046,11 +3057,50 @@ static void  set_oneccl_worker_affinity(void)
 	mos_cpuset_free(worker_cpus);
 }
 
+static const char *LOCAL_RANKID[] = { "MPI_LOCALRANKID", "PALS_LOCAL_RANKID" };
+static const char *LOCAL_NRANKS[] = { "MPI_LOCALNRANKS", "PALS_LOCAL_SIZE" };
+
+int yod_get_local_rank(int *local_rank, int *local_n_ranks)
+{
+	char *local_rank_str, *local_n_ranks_str;
+	size_t i;
+
+	*local_rank = -1;
+	*local_n_ranks = 0;
+
+	for (i = 0; i < ARRAY_SIZE(LOCAL_RANKID); i++) {
+	    local_rank_str = 0;
+	    local_rank_str = getenv(LOCAL_RANKID[i]);
+	    local_n_ranks_str = getenv(LOCAL_NRANKS[i]);
+
+	    if (local_rank_str)
+	      break;
+	}
+
+	if (!local_rank_str || !local_n_ranks_str) {
+	  YOD_LOG(YOD_DEBUG, "No MPI rank environment variables found.");
+	  return -1;
+	}
+
+	*local_rank = strtol(local_rank_str, &local_rank_str, 10);
+	*local_n_ranks = strtol(local_n_ranks_str, &local_n_ranks_str, 10);
+
+	if (*local_rank_str || *local_n_ranks_str || *local_rank < 0 || *local_n_ranks <= 0) {
+		YOD_LOG(YOD_WARN,
+			"Bad value for local rank ID (%s) or local rank count (%s)",
+			local_rank_str, local_n_ranks_str);
+		return -1;
+	}
+
+	YOD_LOG(YOD_DEBUG, "(<) mos_get_local_rank rank=%d local-nranks=%d", *local_rank, *local_n_ranks);
+
+	return 0;
+}
 
 int main(int argc, char **argv)
 {
 
-	char *verbose_env, *tst_plugin, *options, *mpi_env;
+        char *verbose_env, *tst_plugin, *options;
 	int rc;
 	char *timeout_str;
 	size_t total_mem;
@@ -3060,9 +3110,7 @@ int main(int argc, char **argv)
 	if (verbose_env)
 		yod_verbosity = atoi(verbose_env);
 
-	mpi_env = getenv("MPI_LOCALNRANKS");
-	if (mpi_env)
-		mpi_localnranks = atoi(mpi_env);
+	yod_get_local_rank(&mpi_localrank, &mpi_localnranks);
 
 	tst_plugin = getenv("YOD_TST_PLUGIN");
 	if (tst_plugin)

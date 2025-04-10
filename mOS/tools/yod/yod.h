@@ -120,6 +120,7 @@ enum policy_types_t {
 	MEMPOLICY_RANDOM,
 	MEMPOLICY_INTERLEAVE,
 	MEMPOLICY_INTERLEAVE_RANDOM,
+	MEMPOLICY_DISABLED,
 	MEMPOLICY_UNKNOWN
 };
 
@@ -519,4 +520,5 @@ extern void yod_get_designated_lwkgpus(mos_cpuset_t *gpus);
 extern int yod_get_num_tiles_per_gpu(void);
 extern int yod_strtol(char *in_str, long int *out_int);
 extern void yod_ze_mask_to_mos_gpuset(char *ze_mask, mos_cpuset_t *gpuset);
+extern int yod_get_local_rank(int *local_rank, int *local_n_ranks);
 #endif

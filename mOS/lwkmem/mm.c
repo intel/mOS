@@ -84,42 +84,9 @@ static unsigned long lwk_mm_get_unmapped_area(struct file *file,
 					      unsigned long pgoff,
 					      unsigned long flags)
 {
-	unsigned long rval, size;
-	unsigned long hint;
-	struct lwk_mm *lwk_mm = curr_lwk_mm();
 
-	if (len < PMD_SIZE || flags & (MAP_FIXED | MAP_FIXED_NOREPLACE))
-		goto fallback;
-
-	if (!lwk_mm)
-		goto fallback;
-
-	/* Do nothing if the LWK VMR is disabled */
-	if ((flags & MAP_TSTACK_FLAGS) &&
-	    lwk_mm->policy[LWK_VMR_TSTACK].disabled)
-		goto fallback;
-	else if (lwk_mm->policy[LWK_VMR_ANON_PRIVATE].disabled)
-		goto fallback;
-
-	if (len >= PUD_SIZE)
-		size = PUD_SIZE;
-	else
-		size = PMD_SIZE;
-
-	/*
-	 * Ignore address hint and prioritize alignment if address hint
-	 * unaligned.
-	 */
-	hint = addr && IS_ALIGNED(addr, size) ? addr : 0;
-	rval = current->mm->get_unmapped_area(file, hint, len + size,
-					      pgoff, flags);
-	if (IS_ERR_VALUE(rval))
-		goto fallback;
-
-	return ALIGN(rval, size);
-
-fallback:
-	return current->mm->get_unmapped_area(file, addr, len, pgoff, flags);
+    /* Fallback: Standard allocation */
+    return current->mm->get_unmapped_area(file, addr, len, pgoff, flags);
 }
 
 static int lwk_mm_alloc_pages_vma(struct vm_area_struct *vma,
@@ -1024,6 +991,12 @@ int lwk_mm_set_mempolicy_info(const char *buff, size_t size)
 			LWKMEM_WARN("%s: Invalid policy type %lld, set normal",
 				    lwk_vmrs_name[vmr], *ptr);
 		}
+
+		/* Special case for per-scope toggling */
+		if ((int) type == LWK_MEMPOL_DISABLED) {
+			policy->disabled = true;
+		}
+
 		ptr++;
 
 		/* Store the node list interleave ratio */

@@ -22,7 +22,9 @@
 #include <ctype.h>
 #include <sched.h>
 #include <limits.h>
+#ifndef CONFIG_NR_CPUS
 #include "../../../include/generated/autoconf.h"
+#endif
 #include "../include/mos_cpuset.h"
 #include "../include/mos_debug.h"
 
