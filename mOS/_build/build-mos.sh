@@ -60,7 +60,7 @@ MOS_HEAD=$(git rev-parse --short HEAD)
 git -p diff $KERNEL_HEAD -- ':!*mOS/_build*' > $KSRCDIR/patches.kabi/mOS.patch
 
 # Copy the mOS kernel config as a new configuration flavor
-cat $RUNDIR/config.mos > $KSRCDIR/config/x86_64/mOS
+cat $MOSDIR/config.mos > $KSRCDIR/config/x86_64/mOS
 
 # Update the build configuration in kernel-source
 cd $KSRCDIR
